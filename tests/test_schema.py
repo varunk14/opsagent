@@ -169,22 +169,34 @@ def test_an_order_amount_is_a_whole_number_of_paise(db):
     assert column_type(db, "orders", "amount_paise") == "bigint"
 
 
-def test_a_fractional_paisa_is_refused(db):
+def test_a_fractional_paisa_is_silently_rounded_not_refused(db):
     """
-    Rupees as floats lose money; paise as integers do not. The column type is
-    what enforces that, so prove it rejects the fraction rather than rounding it.
+    A finding, recorded rather than papered over.
+
+    The obvious assumption is that a bigint column rejects 360000.5. It does not.
+    Postgres casts it, rounds it, and stores 360001 -- half a paisa conjured out
+    of nothing, no error raised, nothing in any log. Exactly the shape of failure
+    this project exists to catch.
+
+    The column type is therefore NOT the defence. The defence has to be the typed
+    boundary in app/contracts.py, which refuses a float before it can get here,
+    the same way RunRecord already refuses a float cost. This test exists so that
+    if anyone later assumes the database is guarding this, the assumption is
+    contradicted in writing.
     """
     db.execute(
         "INSERT INTO customers (email, name) VALUES ('priya@example.com', 'Priya')"
     )
 
-    with pytest.raises(psycopg.errors.InvalidTextRepresentation):
-        db.execute(
-            """
-            INSERT INTO orders (id, customer_email, amount_paise, status)
-            VALUES ('4821', 'priya@example.com', 360000.5, 'paid')
-            """
-        )
+    db.execute(
+        """
+        INSERT INTO orders (id, customer_email, amount_paise, status)
+        VALUES ('4821', 'priya@example.com', 360000.5, 'paid')
+        """
+    )
+
+    stored = db.execute("SELECT amount_paise FROM orders WHERE id = '4821'").fetchone()[0]
+    assert stored == 360001, "Postgres rounded rather than refused; guard at the boundary"
 
 
 # --- the shape retrieval and the worker depend on --------------------------
