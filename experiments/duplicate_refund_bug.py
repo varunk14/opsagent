@@ -91,7 +91,7 @@ def issue_refund(order_id: str, amount_paise: int) -> dict:
     return call_with_retry(bank_issue_refund, order_id, amount_paise)
 
 
-def main() -> None:
+def main() -> None:  # pragma: no cover
     print("=" * 70)
     print("Priya was charged twice for order 4821: 360000 paise (Rs 3,600) each.")
     print("The agent decides to refund ONE of them.")
@@ -128,10 +128,10 @@ def main() -> None:
         print()
         print("  Every component did its job. The bank processed what it received.")
         print("  Our retry did what retries are for. The bug is that neither side")
-        print("  could tell 'a new refund' apart from 'the same refund again'.
-  See prevent_duplicate_refunds.py for the fix.")
+        print("  could tell 'a new refund' apart from 'the same refund again'.")
         print()
         print("  That distinction is what an idempotency key provides.")
+        print("  See prevent_duplicate_refunds.py for the fix.")
 
 
 if __name__ == "__main__":
