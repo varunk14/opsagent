@@ -1,0 +1,24 @@
+# Local development stack. Everything here is open source and runs offline.
+# One service for now; Langfuse and ClickHouse arrive when tracing does.
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: opsagent-db
+    environment:
+      POSTGRES_USER: opsagent
+      POSTGRES_PASSWORD: dev
+      POSTGRES_DB: opsagent
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations/000_bootstrap.sql:/docker-entrypoint-initdb.d/000_bootstrap.sql:ro
+    healthcheck:
+      # Compose waits on this, so tests never race a half-started database.
+      test: ["CMD-SHELL", "pg_isready -U opsagent -d opsagent"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  pgdata:
