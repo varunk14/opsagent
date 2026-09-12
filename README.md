@@ -30,6 +30,19 @@ are written to fail first, because the failure is the part worth seeing.
 | `duplicate_refund_bug.py` | What happens when the payment API times out? | The retry pays the customer twice. Rs 3,600 lost, and no error is raised. |
 | `prevent_duplicate_refunds.py` | How is that fixed? | An idempotency key derived from the operation rather than the attempt. |
 
+## Tests
+
+    uv pip install --python .venv/bin/python pytest pytest-cov
+    .venv/bin/python -m pytest
+
+37 tests, 99% statement coverage, with the run failing below 80%. Network calls
+and interactive drivers are marked `# pragma: no cover`; business logic is not
+excluded.
+
+The tests worth reading first are in `tests/test_refund_idempotency.py`. Two of
+them assert that the *broken* versions are still broken, because a fix is only
+meaningful while the bug it fixes remains demonstrable.
+
 ## Planned
 
 Durable runs on Postgres so work survives a restart, policy retrieval with pgvector, a
