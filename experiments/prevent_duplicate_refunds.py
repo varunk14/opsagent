@@ -94,7 +94,7 @@ def call_with_retry(fn, *args, max_attempts: int = 3, **kwargs):
 # ---------------------------------------------------------------------------
 # A. No key. The bug's behaviour, reproduced for comparison.
 # ---------------------------------------------------------------------------
-def scenario_a() -> None:
+def scenario_a() -> None:  # pragma: no cover
     call_with_retry(bank_issue_refund, "4821", 360_000)
 
 
@@ -111,7 +111,7 @@ def broken_refund_with_key(order_id: str, amount_paise: int) -> dict:
     return bank_issue_refund(order_id, amount_paise, key=key)
 
 
-def scenario_b() -> None:
+def scenario_b() -> None:  # pragma: no cover
     call_with_retry(broken_refund_with_key, "4821", 360_000)
 
 
@@ -124,14 +124,14 @@ def scenario_b() -> None:
 #
 # In the real system this becomes:  f"{run_id}:step_{n}:{tool_name}"
 # ---------------------------------------------------------------------------
-def scenario_c() -> None:
+def scenario_c() -> None:  # pragma: no cover
     run_id, step_no, tool = "run_88", 5, "issue_refund"
     key = f"{run_id}:step_{step_no}:{tool}"     # <-- computed ONCE, from intent
     print(f"      operation key: {key}  (same on every attempt)")
     call_with_retry(bank_issue_refund, "4821", 360_000, key=key)
 
 
-def report() -> int:
+def report() -> int:  # pragma: no cover
     total = sum(e["amount_paise"] for e in BANK_LEDGER)
     print(
         f"\n  ledger: {len(BANK_LEDGER)} refund(s), total Rs {total / 100:,.2f}",
@@ -141,7 +141,7 @@ def report() -> int:
     return total
 
 
-def main() -> None:
+def main() -> None:  # pragma: no cover
     scenarios = [
         ("A. no idempotency key", scenario_a),
         ("B. key generated inside the retry loop (the fake fix)", scenario_b),

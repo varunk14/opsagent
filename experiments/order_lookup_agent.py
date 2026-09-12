@@ -117,7 +117,7 @@ Can you refund one of them? Thanks, Priya
 Work out what happened and what should be done."""
 
 
-def ask_model(prompt: str) -> str:
+def ask_model(prompt: str) -> str:  # pragma: no cover
     body = json.dumps(
         {"model": MODEL, "prompt": prompt, "stream": False, "format": "json"}
     ).encode("utf-8")
@@ -131,7 +131,7 @@ def ask_model(prompt: str) -> str:
         return json.loads(resp.read().decode("utf-8"))["response"]
 
 
-def get_tool_call(prompt: str) -> ToolCall | None:
+def get_tool_call(prompt: str) -> ToolCall | None:  # pragma: no cover
     """Ask for one tool call. On a bad reply, show the model its own error and retry."""
     feedback = ""
     for attempt in range(1, MAX_RETRIES + 1):
@@ -150,7 +150,7 @@ def get_tool_call(prompt: str) -> ToolCall | None:
     return None
 
 
-def main() -> None:
+def main() -> None:  # pragma: no cover
     history: list[str] = []
 
     for step in range(1, MAX_STEPS + 1):

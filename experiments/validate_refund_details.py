@@ -86,7 +86,7 @@ Reply with a JSON object containing exactly these fields:
 """
 
 
-def ask_model(prompt: str) -> str:
+def ask_model(prompt: str) -> str:  # pragma: no cover
     """The same POST as before, with ONE addition: format="json"."""
     body = json.dumps(
         {
@@ -115,7 +115,7 @@ def ask_model(prompt: str) -> str:
 OK, REFUSED, INVALID = "ok", "refused", "invalid"
 
 
-def attempt(n: int) -> str:
+def attempt(n: int) -> str:  # pragma: no cover
     print(f"\n{'=' * 70}\nATTEMPT {n}\n{'=' * 70}")
 
     try:
@@ -162,7 +162,7 @@ def attempt(n: int) -> str:
     return OK
 
 
-def main() -> None:
+def main() -> None:  # pragma: no cover
     runs = int(sys.argv[1]) if len(sys.argv) > 1 else 1
     results = [attempt(i) for i in range(1, runs + 1)]
 

@@ -1,0 +1,9 @@
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q --cov=experiments --cov-report=term-missing --cov-fail-under=80"
+
+[tool.coverage.report]
+# Network calls and interactive CLI drivers are marked `# pragma: no cover`.
+# Business logic is never excluded; it is tested instead.
+exclude_also = ["if __name__ == .__main__.:"]

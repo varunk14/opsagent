@@ -38,7 +38,7 @@ Return JSON with these fields:
 """
 
 
-def ask_model(prompt: str) -> str:
+def ask_model(prompt: str) -> str:  # pragma: no cover
     """POST to Ollama and return the model's raw response text, untouched."""
     body = json.dumps(
         {
@@ -65,7 +65,7 @@ def ask_model(prompt: str) -> str:
     return envelope["response"]
 
 
-def attempt(n: int) -> bool:
+def attempt(n: int) -> bool:  # pragma: no cover
     """One call. Show the raw text, then try to parse it. Return True if it parsed."""
     print(f"\n{'=' * 70}")
     print(f"ATTEMPT {n}")
@@ -115,7 +115,7 @@ def attempt(n: int) -> bool:
     return True
 
 
-def main() -> None:
+def main() -> None:  # pragma: no cover
     runs = int(sys.argv[1]) if len(sys.argv) > 1 else 1
 
     results = [attempt(i) for i in range(1, runs + 1)]
