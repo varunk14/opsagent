@@ -1,7 +1,12 @@
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
-addopts = "-q --cov=experiments --cov-report=term-missing --cov-fail-under=80"
+addopts = "-q --cov=experiments --cov=app --cov-report=term-missing --cov-fail-under=80"
+markers = [
+    # Needs the Postgres from docker-compose.yml. These FAIL rather than skip when
+    # it is absent -- see tests/conftest.py for why.
+    "db: requires a live database",
+]
 
 [tool.coverage.report]
 # Network calls and interactive CLI drivers are marked `# pragma: no cover`.
