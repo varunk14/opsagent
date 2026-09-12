@@ -12,6 +12,7 @@ a normal transaction, so the container runs it once at first start instead.
 """
 
 import os
+import re
 from pathlib import Path
 
 import psycopg
@@ -23,6 +24,11 @@ MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 CONTAINER_BOOTSTRAP = "000_bootstrap.sql"
 
 DEFAULT_DSN = "postgresql://opsagent:dev@localhost:5432/opsagent"
+
+# Files are applied in filename order, which is string order, so `10_x.sql` would
+# run before `9_x.sql`. Rather than trust that nobody ever drops the padding,
+# refuse the name.
+MIGRATION_NAME = re.compile(r"^\d{3}_[a-z0-9_]+\.sql$")
 
 
 def database_url() -> str:
@@ -40,10 +46,24 @@ def connect(dsn: str | None = None) -> psycopg.Connection:
 
 
 def pending_migrations(applied: set[str]) -> list[Path]:
-    """The migration files, in order, that this database has not seen."""
+    """
+    The migration files, in order, that this database has not seen.
+
+    Raises if any filename would sort wrongly. Migrations applied out of sequence
+    fail quietly and leave two environments with different schemas, which is
+    found much later and by someone else.
+    """
+    everything = sorted(MIGRATIONS_DIR.glob("*.sql"))
+    for path in everything:
+        if not MIGRATION_NAME.match(path.name):
+            raise ValueError(
+                f"{path.name} is not named NNN_lower_snake_case.sql, so it would "
+                "not sort into the right position"
+            )
+
     return [
         path
-        for path in sorted(MIGRATIONS_DIR.glob("*.sql"))
+        for path in everything
         if path.name != CONTAINER_BOOTSTRAP and path.name not in applied
     ]
 
@@ -52,6 +72,13 @@ def apply_migrations(connection: psycopg.Connection) -> list[str]:
     """
     Bring `connection`'s database up to date. Returns what it applied, which is
     empty on every run after the first.
+
+    Commits before returning, deliberately. Without that, closing the connection
+    rolls the whole thing back -- psycopg does this silently, with no exception
+    and nothing logged -- while this function still returns a list of filenames
+    that reads exactly like success. The caller is left believing the schema
+    exists. Owning the commit here means the function is correct however it is
+    called.
     """
     connection.execute(
         """
@@ -74,4 +101,5 @@ def apply_migrations(connection: psycopg.Connection) -> list[str]:
         )
         freshly_applied.append(path.name)
 
+    connection.commit()
     return freshly_applied
