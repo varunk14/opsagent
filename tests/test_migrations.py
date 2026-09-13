@@ -12,41 +12,12 @@ So these tests build a brand-new empty database each time, migrate it, and check
 from a SEPARATE connection that the tables survived.
 """
 
-import uuid
-
 import psycopg
 import pytest
-from psycopg import sql
-from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from app.db import apply_migrations
-from tests.conftest import TEST_DSN
 
 pytestmark = pytest.mark.db
-
-
-def dsn_for(database: str) -> str:
-    return make_conninfo(**{**conninfo_to_dict(TEST_DSN), "dbname": database})
-
-
-@pytest.fixture
-def empty_database():
-    """
-    A database that has never been migrated, dropped again afterwards.
-
-    Created through an autocommit connection to the maintenance database, since
-    CREATE DATABASE cannot run inside a transaction.
-    """
-    name = f"opsagent_scratch_{uuid.uuid4().hex[:12]}"
-    admin = psycopg.connect(dsn_for("postgres"), autocommit=True)
-    admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
-    try:
-        yield dsn_for(name)
-    finally:
-        admin.execute(
-            sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name))
-        )
-        admin.close()
 
 
 def test_migrating_an_empty_database_applies_every_migration(empty_database):

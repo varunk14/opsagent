@@ -19,10 +19,13 @@ To run only the tests that need no database:
 """
 
 import os
+import uuid
 from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg import sql
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from app.db import apply_migrations
 
@@ -76,3 +79,37 @@ def db(migrated_database: str):
 def fixture_inbox() -> Path:
     """The sample inbox committed to the repository."""
     return Path(__file__).resolve().parent.parent / "fixtures" / "inbox.jsonl"
+
+
+def dsn_for(database: str) -> str:
+    return make_conninfo(**{**conninfo_to_dict(TEST_DSN), "dbname": database})
+
+
+@pytest.fixture
+def empty_database():
+    """
+    A database that has never been migrated, dropped again afterwards.
+
+    Created through an autocommit connection to the maintenance database, since
+    CREATE DATABASE cannot run inside a transaction. Anything that needs to
+    commit belongs here rather than in the shared test database, where committed
+    rows would outlive the test that wrote them.
+    """
+    name = f"opsagent_scratch_{uuid.uuid4().hex[:12]}"
+    admin = psycopg.connect(dsn_for("postgres"), autocommit=True)
+    admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    try:
+        yield dsn_for(name)
+    finally:
+        admin.execute(
+            sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name))
+        )
+        admin.close()
+
+
+@pytest.fixture
+def fresh_database(empty_database: str) -> str:
+    """An empty database with the schema already applied."""
+    with psycopg.connect(empty_database) as connection:
+        apply_migrations(connection)
+    return empty_database
