@@ -19,6 +19,7 @@ To run only the tests that need no database:
 """
 
 import os
+from pathlib import Path
 
 import psycopg
 import pytest
@@ -69,3 +70,9 @@ def db(migrated_database: str):
     finally:
         connection.rollback()
         connection.close()
+
+
+@pytest.fixture
+def fixture_inbox() -> Path:
+    """The sample inbox committed to the repository."""
+    return Path(__file__).resolve().parent.parent / "fixtures" / "inbox.jsonl"
