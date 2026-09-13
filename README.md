@@ -17,10 +17,38 @@ two charges, deciding whether a refund is allowed, issuing it, and knowing when 
 the case to a person instead. Every one of those steps can fail in a way that costs money
 without raising an error.
 
-## What is here so far
+## What is here
 
-`experiments/` holds standalone scripts, each isolating one problem and its fix. Several
-are written to fail first, because the failure is the part worth seeing.
+Two things, kept apart on purpose.
+
+`app/` is the system. `experiments/` is the record of what was learned before it
+was written, each script isolating one failure and its fix. Several are written
+to fail first, because the failure is the part worth seeing.
+
+### The system
+
+| Module | What it does |
+|---|---|
+| `app/contracts.py` | The typed boundary. Untrusted input becomes one validated shape, or is refused. |
+| `app/db.py` | Connecting, and a migration runner that is safe to run on every start-up. |
+| `app/intake.py` | A message becomes a run, exactly once, with the database arbitrating. |
+| `app/adapters/fixture.py` | The first intake adapter. Reads JSONL; Gmail will be the second. |
+| `app/poll.py` | One pass over an inbox. Owns its transaction, bounded, all or nothing. |
+| `app/baseline.py` | What a run costs before any optimisation, recorded so week 9 has something to compare against. |
+
+Six tables in `migrations/001_schema.sql`: `runs` is the durable spine, one row
+per request; then `customers`, `orders`, `approvals`, `tool_calls` and
+`policy_chunks`.
+
+### Running it
+
+    docker compose up -d db
+    .venv/bin/python -c "from app.db import connect, apply_migrations; apply_migrations(connect())"
+    .venv/bin/python -m app.poll fixtures/inbox.jsonl
+
+Four rows appear. Run it again and none do — the point of the whole module.
+
+### The experiments
 
 | Script | Question it answers | Outcome |
 |---|---|---|
@@ -32,27 +60,43 @@ are written to fail first, because the failure is the part worth seeing.
 
 ## Tests
 
-    uv pip install --python .venv/bin/python pytest pytest-cov
+    docker compose up -d db
     .venv/bin/python -m pytest
 
-37 tests, 99% statement coverage, with the run failing below 80%. Network calls
-and interactive drivers are marked `# pragma: no cover`; business logic is not
-excluded.
+121 tests, 99% statement coverage, with the run failing below 80%. Tests that
+need Postgres are marked `db` and **fail rather than skip** when it is absent,
+because a skipped test that reads as green is the failure this project is about.
+To run only what needs no database:
 
-The tests worth reading first are in `tests/test_refund_idempotency.py`. Two of
-them assert that the *broken* versions are still broken, because a fix is only
-meaningful while the bug it fixes remains demonstrable.
+    .venv/bin/python -m pytest -m "not db" --no-cov
+
+The tests worth reading first are `tests/test_intake.py` and
+`tests/test_refund_idempotency.py`. Several assert that *broken* versions are
+still broken, because a fix only means something while the bug it fixes remains
+demonstrable.
+
+Two of them record findings that contradict a reasonable assumption: a `bigint`
+column does not reject a fractional paisa, it silently rounds it; and a migration
+runner that does not commit reports success against an empty database.
+
+## Cost
+
+`BASELINE.md` holds what one run costs before any optimisation — tokens, latency,
+and a cost derived from a fixed reference rate. Week 9 is measured against it.
+The rate is arbitrary and says so; it is the same on both sides, so the ratio is
+what survives.
 
 ## Planned
 
-Durable runs on Postgres so work survives a restart, policy retrieval with pgvector, a
-human approval queue for refunds above a threshold, per-step cost and latency tracing,
-an evaluation suite gating every pull request, and a named taxonomy of failure modes.
+A durable worker that survives a restart, policy retrieval with pgvector, a human
+approval queue for refunds above a threshold, per-step cost and latency tracing,
+an evaluation suite gating every pull request, and a named taxonomy of failure
+modes.
 
 ## Running the experiments
 
     uv venv --python 3.13 .venv
-    uv pip install --python .venv/bin/python pydantic httpx
+    uv pip install --python .venv/bin/python pydantic httpx "psycopg[binary]"
     ollama serve &
     .venv/bin/python experiments/extract_refund_details.py 5
 
