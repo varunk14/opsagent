@@ -219,3 +219,12 @@ def test_everything_the_customer_controls_is_inside_that_key():
     run = RunRecord.from_message(a_message())
 
     assert set(run.state["untrusted"]) == {"sender", "subject", "body"}
+
+
+def test_a_timestamp_without_a_timezone_is_rejected():
+    """
+    Naive timestamps are ambiguous. This will run on a server in one timezone
+    handling customers in another, and "last Tuesday" has to mean one thing.
+    """
+    with pytest.raises(ValidationError):
+        a_message(received_at=datetime(2026, 9, 13, 9, 0))
