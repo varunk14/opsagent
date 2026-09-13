@@ -1,4 +1,4 @@
 {"channel": "email", "external_id": "9f2a", "sender": "priya@example.com", "subject": "Charged twice for order #4821", "body": "Hi, I think I was charged twice for order #4821 last Tuesday. Can you refund one of them? Thanks, Priya", "received_at": "2026-09-13T09:00:00+00:00"}
 {"channel": "email", "external_id": "7c1b", "sender": "dev@example.com", "subject": "Refund for order #3310", "body": "I ordered this in March and I've changed my mind. Please refund the full amount of Rs 7,200.", "received_at": "2026-09-13T09:14:00+00:00"}
 {"channel": "email", "external_id": "2e55", "sender": "anita@example.com", "subject": "When does order #5102 arrive?", "body": "Just checking when my order is due to be delivered. No rush.", "received_at": "2026-09-13T09:31:00+00:00"}
-{"channel": "telegram", "external_id": "441029", "sender": "@rk_traders", "subject": null, "body": "order 4821 charged twice pls refund", "received_at": "2026-09-13T10:02:00+00:00"}
+{"channel": "telegram", "external_id": "441029", "sender": "@example_trader", "subject": null, "body": "order 4821 charged twice pls refund", "received_at": "2026-09-13T10:02:00+00:00"}
