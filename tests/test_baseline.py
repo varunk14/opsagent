@@ -27,6 +27,7 @@ from app.baseline import (
     ReferenceRate,
     StepMeasurement,
     percentile,
+    read_token_counts,
     summarise,
 )
 
@@ -125,7 +126,7 @@ def test_the_summary_counts_what_went_into_it():
     summary = summarise([measurement(), measurement()], REFERENCE_RATE)
 
     assert summary.runs == 2
-    assert summary.tokens_per_run == 1100
+    assert summary.tokens_per_run == Decimal("1100")
 
 
 def test_the_rate_used_is_carried_with_the_result(tmp_path):
@@ -134,3 +135,73 @@ def test_the_rate_used_is_carried_with_the_result(tmp_path):
 
     assert isinstance(summary, Baseline)
     assert summary.rate is REFERENCE_RATE
+
+
+# --- reading what the model reported -----------------------------------------
+
+
+def test_token_counts_are_read_from_the_response():
+    counts = read_token_counts({"prompt_eval_count": 98, "eval_count": 225})
+
+    assert counts == (98, 225)
+
+
+@pytest.mark.parametrize("missing", ["prompt_eval_count", "eval_count"])
+def test_a_response_without_a_token_count_is_refused(missing):
+    """
+    The finding this function exists for.
+
+    Reaching for the field with a default of zero turns any response that does
+    not carry it -- an error body returned as 200, a renamed field in a later
+    Ollama, a proxy that strips it -- into a run that apparently used no tokens
+    and cost nothing. Those zeros fold into the totals, quietly deflating the
+    figure week 9 will be measured against, and nothing anywhere says so.
+    """
+    payload = {"prompt_eval_count": 98, "eval_count": 225}
+    del payload[missing]
+
+    with pytest.raises(ValueError, match=missing):
+        read_token_counts(payload)
+
+
+def test_a_run_that_genuinely_produced_nothing_is_still_readable():
+    """Zero is a legitimate answer when the model actually says zero."""
+    assert read_token_counts({"prompt_eval_count": 0, "eval_count": 0}) == (0, 0)
+
+
+# --- refusing to report a number that means nothing, part two -----------------
+
+
+def test_a_percentile_of_nothing_is_refused():
+    with pytest.raises(ValueError, match="no values"):
+        percentile([], 50)
+
+
+def test_a_baseline_of_no_runs_cannot_be_built_at_all():
+    """
+    summarise refuses an empty list, but Baseline is public and could be built
+    directly. The invariant belongs with the type that depends on it.
+    """
+    with pytest.raises(ValueError, match="no runs"):
+        Baseline(
+            runs=0,
+            model="llama3.2",
+            rate=REFERENCE_RATE,
+            prompt_tokens=0,
+            completion_tokens=0,
+            latencies_ms=(),
+        )
+
+
+def test_tokens_per_run_is_the_exact_mean():
+    """
+    1371 tokens across 4 runs is 342.75, not 342. Floor division sits next to
+    exact decimal costs in the report and biases downward every time, which does
+    not cancel between a before and an after taken over different run counts.
+    """
+    summary = summarise(
+        [measurement(prompt=300, completion=43), measurement(prompt=300, completion=44)],
+        REFERENCE_RATE,
+    )
+
+    assert summary.tokens_per_run == Decimal("343.5")
