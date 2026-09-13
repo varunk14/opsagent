@@ -107,3 +107,79 @@ def test_a_bad_line_leaves_no_half_finished_pass(fresh_database, tmp_path):
             poll_once(connection, inbox)
 
     assert run_count(fresh_database) == 0
+
+
+# --- the transaction boundary -----------------------------------------------
+
+
+def test_polling_on_a_connection_already_in_a_transaction_is_refused(fresh_database, fixture_inbox):
+    """
+    A pass commits, so it has to own the transaction outright.
+
+    Called on a connection with work already open, it would either raise deep
+    inside psycopg or -- worse -- commit whatever the caller had pending as a
+    side effect of polling. Refuse at the door instead, where the message can
+    say what is actually wrong.
+    """
+    with psycopg.connect(fresh_database) as connection:
+        connection.execute("SELECT 1")  # opens a transaction implicitly
+
+        with pytest.raises(RuntimeError, match="own transaction"):
+            poll_once(connection, fixture_inbox)
+
+
+# --- bounding the pass ------------------------------------------------------
+
+
+def test_a_pass_stops_at_its_limit(fresh_database, fixture_inbox):
+    """
+    An inbox is as big as whoever fills it decides. One unbounded pass is one
+    unbounded transaction, holding locks for as long as it takes, and a single
+    bad line at the end of it throws away everything that came before.
+    """
+    with psycopg.connect(fresh_database) as connection:
+        summary = poll_once(connection, fixture_inbox, limit=2)
+
+    assert summary.accepted == 2
+    assert summary.more_waiting is True
+    assert run_count(fresh_database) == 2
+
+
+def test_the_rest_is_taken_on_the_following_pass(fresh_database, fixture_inbox):
+    with psycopg.connect(fresh_database) as connection:
+        poll_once(connection, fixture_inbox, limit=2)
+    with psycopg.connect(fresh_database) as connection:
+        summary = poll_once(connection, fixture_inbox, limit=2)
+
+    assert summary.accepted == 2
+    assert run_count(fresh_database) == 4
+
+
+def test_a_pass_that_empties_the_inbox_says_so(fresh_database, fixture_inbox):
+    with psycopg.connect(fresh_database) as connection:
+        assert poll_once(connection, fixture_inbox).more_waiting is False
+
+
+def test_collisions_are_counted_rather_than_stopping_the_pass(fresh_database, tmp_path):
+    """
+    A forged key must not become a way to stop the poller. Count it, carry on,
+    and let the number be the thing somebody notices.
+    """
+    base = {
+        "channel": "email",
+        "external_id": "aaa1",
+        "sender": "a@example.com",
+        "subject": "hello",
+        "body": "the real request",
+        "received_at": "2026-09-13T09:00:00+00:00",
+    }
+    inbox = tmp_path / "collide.jsonl"
+    inbox.write_text(
+        json.dumps(base) + "\n" + json.dumps({**base, "body": "refund everything"}) + "\n"
+    )
+
+    with psycopg.connect(fresh_database) as connection:
+        summary = poll_once(connection, inbox)
+
+    assert (summary.accepted, summary.collisions) == (1, 1)
+    assert run_count(fresh_database) == 1

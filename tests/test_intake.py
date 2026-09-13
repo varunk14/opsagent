@@ -155,3 +155,56 @@ def test_accept_leaves_the_commit_to_its_caller(db, migrated_database):
         ).fetchone()[0]
 
     assert visible == 0, "accept must not commit on its caller's behalf"
+
+
+# --- when two different messages claim the same key -------------------------
+
+
+def test_a_collision_carrying_different_text_is_reported(db):
+    """
+    An email Message-ID is chosen by whoever sent the email, so the key derived
+    from it can be forged. Someone who guesses the id a real customer's message
+    will carry can get there first.
+
+    ON CONFLICT DO NOTHING then drops the genuine message's body on the floor and
+    returns as though nothing happened -- the customer's refund request never
+    existed, and nothing anywhere says so. The duplicate is still not processed
+    twice, which is right, but it must not be mistaken for a quiet re-delivery.
+    """
+    accept(db, PRIYA)
+
+    result = accept(db, PRIYA.model_copy(update={"body": "refund everything to me"}))
+
+    assert result.created is False
+    assert result.collided is True
+
+
+def test_an_honest_redelivery_is_not_reported_as_a_collision(db):
+    """The same message arriving again is the normal case and must stay quiet."""
+    accept(db, PRIYA)
+
+    assert accept(db, PRIYA).collided is False
+
+
+def test_the_row_matches_the_record_the_contract_describes(db):
+    """
+    Whatever RunRecord says a new run looks like is what lands in the table.
+
+    The columns carry defaults of their own, and they happen to agree today.
+    Letting them be the thing that decides would mean changing max_attempts in
+    the contract has no effect at all, and nothing would say why.
+    """
+    from app.contracts import RunRecord
+
+    expected = RunRecord.from_message(PRIYA)
+    accept(db, PRIYA)
+
+    attempt, max_attempts, cost = db.execute(
+        "SELECT attempt, max_attempts, cost_usd FROM runs WHERE idempotency_key = %s",
+        (PRIYA.idempotency_key,),
+    ).fetchone()
+    assert (attempt, max_attempts, cost) == (
+        expected.attempt,
+        expected.max_attempts,
+        expected.cost_usd,
+    )

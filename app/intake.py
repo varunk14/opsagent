@@ -14,6 +14,11 @@ where the duplicate is born.
 
 DO NOTHING, not DO UPDATE. By the time a message is delivered again the agent may
 be partway through the case, and an upsert would send it back to the start.
+
+What DO NOTHING costs, and what is done about it: the second message's contents
+are discarded. For an honest re-delivery that is exactly right, because the
+contents are identical. For a forged key it is not, and the difference is
+detected rather than assumed -- see IntakeResult.collided.
 """
 
 from dataclasses import dataclass
@@ -23,6 +28,17 @@ import psycopg
 
 from app.contracts import IncomingMessage, RunRecord
 
+INSERT_RUN = """
+    INSERT INTO runs (
+        id, channel, status, current_node, state, attempt, max_attempts,
+        next_retry_at, idempotency_key, prompt_version, cost_usd, failure_class,
+        created_at
+    )
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON CONFLICT (idempotency_key) DO NOTHING
+    RETURNING id
+"""
+
 
 @dataclass(frozen=True)
 class IntakeResult:
@@ -31,12 +47,18 @@ class IntakeResult:
 
     `created` is false for a message that was already known. Callers mostly do
     not care, but it is the number worth watching: duplicates suddenly rising
-    means something upstream is re-delivering, and that is worth knowing before
-    it turns into anything else.
+    means something upstream is re-delivering.
+
+    `collided` is the alarming one. It means a message arrived carrying a key
+    that already exists, but different text -- so it is not a re-delivery of
+    anything, and its contents have just been dropped. An email Message-ID is
+    chosen by whoever sent the email, so this is reachable by anyone who guesses
+    the id a real customer's message will carry.
     """
 
     run_id: UUID
     created: bool
+    collided: bool = False
 
 
 def accept(connection: psycopg.Connection, message: IncomingMessage) -> IntakeResult:
@@ -48,35 +70,51 @@ def accept(connection: psycopg.Connection, message: IncomingMessage) -> IntakeRe
     """
     run = RunRecord.from_message(message)
 
+    # Every column comes from the record rather than from the table's defaults.
+    # The two agree today, and if they ever stop agreeing, changing the contract
+    # should be what decides.
     inserted = connection.execute(
-        """
-        INSERT INTO runs (id, channel, status, current_node, state, idempotency_key)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        ON CONFLICT (idempotency_key) DO NOTHING
-        RETURNING id
-        """,
+        INSERT_RUN,
         (
             run.id,
             run.channel,
             run.status,
             run.current_node,
             psycopg.types.json.Jsonb(run.state),
+            run.attempt,
+            run.max_attempts,
+            run.next_retry_at,
             run.idempotency_key,
+            run.prompt_version,
+            run.cost_usd,
+            run.failure_class,
+            run.created_at,
         ),
     ).fetchone()
 
     if inserted is not None:
         return IntakeResult(run_id=inserted[0], created=True)
 
-    # The insert was refused, so the row is someone else's. Read it back rather
-    # than assuming anything about what it now contains.
+    # The insert was refused, so the row belongs to an earlier message. Read it
+    # back rather than assuming anything about what it contains.
+    #
+    # Postgres holds the second writer on the unique index until the first has
+    # committed, so by the time a conflict is observable the row is there. It
+    # could still be missing if something deleted it in between; nothing does
+    # today, and nothing in the schema forbids it, so the case is handled loudly
+    # rather than left to produce a confusing None.
     existing = connection.execute(
-        "SELECT id FROM runs WHERE idempotency_key = %s", (run.idempotency_key,)
+        "SELECT id, state FROM runs WHERE idempotency_key = %s", (run.idempotency_key,)
     ).fetchone()
 
-    if existing is None:  # pragma: no cover - would mean the row vanished mid-statement
+    if existing is None:  # pragma: no cover - needs a concurrent DELETE of that row
         raise RuntimeError(
             f"insert of {run.idempotency_key} conflicted with a row that is not there"
         )
 
-    return IntakeResult(run_id=existing[0], created=False)
+    run_id, stored_state = existing
+    return IntakeResult(
+        run_id=run_id,
+        created=False,
+        collided=stored_state.get("untrusted") != run.state["untrusted"],
+    )
