@@ -119,3 +119,13 @@ def test_the_local_default_is_used_when_nothing_is_configured(monkeypatch):
     monkeypatch.delenv("OPSAGENT_DATABASE_URL", raising=False)
 
     assert database_url() == DEFAULT_DSN
+
+
+def test_connect_uses_the_configured_database(monkeypatch, empty_database):
+    """`connect()` is the entry point everything else will use; prove it works."""
+    from app.db import connect
+
+    monkeypatch.setenv("OPSAGENT_DATABASE_URL", empty_database)
+
+    with connect() as connection:
+        assert connection.execute("SELECT 1").fetchone() == (1,)
