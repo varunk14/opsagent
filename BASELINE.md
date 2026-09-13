@@ -2,7 +2,7 @@
 
 **Recorded:** 2026-09-13
 **Model:** `llama3.2`, run locally through Ollama
-**Sample:** 4 runs over `fixtures/inbox.jsonl`
+**Sample:** 12 runs — 3 passes over the 4 messages in `fixtures/inbox.jsonl`
 **Settings:** one model for everything. No routing, no caching, no prompt
 trimming, no structured output. The naive version, deliberately.
 
@@ -10,12 +10,21 @@ trimming, no structured output. The naive version, deliberately.
 
 | | |
 |---|---|
-| Tokens per run | 342 |
-| Prompt tokens, total | 344 |
-| Completion tokens, total | 1,027 |
-| Cost per 100 runs | $0.0167 |
-| Latency p50 | 7,185 ms |
-| Latency p95 | 9,213 ms |
+| Tokens per run | 338.5 |
+| Prompt tokens, total | 1,032 |
+| Completion tokens, total | 3,030 |
+| Cost per 100 runs | $0.0164 |
+| Latency p50 | 5,936 ms |
+| Latency p95 | 11,642 ms |
+
+Read the p95 with care. Percentiles here are nearest-rank: sort the
+12 runs from fastest to slowest and take the 12th. With a sample
+this small that is the slowest run observed, not an estimate of a tail. It is
+reported because week 9 needs the same statistic computed the same way, not
+because 12 runs can characterise a distribution.
+
+A warm-up run is made and discarded before measuring, so a cold model load does
+not land in the sample.
 
 ## About that dollar figure
 
@@ -35,4 +44,10 @@ later re-derives both ends.
     ollama serve &
     .venv/bin/python -m app.baseline
 
-Latency depends on the machine. The token counts do not.
+Sampling is pinned (`temperature 0`, `seed 0`), so the token counts are a
+property of the prompt and should reproduce. Latency depends on the machine and
+will not.
+
+Every run behind the table above is in `baseline-measurements.json`, so a real
+price list can be substituted later and both ends of the week 9 comparison
+re-derived without measuring anything again.

@@ -1,0 +1,74 @@
+[
+  {
+    "model": "llama3.2",
+    "prompt_tokens": 98,
+    "completion_tokens": 213,
+    "latency_ms": 5644
+  },
+  {
+    "model": "llama3.2",
+    "prompt_tokens": 92,
+    "completion_tokens": 366,
+    "latency_ms": 9445
+  },
+  {
+    "model": "llama3.2",
+    "prompt_tokens": 83,
+    "completion_tokens": 228,
+    "latency_ms": 5698
+  },
+  {
+    "model": "llama3.2",
+    "prompt_tokens": 71,
+    "completion_tokens": 203,
+    "latency_ms": 5140
+  },
+  {
+    "model": "llama3.2",
+    "prompt_tokens": 98,
+    "completion_tokens": 213,
+    "latency_ms": 5936
+  },
+  {
+    "model": "llama3.2",
+    "prompt_tokens": 92,
+    "completion_tokens": 366,
+    "latency_ms": 10388
+  },
+  {
+    "model": "llama3.2",
+    "prompt_tokens": 83,
+    "completion_tokens": 228,
+    "latency_ms": 6471
+  },
+  {
+    "model": "llama3.2",
+    "prompt_tokens": 71,
+    "completion_tokens": 203,
+    "latency_ms": 5675
+  },
+  {
+    "model": "llama3.2",
+    "prompt_tokens": 98,
+    "completion_tokens": 213,
+    "latency_ms": 5935
+  },
+  {
+    "model": "llama3.2",
+    "prompt_tokens": 92,
+    "completion_tokens": 366,
+    "latency_ms": 11642
+  },
+  {
+    "model": "llama3.2",
+    "prompt_tokens": 83,
+    "completion_tokens": 228,
+    "latency_ms": 8014
+  },
+  {
+    "model": "llama3.2",
+    "prompt_tokens": 71,
+    "completion_tokens": 203,
+    "latency_ms": 7466
+  }
+]

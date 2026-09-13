@@ -63,7 +63,7 @@ Four rows appear. Run it again and none do — the point of the whole module.
     docker compose up -d db
     .venv/bin/python -m pytest
 
-121 tests, 99% statement coverage, with the run failing below 80%. Tests that
+139 tests, 99% statement coverage, with the run failing below 80%. Tests that
 need Postgres are marked `db` and **fail rather than skip** when it is absent,
 because a skipped test that reads as green is the failure this project is about.
 To run only what needs no database:
