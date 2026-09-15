@@ -520,8 +520,12 @@ def write_env(path: Path) -> list[str]:
     That is every secret compose.tracing.yml requires, generated fresh, and the settings a
     worker and the screen use to reach it. A name the file already has is left exactly as
     it is, and the worker's keys are taken from the Langfuse keys it already has: nothing
-    is rewritten, only appended. A file this creates is readable by its owner only.
+    is rewritten, only appended. Before any secret goes in, the file is made readable by its
+    owner only -- one that already existed included -- and a symbolic link in its place is
+    refused rather than followed, since it would carry the secrets wherever it points.
     """
+    if path.is_symlink():
+        raise ValueError(f"{path} is a symbolic link; secrets are not written through one")
     text = path.read_text() if path.exists() else ""
     present = env_settings(text)
     values = {**generated_secrets(), **present}
@@ -535,8 +539,10 @@ def write_env(path: Path) -> list[str]:
     added = [name for name in wanted if name not in present]
     if not added:
         return []
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    # O_NOFOLLOW as well as the check above: a link put in place between the two is refused too.
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, "a") as file:
+        os.fchmod(file.fileno(), 0o600)
         file.write(("\n" if text and not text.endswith("\n") else "") + "".join(f"{name}={wanted[name]}\n" for name in added))
     return added
 
@@ -549,7 +555,11 @@ def main(argv: Sequence[str]) -> int:
     env.add_argument("--path", type=Path, default=Path(".env"), help="the env file (default: .env)")
     arguments = parser.parse_args(argv)
 
-    added = write_env(arguments.path)
+    try:
+        added = write_env(arguments.path)
+    except ValueError as refused:
+        print(f"  not written: {refused}", file=sys.stderr)
+        return 2
     # Names, never values: every value here but the public key is a secret.
     if added:
         print(f"  added to {arguments.path}: {', '.join(added)}")
