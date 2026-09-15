@@ -103,8 +103,14 @@ def fence_safe(text: str, limit: int) -> str:
     write the closing marker, it could end the data block early and have what
     follows read as instructions. Breaking up the marker characters prevents
     that, and the length cap stops one runaway reply inflating the prompt.
+
+    One pass is not enough: a run of five '>' becomes '> > >>>', a marker again.
+    So the breaking-up repeats until no marker is left; text it never needed to
+    touch comes out exactly as it went in.
     """
-    safe = text.replace("<<<", "< < <").replace(">>>", "> > >")
+    safe = text
+    while "<<<" in safe or ">>>" in safe:
+        safe = safe.replace("<<<", "< < <").replace(">>>", "> > >")
     if len(safe) > limit:
         safe = safe[:limit] + f"... [{len(safe) - limit} more characters cut]"
     return safe
