@@ -13,7 +13,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from app.graph import nodes
-from app.graph.state import AgentState
+from app.graph.state import AgentState, Retriever
 from app.llm import Model, ModelUnavailable
 
 AgentGraph = CompiledStateGraph[AgentState, None, AgentState, AgentState]
@@ -28,12 +28,12 @@ def stop_if_proposed(next_step: str) -> Callable[[AgentState], str]:
     return route
 
 
-def build_graph(model: Model) -> AgentGraph:
+def build_graph(model: Model, retriever: Retriever) -> AgentGraph:
     graph: StateGraph[AgentState, None, AgentState, AgentState] = StateGraph(AgentState)
 
     graph.add_node("classify", lambda state: nodes.classify(state, model))
     graph.add_node("extract", lambda state: nodes.extract(state, model))
-    graph.add_node("retrieve", nodes.retrieve)
+    graph.add_node("retrieve", lambda state: nodes.retrieve(state, retriever))
     graph.add_node("plan", lambda state: nodes.plan(state, model))
 
     graph.add_edge(START, "classify")

@@ -31,9 +31,11 @@ from psycopg.types.json import Jsonb
 
 from app.baseline import REFERENCE_RATE, token_cost
 from app.db import connect
+from app.embeddings import OllamaEmbedder
 from app.graph.build import build_graph, run_graph
 from app.graph.state import AgentState
 from app.llm import ModelUnavailable, Ollama, Reply
+from app.retrieval import PolicyRetriever
 
 MICRO_DOLLAR = Decimal("0.000001")  # matches runs.cost_usd numeric(10, 6)
 
@@ -137,6 +139,7 @@ def summarise_agent(state: AgentState) -> tuple[dict[str, Any], Decimal]:
         "classification": classification.model_dump(mode="json") if classification else None,
         "extraction": extraction.model_dump(mode="json") if extraction else None,
         "policy": state.get("policy", []),
+        "policy_sources": state.get("policy_sources", []),
         "proposal": state["proposal"].model_dump(mode="json"),
         "failure": state.get("failure"),
         "model_calls": len(replies),
@@ -181,7 +184,7 @@ def propose_next(
 
 def main(argv: list[str]) -> int:  # pragma: no cover - the interactive driver
     limit = int(argv[1]) if len(argv) > 1 else 10
-    graph = build_graph(Ollama())
+    graph = build_graph(Ollama(), PolicyRetriever(connect, OllamaEmbedder()))
 
     with connect() as connection:
         for _ in range(limit):
