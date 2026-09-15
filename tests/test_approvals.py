@@ -21,6 +21,7 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from app.approvals import (
+    EXCERPT_CHARS,
     HandedOver,
     PendingApproval,
     decide,
@@ -257,6 +258,20 @@ def test_a_run_handed_to_a_person_without_an_approval_is_listed_with_why(db):
 
     assert handed.why == "act: the ledger refused the refund: over"
     assert (handed.sender, handed.subject, handed.body) == ("priya@example.com", "Refund", "Hi")
+
+
+def test_the_handed_over_list_keeps_only_the_start_of_a_long_message(db):
+    """A mutant that returned the whole body survived; a long forwarded thread is not what the screen needs."""
+    run_id = uuid.uuid4()
+    db.execute(
+        "INSERT INTO runs (id, channel, status, current_node, state, idempotency_key) "
+        "VALUES (%s, 'email', 'waiting_approval', 'act', %s, 'email_msg_long_thread')",
+        (run_id, Jsonb({"untrusted": {"sender": "priya@example.com", "body": "x" * (EXCERPT_CHARS * 3)}})),
+    )
+
+    (handed,) = [item for item in list_handed_over(db) if item.run_id == run_id]
+
+    assert len(handed.body) == EXCERPT_CHARS
 
 
 def test_an_escalation_the_planner_chose_is_listed_with_its_reason(db):

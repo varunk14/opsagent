@@ -323,6 +323,9 @@ def test_pages_allow_no_scripts_and_no_framing(fresh_database):
     assert "form-action 'self'" in policy
     assert headers["x-content-type-options"] == "nosniff"
     assert headers["referrer-policy"] == "no-referrer"
+    # Security review: customer emails must not linger in a browser cache; framing refused for old browsers too.
+    assert headers["cache-control"] == "no-store"
+    assert headers["x-frame-options"] == "DENY"
 
 
 # --- what the web process is not allowed to be -----------------------------------------------
@@ -350,3 +353,70 @@ def test_no_template_turns_escaping_off():
 
 def test_the_screen_listens_only_on_this_machine():
     assert HOST == "127.0.0.1"
+
+
+# --- found in review ------------------------------------------------------------------------
+
+
+def test_a_decision_posted_from_another_origin_is_refused(fresh_database):
+    """Security review: SameSite=Strict already stops this; checking Origin as well costs one comparison."""
+    _, approval_id = waiting_refund(fresh_database)
+    client = client_for(fresh_database)
+    token = token_from(client.get("/approvals").text)
+
+    response = client.post(
+        f"/approvals/{approval_id}/approve",
+        data={"csrf": token},
+        headers={"origin": "http://evil.example"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 403
+    assert decision(fresh_database, approval_id)[0] == "pending"
+
+
+def test_a_decision_posted_with_this_screens_own_origin_is_accepted(fresh_database):
+    """Browsers send Origin on every form POST; the check must not refuse the screen itself."""
+    _, approval_id = waiting_refund(fresh_database)
+    client = client_for(fresh_database)
+    token = token_from(client.get("/approvals").text)
+
+    response = client.post(
+        f"/approvals/{approval_id}/approve", data={"csrf": token}, headers={"origin": LOCAL}, follow_redirects=False
+    )
+
+    assert response.status_code == 303
+    assert decision(fresh_database, approval_id)[0] == "approved"
+
+
+def test_a_page_that_fails_keeps_its_protections_and_gives_nothing_away():
+    """FastAPI review: an unhandled error -- here an unreachable database -- used to drop every security header."""
+    unreachable = "postgresql://opsagent:not-a-real-secret@127.0.0.1:1/opsagent?connect_timeout=1"
+    client = TestClient(create_app(dsn=unreachable, operator="asha"), base_url=LOCAL, raise_server_exceptions=False)
+
+    response = client.get("/approvals")
+
+    assert response.status_code == 500
+    assert "default-src 'none'" in response.headers["content-security-policy"]
+    assert response.headers["cache-control"] == "no-store"
+    assert "not-a-real-secret" not in response.text
+    assert "127.0.0.1:1" not in response.text
+
+
+def test_a_missing_detail_reads_as_missing_not_as_none(fresh_database):
+    """FastAPI review: Jinja prints Python's None as the word "None" on the decision screen."""
+    with psycopg.connect(fresh_database) as connection:
+        run_id = insert_run(connection, status="waiting_approval", node="approval", state={}, key="email_msg_sparse")
+        refund = ProposedAction(
+            tool="issue_refund",
+            args={"order_id": "4821", "amount_paise": 720_000, "reason": "charged twice"},
+            confidence=Decimal("0.9"),
+            reasoning="duplicate",
+        )
+        open_approval(connection, run_id, refund, {}, OVER_THE_LIMIT)
+        insert_run(connection, status="waiting_approval", node="act", state={}, key="email_msg_bare")
+
+    page = client_for(fresh_database).get("/approvals").text
+
+    assert "None" not in page
+    assert "not recorded" in page
