@@ -58,9 +58,9 @@ def test_the_mix_is_shown_per_week_with_bars_scaled_to_the_largest_count(fresh_d
     page = client_for(fresh_database).get("/failures").text
 
     assert 'style="width: 100%"' in page  # loop, 2 of 2
-    assert 'style="width: 50%"' in page  # tool_misuse, 1 of 2
-    assert "3 failed runs" in page
-    assert page.index("loop") < page.index("wrong_escalation") or page.count("<table") >= 1
+    assert 'style="width: 50%"' in page  # tool_misuse and wrong_escalation, 1 of 2 each
+    assert "4 failed runs" in page
+    assert page.count("week of ") == 2
 
 
 def test_the_page_shows_no_customer_text_and_no_worker(fresh_database):

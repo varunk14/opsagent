@@ -10,9 +10,11 @@ which kind of failure is growing and what to work on:
     loop                the planner repeated a step, used the whole step budget, or was
                         deferred by the rate limit until a person had to take it
     tool_misuse         a tool that does not run here, arguments the ledger refused, a lookup
-                        of an order the ledger does not know, a refund before any lookup
+                        of an order the ledger does not know, a refund for an order that was
+                        never looked up
     hallucinated_field  an order id or amount in the extraction or the proposal that appears
-                        in neither the customer's message nor any tool result
+                        in neither the customer's message, nor the policy it was shown, nor
+                        any tool result
     wrong_escalation    a person rejected what the agent proposed
     drift               assigned only by the evaluation suite, from its history
 
@@ -40,6 +42,7 @@ import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 from uuid import UUID
@@ -145,14 +148,27 @@ class RunRest:
 
 
 def numbers_in(text: str) -> set[str]:
-    """Every number written in `text`, and each one taken as rupees and turned into paise."""
-    plain = {found.replace(",", "") for found in re.findall(r"\d[\d,]*", text)}
-    return plain | {f"{number}00" for number in plain}
+    """
+    Every number written in `text`, as written and as paise.
+
+    A whole number may be an order id or rupees, so both it and it times a hundred count;
+    "99.50" is rupees and paise, so it counts as 9950.
+    """
+    known: set[str] = set()
+    for found in re.findall(r"\d[\d,]*(?:\.\d{1,2})?", text):
+        written = found.replace(",", "")
+        if "." in written:
+            known.add(str(int((Decimal(written) * 100).to_integral_value())))
+        else:
+            known.update((written, f"{written}00"))
+    return known
 
 
 def known_numbers(rest: RunRest) -> set[str]:
-    """Every number the run had a source for: the customer's message and what its tools returned."""
+    """Every number the run had a source for: the customer's message, the policy it was shown, what its tools returned."""
     known = numbers_in(rest.message_text)
+    for passage in rest.policy:
+        known |= numbers_in(passage)
     for step in rest.steps:
         known |= numbers_in(json.dumps(step.get("result"), ensure_ascii=False))
     return known
@@ -170,6 +186,18 @@ def invented(rest: RunRest) -> bool:
     return any(value is not None and str(value) not in known for value in stated)
 
 
+def misused_a_tool(rest: RunRest, failure: str) -> bool:
+    """The wrong tool, arguments the ledger refused, a lookup that found nothing, or a refund for an order never looked up."""
+    lookups = [step for step in rest.steps if step.get("tool") == "get_order"]
+    looked_up = {str((step.get("args") or {}).get("order_id")) for step in lookups}
+    proposal = rest.proposal or {}
+    return (
+        any(reason in failure for reason in TOOL_MISUSE_REASONS)
+        or any(isinstance(step.get("result"), Mapping) and "error" in step["result"] for step in lookups)
+        or (proposal.get("tool") == "issue_refund" and str((proposal.get("args") or {}).get("order_id")) not in looked_up)
+    )
+
+
 def classify(rest: RunRest) -> FailureCategory | None:
     """One category for a run that failed, by a fixed priority; None for a run that did not."""
     if rest.status not in RESTED:
@@ -179,12 +207,7 @@ def classify(rest: RunRest) -> FailureCategory | None:
         return FailureCategory.CONTEXT_OVERFLOW
     if any(reason in failure for reason in LOOP_REASONS):
         return FailureCategory.LOOP
-    lookups = [step for step in rest.steps if step.get("tool") == "get_order"]
-    if (
-        any(reason in failure for reason in TOOL_MISUSE_REASONS)
-        or any(isinstance(step.get("result"), Mapping) and "error" in step["result"] for step in lookups)
-        or (rest.proposal is not None and rest.proposal.get("tool") == "issue_refund" and not lookups)
-    ):
+    if misused_a_tool(rest, failure):
         return FailureCategory.TOOL_MISUSE
     if invented(rest):
         return FailureCategory.HALLUCINATED_FIELD
@@ -212,6 +235,7 @@ def rest_of(connection: psycopg.Connection, run_id: UUID) -> RunRest:
         approval_paise=approval[0] if approval else None,
         approval_status=approval[1] if approval else None,
         message_text=f"{subject}\n\n{body}",
+        policy=tuple(agent.get("policy") or []),
     )
 
 
@@ -228,7 +252,7 @@ def record_category(connection: psycopg.Connection, run_id: UUID) -> FailureCate
             category = classify(rest_of(connection, run_id))
             connection.execute(SET_CATEGORY, (category.value if category else None, run_id))
             return category
-    except Exception:  # noqa: BLE001 - whatever it was, the run's own transaction must survive it
+    except Exception:  # whatever it was, the run's own transaction must survive it
         log.warning("run %s could not be classified; its category is left empty", run_id, exc_info=True)
         return None
 
