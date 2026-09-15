@@ -370,6 +370,96 @@ def test_a_decided_approval_does_not_block_a_new_one(db):
     insert_approval(db, run_id)
 
 
+def approval_id(db, run_id: uuid.UUID) -> int:
+    return db.execute("SELECT id FROM approvals WHERE run_id = %s", (run_id,)).fetchone()[0]
+
+
+APPROVE = "UPDATE approvals SET status = 'approved', decided_by = 'asha', decided_at = now() WHERE id = %s"
+
+
+def test_a_pending_approval_can_be_decided(db):
+    """Guards the triggers below against refusing the one change they must allow."""
+    run_id = insert_run(db, key="email_msg_decide", status="waiting_approval")
+    insert_approval(db, run_id)
+
+    db.execute(APPROVE, (approval_id(db, run_id),))
+    db.execute("UPDATE approvals SET executed_at = now() WHERE id = %s", (approval_id(db, run_id),))
+
+
+def test_what_a_person_is_asked_to_approve_cannot_be_changed_under_them(db):
+    """The screen shows one refund; an edit before the click would execute another."""
+    run_id = insert_run(db, key="email_msg_swap_action", status="waiting_approval")
+    insert_approval(db, run_id)
+
+    with pytest.raises(psycopg.errors.RaiseException):
+        db.execute(
+            "UPDATE approvals SET action = '{\"tool\": \"issue_refund\", \"amount_paise\": 99}' WHERE id = %s",
+            (approval_id(db, run_id),),
+        )
+
+
+@pytest.mark.parametrize(
+    "column",
+    [
+        "evidence = '{\"forged\": true}'",
+        "confidence = 0.99",
+        "reason = 'nothing to see'",
+        "created_at = now() - interval '1 day'",
+    ],
+    ids=["evidence", "confidence", "reason", "asked-at"],
+)
+def test_the_case_put_to_a_person_is_fixed_once_asked(db, column):
+    run_id = insert_run(db, key="email_msg_swap_case", status="waiting_approval")
+    insert_approval(db, run_id)
+
+    with pytest.raises(psycopg.errors.RaiseException):
+        db.execute(f"UPDATE approvals SET {column} WHERE id = %s", (approval_id(db, run_id),))
+
+
+def test_an_approval_cannot_be_moved_to_another_run(db):
+    """Moved, an approval given for one customer's case would release another's refund."""
+    run_id = insert_run(db, key="email_msg_move_from", status="waiting_approval")
+    other = insert_run(db, key="email_msg_move_to", status="waiting_approval")
+    insert_approval(db, run_id)
+
+    with pytest.raises(psycopg.errors.RaiseException):
+        db.execute("UPDATE approvals SET run_id = %s WHERE id = %s", (other, approval_id(db, run_id)))
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "status = 'rejected'",
+        "status = 'pending', decided_by = NULL, decided_at = NULL",
+        "decided_by = 'someone else'",
+        "decided_at = now() - interval '1 day'",
+        "decision_note = 'rewritten'",
+    ],
+    ids=["flipped", "undecided", "reattributed", "backdated", "renoted"],
+)
+def test_a_decision_cannot_be_rewritten(db, change):
+    run_id = insert_run(db, key="email_msg_rewrite", status="queued")
+    insert_approval(db, run_id)
+    db.execute(APPROVE, (approval_id(db, run_id),))
+
+    with pytest.raises(psycopg.errors.RaiseException):
+        db.execute(f"UPDATE approvals SET {change} WHERE id = %s", (approval_id(db, run_id),))
+
+
+@pytest.mark.parametrize(
+    "change", ["executed_at = NULL", "executed_at = now() + interval '1 second'"], ids=["cleared", "restamped"]
+)
+def test_an_executed_approval_stays_executed(db, change):
+    """Clearing executed_at would make the worker execute the approved refund again."""
+    run_id = insert_run(db, key="email_msg_executed", status="done")
+    insert_approval(db, run_id)
+    db.execute(APPROVE, (approval_id(db, run_id),))
+    db.execute("UPDATE approvals SET executed_at = now() WHERE id = %s", (approval_id(db, run_id),))
+
+    with pytest.raises(psycopg.errors.RaiseException):
+        db.execute(f"UPDATE approvals SET {change} WHERE id = %s", (approval_id(db, run_id),))
+
+
 def test_a_run_has_at_most_one_approved_action_waiting_to_execute(db):
     run_id = insert_run(db, key="email_msg_two_approved", status="queued")
     decided = {"status": "approved", "decided_by": "asha", "decided_at": "2026-09-15T10:00:00Z"}

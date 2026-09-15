@@ -186,11 +186,19 @@ def test_set_limits_does_not_commit(migrated_database):
         ({"limit_paise": -1}, "at least 0"),
         ({"limit_paise": True}, "whole number of paise"),
         ({"limit_paise": 100.0}, "whole number of paise"),
-        ({"min_confidence": 0.9}, "Decimal"),
+        ({"min_confidence": 0.9}, "must be a Decimal"),
+        ({"min_confidence": True}, "must be a Decimal"),
         ({"min_confidence": Decimal("1.01")}, "between 0 and 1"),
         ({"min_confidence": Decimal("0.855")}, "two decimal places"),
+        # Ordered comparisons on these raise InvalidOperation; the finiteness check must come first.
+        ({"min_confidence": Decimal("NaN")}, "between 0 and 1"),
+        ({"min_confidence": Decimal("sNaN")}, "between 0 and 1"),
+        ({"min_confidence": Decimal("Infinity")}, "between 0 and 1"),
     ],
-    ids=["nothing", "blank-name", "negative", "bool", "float-limit", "float-confidence", "over-one", "rounded"],
+    ids=[
+        "nothing", "blank-name", "negative", "bool", "float-limit", "float-confidence", "bool-confidence",
+        "over-one", "rounded", "nan", "snan", "infinity",
+    ],
 )
 def test_a_bad_change_is_refused_before_it_reaches_the_database(db, changes, message):
     """
