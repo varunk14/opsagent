@@ -448,7 +448,7 @@ def test_an_unreachable_model_puts_the_run_back_in_the_queue(fresh_database):
         work_next(connection, graph_of(Down()))
 
     stored = row(fresh_database, run_id)
-    assert (stored["status"], stored["locked_by"], stored["locked_at"]) == ("queued", None, None)
+    assert (stored["status"], stored["locked_by"], stored["locked_at"]) == ("failed", None, None)
     assert "agent" not in stored["state"]
     assert stored["attempt"] == 1, "the attempt still counts toward max_attempts"
 
@@ -463,8 +463,10 @@ def test_an_outage_after_a_committed_step_keeps_it_and_resumes_there(fresh_datab
         work_next(connection, graph_of(first))
 
     stored = row(fresh_database, run_id)
-    assert stored["status"] == "queued"
+    assert stored["status"] == "failed"
     assert len(stored["state"]["agent"]["steps"]) == 1
+    with psycopg.connect(fresh_database) as connection:
+        connection.execute("UPDATE runs SET next_retry_at = now() WHERE id = %s", (run_id,))
 
     second = ScriptedModel(plan=PROPOSED_REFUND)
     with psycopg.connect(fresh_database) as connection:
@@ -553,7 +555,7 @@ def test_an_outage_partway_through_still_charges_for_finished_steps(fresh_databa
         work_next(connection, graph)
 
     stored = row(fresh_database, run_id)
-    assert stored["status"] == "queued"
+    assert stored["status"] == "failed"
     assert stored["cost_usd"] == token_cost(10, 5, REFERENCE_RATE).quantize(Decimal("0.000001"))
 
 
@@ -571,7 +573,7 @@ def test_a_policy_store_outage_puts_the_run_back_in_the_queue(fresh_database):
         work_next(connection, graph)
 
     stored = row(fresh_database, run_id)
-    assert (stored["status"], stored["locked_by"]) == ("queued", None)
+    assert (stored["status"], stored["locked_by"]) == ("failed", None)
     assert stored["cost_usd"] == token_cost(20, 10, REFERENCE_RATE).quantize(Decimal("0.000001"))
 
 
