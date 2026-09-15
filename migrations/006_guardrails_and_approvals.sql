@@ -61,6 +61,33 @@ ALTER TABLE approvals
     -- Only an approved action can have run.
     ADD CONSTRAINT approvals_executed_only_if_approved CHECK (executed_at IS NULL OR status = 'approved');
 
+-- A record, not a scratchpad. What a person is asked to approve never changes, or
+-- the refund they saw on the screen is not the refund that runs. A decision, once
+-- made, is not rewritten. An executed approval stays executed, or the worker would
+-- run it again. The only changes left are deciding once and stamping execution once.
+CREATE OR REPLACE FUNCTION approvals_keep_the_record() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    IF (NEW.run_id, NEW.action, NEW.evidence, NEW.confidence, NEW.reason, NEW.created_at)
+       IS DISTINCT FROM (OLD.run_id, OLD.action, OLD.evidence, OLD.confidence, OLD.reason, OLD.created_at) THEN
+        RAISE EXCEPTION 'approval %: what a person is asked to approve cannot change', OLD.id;
+    END IF;
+    IF OLD.status <> 'pending'
+       AND (NEW.status, NEW.decided_by, NEW.decided_at, NEW.decision_note)
+           IS DISTINCT FROM (OLD.status, OLD.decided_by, OLD.decided_at, OLD.decision_note) THEN
+        RAISE EXCEPTION 'approval %: a decision cannot be rewritten', OLD.id;
+    END IF;
+    IF OLD.executed_at IS NOT NULL AND NEW.executed_at IS DISTINCT FROM OLD.executed_at THEN
+        RAISE EXCEPTION 'approval %: an executed approval stays executed', OLD.id;
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE TRIGGER approvals_keep_the_record
+    BEFORE UPDATE ON approvals
+    FOR EACH ROW EXECUTE FUNCTION approvals_keep_the_record();
+
 -- Two pending approvals for one run would let one refund be approved twice.
 CREATE UNIQUE INDEX IF NOT EXISTS approvals_one_pending_per_run
     ON approvals (run_id) WHERE status = 'pending';

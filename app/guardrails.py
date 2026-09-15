@@ -125,7 +125,7 @@ def set_limits(
 
     if min_confidence is not None:
         if not isinstance(min_confidence, Decimal):
-            raise ValueError("min_confidence must be a Decimal, not a float: 0.85 must stay exactly 0.85")
+            raise ValueError("min_confidence must be a Decimal such as Decimal('0.85'), so it stays exact")
         if not min_confidence.is_finite() or not 0 <= min_confidence <= 1:
             raise ValueError("min_confidence must be between 0 and 1")
         if min_confidence != min_confidence.quantize(TWO_PLACES):
