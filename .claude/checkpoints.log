@@ -1,1 +1,2 @@
 2026-09-15-10:11 | v0.1-week1 | 43ca2f8 | gate: build/types/lint PASS, 140 tests 98.94%, security clean, e2e PASS, review fixed
+2026-09-15-11:02 | v0.2-week2 | a78651d (tree aa6687d) | gate: build/types/lint PASS, 264 tests 99.46%, security clean, e2e real llama3.1:8b + postgres PASS, milestone review APPROVE after outage-cost fix
