@@ -8,3 +8,6 @@ htmlcov/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+
+# AI tooling (plans, TDD evidence, checkpoints) stays on this machine
+.claude/

@@ -15,10 +15,11 @@ where the duplicate is born.
 DO NOTHING, not DO UPDATE. By the time a message is delivered again the agent may
 be partway through the case, and an upsert would send it back to the start.
 
-What DO NOTHING costs, and what is done about it: the second message's contents
-are discarded. For an honest re-delivery that is exactly right, because the
-contents are identical. For a forged key it is not, and the difference is
-detected rather than assumed -- see IntakeResult.collided.
+What DO NOTHING costs, and what is done about it: the second message does not
+become a run. For an honest re-delivery that is exactly right, because the
+contents are identical. For a forged key it is not, so the difference is
+detected rather than assumed -- see IntakeResult.collided -- and the colliding
+message is quarantined in dead_letters instead of being lost.
 """
 
 from dataclasses import dataclass
@@ -40,6 +41,22 @@ INSERT_RUN = """
     RETURNING id
 """
 
+# How many different colliding texts one key keeps. Past this, a forger varying one
+# byte at a time is ignored instead of filling the table; the first few are enough
+# for a person to see what was attempted.
+MAX_QUARANTINED_PER_KEY = 5
+
+# The same forged text arriving again is kept once, and one key keeps at most
+# MAX_QUARANTINED_PER_KEY texts. The conflict target is migration 005's partial
+# unique index. Two pollers quarantining for the same key at the same moment can
+# each see room for one more, so the cap can be passed by one row per poller.
+QUARANTINE = """
+    INSERT INTO dead_letters (kind, idempotency_key, payload, reason)
+    SELECT 'message', %s, %s, 'idempotency key collision: same key, different text'
+     WHERE (SELECT count(*) FROM dead_letters WHERE kind = 'message' AND idempotency_key = %s) < %s
+    ON CONFLICT (idempotency_key, md5(payload::text)) WHERE kind = 'message' DO NOTHING
+"""
+
 
 @dataclass(frozen=True)
 class IntakeResult:
@@ -52,7 +69,8 @@ class IntakeResult:
 
     `collided` is the alarming one. It means a message arrived carrying a key
     that already exists, but different text -- so it is not a re-delivery of
-    anything, and its contents have just been dropped. An email Message-ID is
+    anything. Its contents are quarantined in dead_letters, once per distinct
+    text, for a person to look at. An email Message-ID is
     chosen by whoever sent the email, so this is reachable by anyone who guesses
     the id a real customer's message will carry.
     """
@@ -114,8 +132,11 @@ def accept(connection: psycopg.Connection, message: IncomingMessage) -> IntakeRe
         )
 
     run_id, stored_state = existing
-    return IntakeResult(
-        run_id=run_id,
-        created=False,
-        collided=stored_state.get("untrusted") != run.state["untrusted"],
-    )
+    collided = stored_state.get("untrusted") != run.state["untrusted"]
+    if collided:
+        # Kept, not discarded, in the caller's transaction: the run keeps the text
+        # that arrived first, and the colliding text waits for a person.
+        connection.execute(
+            QUARANTINE, (run.idempotency_key, Jsonb(run.state), run.idempotency_key, MAX_QUARANTINED_PER_KEY)
+        )
+    return IntakeResult(run_id=run_id, created=False, collided=collided)

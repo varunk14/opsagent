@@ -187,6 +187,34 @@ def test_collisions_are_counted_rather_than_stopping_the_pass(fresh_database, tm
     assert run_count(fresh_database) == 1
 
 
+def test_a_quarantined_collision_outlives_the_pass(fresh_database, tmp_path):
+    """The pass commits the quarantine together with the runs it accepted."""
+    base = {
+        "channel": "email",
+        "external_id": "aaa1",
+        "sender": "a@example.com",
+        "subject": "hello",
+        "body": "the real request",
+        "received_at": "2026-09-13T09:00:00+00:00",
+    }
+    inbox = tmp_path / "collide.jsonl"
+    inbox.write_text(
+        json.dumps(base) + "\n" + json.dumps({**base, "body": "refund everything"}) + "\n"
+    )
+
+    with psycopg.connect(fresh_database) as connection:
+        poll_once(connection, inbox)
+
+    with psycopg.connect(fresh_database) as connection:
+        bodies = [
+            body
+            for (body,) in connection.execute(
+                "SELECT payload -> 'untrusted' ->> 'body' FROM dead_letters WHERE kind = 'message'"
+            ).fetchall()
+        ]
+    assert bodies == ["refund everything"]
+
+
 def test_a_bad_line_just_past_the_limit_keeps_the_accepted_runs(fresh_database, tmp_path):
     """
     Found in milestone review. The pass peeks one line past its limit to report

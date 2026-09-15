@@ -42,6 +42,11 @@ PROPOSED_LOOKUP = (
     '{"tool": "get_order", "args": {"order_id": "4821"}, "confidence": 0.8,'
     ' "reasoning": "confirm both charges first"}'
 )
+PROPOSED_REFUND = (
+    '{"tool": "issue_refund", "args": {"order_id": "4821", "amount_paise": 360000,'
+    ' "reason": "the ledger shows two charges of 360000"}, "confidence": 0.9,'
+    ' "reasoning": "one of the two charges is a duplicate"}'
+)
 PROPOSED_ESCALATE = (
     '{"tool": "escalate_to_human", "args": {"reason": "status question"},'
     ' "confidence": 0.7, "reasoning": "no tool answers delivery questions"}'

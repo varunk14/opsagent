@@ -1,9 +1,10 @@
 """
-The driver: take a queued run, walk it through the graph, record the proposal.
+The driver: take a queued run and work it one committed step at a time.
 
-Proposing only. The run ends waiting for a decision, the proposal and its exact
-cost are stored on the run row, and nothing is executed: no tool call recorded,
-no approval created, no order touched.
+From week 4 the tools run. get_order and escalate_to_human execute through the
+keyed executor; issue_refund is recorded and waits for a person (week 5). Each
+executed step is committed with the run's record before the next one starts, so
+a worker that dies loses at most the step in flight.
 
 These tests commit, so each one gets its own scratch database.
 """
@@ -13,6 +14,7 @@ from decimal import Decimal
 
 import psycopg
 import pytest
+from psycopg import sql
 
 from app.baseline import REFERENCE_RATE, token_cost
 from app.contracts import Channel, IncomingMessage
@@ -20,28 +22,45 @@ from app.graph.build import build_graph
 from app.intake import accept
 from app.llm import ModelUnavailable, Reply
 from app.retrieval import PolicySearchUnavailable
-from app.run_agent import LostClaim, claim_next, propose_next
+from app.run_agent import LostClaim, claim_next, work_next
+from app.seed import load_ledger
 from tests.fakes import (
     CLASSIFIED_DUPLICATE,
     EXTRACTED_4821,
     OUTAGE,
+    PROPOSED_ESCALATE,
     PROPOSED_LOOKUP,
+    PROPOSED_REFUND,
     FakeRetriever,
     ScriptedModel,
 )
 
 pytestmark = pytest.mark.db
 
+LOOKUP_3310 = (
+    '{"tool": "get_order", "args": {"order_id": "3310"}, "confidence": 0.6,'
+    ' "reasoning": "maybe the other order"}'
+)
+PROPOSED_SEARCH = (
+    '{"tool": "search_policy", "args": {"question": "charged twice"}, "confidence": 0.5,'
+    ' "reasoning": "no policy was found"}'
+)
 
-def graph_of(model):
-    """Every driver test gets the same fixed policy passages."""
-    return build_graph(model, FakeRetriever())
+
+def graph_of(model, retriever=None):
+    """Every driver test gets the same fixed policy passages unless it says otherwise."""
+    return build_graph(model, retriever if retriever is not None else FakeRetriever())
+
+
+def happy_model() -> ScriptedModel:
+    """Look the order up, then propose the refund the ledger supports."""
+    return ScriptedModel(
+        classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=[PROPOSED_LOOKUP, PROPOSED_REFUND]
+    )
 
 
 def happy_graph():
-    return graph_of(
-        ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=PROPOSED_LOOKUP)
-    )
+    return graph_of(happy_model())
 
 
 def queue(dsn: str, external_id: str = "9f2a", minute: int = 0) -> str:
@@ -62,6 +81,11 @@ def queue(dsn: str, external_id: str = "9f2a", minute: int = 0) -> str:
     return str(run_id)
 
 
+def ledger(dsn: str) -> None:
+    with psycopg.connect(dsn) as connection:
+        load_ledger(connection)
+
+
 def row(dsn: str, run_id: str) -> dict:
     with psycopg.connect(dsn) as connection:
         cursor = connection.execute(
@@ -73,28 +97,118 @@ def row(dsn: str, run_id: str) -> dict:
         return dict(zip(names, cursor.fetchone(), strict=True))
 
 
+def keys(dsn: str, run_id: str) -> list[str]:
+    """Every tool call recorded for the run, in step order."""
+    with psycopg.connect(dsn) as connection:
+        return [
+            key
+            for (key,) in connection.execute(
+                # By step number, not as text: 'step_10' sorts before 'step_2' as a string.
+                "SELECT idempotency_key FROM tool_calls WHERE run_id = %s "
+                "ORDER BY substring(idempotency_key from ':step_([0-9]+):')::int",
+                (run_id,),
+            ).fetchall()
+        ]
+
+
+def count(dsn: str, table: str) -> int:
+    with psycopg.connect(dsn) as connection:
+        query = sql.SQL("SELECT count(*) FROM {}").format(sql.Identifier(table))
+        return connection.execute(query).fetchone()[0]
+
+
+def plan_prompts(model: ScriptedModel) -> list[str]:
+    return [prompt for prompt in model.prompts if prompt.startswith("TASK: plan")]
+
+
 # --- the ordinary case --------------------------------------------------------
 
 
-def test_a_queued_run_ends_with_a_proposal_waiting_for_a_decision(fresh_database):
+def test_a_run_looks_the_order_up_then_waits_with_a_refund_proposal(fresh_database):
+    ledger(fresh_database)
     run_id = queue(fresh_database)
 
     with psycopg.connect(fresh_database) as connection:
-        outcome = propose_next(connection, happy_graph())
+        outcome = work_next(connection, happy_graph())
 
     assert str(outcome.run_id) == run_id
+    assert (outcome.status, outcome.tool, outcome.steps) == ("waiting_approval", "issue_refund", 1)
     stored = row(fresh_database, run_id)
     assert stored["status"] == "waiting_approval"
     assert stored["current_node"] == "plan"
-    assert stored["state"]["agent"]["proposal"]["tool"] == "get_order"
-    assert stored["state"]["agent"]["proposal"]["args"] == {"order_id": "4821"}
+    assert stored["state"]["agent"]["proposal"]["tool"] == "issue_refund"
+    assert stored["state"]["agent"]["proposal"]["args"]["amount_paise"] == 360_000
 
 
-def test_what_the_steps_found_is_stored_beside_the_untouched_message(fresh_database):
+def test_the_lookup_really_ran_against_the_ledger(fresh_database):
+    ledger(fresh_database)
     run_id = queue(fresh_database)
 
     with psycopg.connect(fresh_database) as connection:
-        propose_next(connection, happy_graph())
+        work_next(connection, happy_graph())
+
+    steps = row(fresh_database, run_id)["state"]["agent"]["steps"]
+    assert len(steps) == 1
+    assert steps[0]["step"] == 1
+    assert steps[0]["tool"] == "get_order"
+    assert steps[0]["args"] == {"order_id": "4821"}
+    assert steps[0]["result"]["charges_paise"] == [360_000, 360_000]
+    assert steps[0]["replayed"] is False
+
+
+def test_a_refund_is_proposed_but_never_executed(fresh_database):
+    """Week 4 runs the lookup; money waits for a person in week 5."""
+    ledger(fresh_database)
+    queue(fresh_database)
+
+    with psycopg.connect(fresh_database) as connection:
+        work_next(connection, happy_graph())
+
+    assert count(fresh_database, "tool_calls") == 1
+    assert count(fresh_database, "refunds") == 0
+    assert count(fresh_database, "approvals") == 0
+
+
+def test_each_executed_step_is_keyed_by_its_step_number(fresh_database):
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+
+    with psycopg.connect(fresh_database) as connection:
+        work_next(connection, happy_graph())
+
+    assert keys(fresh_database, run_id) == [f"{run_id}:step_1:get_order"]
+
+
+def test_what_the_lookup_returned_reaches_the_next_plan(fresh_database):
+    ledger(fresh_database)
+    queue(fresh_database)
+    model = happy_model()
+
+    with psycopg.connect(fresh_database) as connection:
+        work_next(connection, graph_of(model))
+
+    first, second = plan_prompts(model)
+    assert "none yet" in first
+    assert "360000" in second
+
+
+def test_a_continuing_run_is_not_classified_again(fresh_database):
+    ledger(fresh_database)
+    queue(fresh_database)
+    model = happy_model()
+
+    with psycopg.connect(fresh_database) as connection:
+        work_next(connection, graph_of(model))
+
+    assert model.tasks() == ["classify", "extract", "plan", "plan"]
+
+
+def test_what_the_steps_found_is_stored_beside_the_untouched_message(fresh_database):
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+
+    with psycopg.connect(fresh_database) as connection:
+        work_next(connection, happy_graph())
 
     state = row(fresh_database, run_id)["state"]
     assert state["agent"]["classification"]["intent"] == "duplicate_charge"
@@ -105,39 +219,46 @@ def test_what_the_steps_found_is_stored_beside_the_untouched_message(fresh_datab
 
 
 def test_the_run_is_charged_exactly_for_every_model_call(fresh_database):
-    """Three calls of 10 prompt and 5 completion tokens, priced at the baseline rate."""
+    """classify, extract and two plans, each 10 prompt and 5 completion tokens."""
+    ledger(fresh_database)
     run_id = queue(fresh_database)
 
     with psycopg.connect(fresh_database) as connection:
-        propose_next(connection, happy_graph())
+        work_next(connection, happy_graph())
 
     stored = row(fresh_database, run_id)
-    expected = token_cost(prompt_tokens=30, completion_tokens=15, rate=REFERENCE_RATE)
+    expected = token_cost(prompt_tokens=40, completion_tokens=20, rate=REFERENCE_RATE)
     assert stored["cost_usd"] == expected.quantize(Decimal("0.000001"))
-    assert stored["state"]["agent"]["model_calls"] == 3
-    assert stored["state"]["agent"]["prompt_tokens"] == 30
-    assert stored["state"]["agent"]["completion_tokens"] == 15
+    assert stored["state"]["agent"]["model_calls"] == 4
+    assert stored["state"]["agent"]["prompt_tokens"] == 40
+    assert stored["state"]["agent"]["completion_tokens"] == 20
 
 
-def test_nothing_is_executed(fresh_database):
-    """Week 2 proposes. No tool call, no approval row, no order."""
-    queue(fresh_database)
+def test_each_step_is_committed_before_the_next_begins(fresh_database):
+    """What a worker that dies right now would leave behind, seen from another connection."""
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    seen = []
+
+    def look(step_run_id, step: int) -> None:
+        stored = row(fresh_database, str(step_run_id))
+        seen.append(
+            (step, stored["status"], stored["locked_by"], len(stored["state"]["agent"]["steps"]),
+             len(keys(fresh_database, run_id)))
+        )
 
     with psycopg.connect(fresh_database) as connection:
-        propose_next(connection, happy_graph())
-        counts = connection.execute(
-            "SELECT (SELECT count(*) FROM tool_calls), (SELECT count(*) FROM approvals),"
-            " (SELECT count(*) FROM orders)"
-        ).fetchone()
+        work_next(connection, happy_graph(), worker="worker-1", after_step=look)
 
-    assert counts == (0, 0, 0)
+    assert seen == [(1, "running", "worker-1", 1, 1)]
 
 
-def test_the_lock_is_released_once_the_proposal_is_recorded(fresh_database):
+def test_the_lock_is_released_once_the_run_waits(fresh_database):
+    ledger(fresh_database)
     run_id = queue(fresh_database)
 
     with psycopg.connect(fresh_database) as connection:
-        propose_next(connection, happy_graph())
+        work_next(connection, happy_graph())
 
     stored = row(fresh_database, run_id)
     assert (stored["locked_by"], stored["locked_at"], stored["attempt"]) == (None, None, 1)
@@ -150,17 +271,18 @@ def test_an_empty_queue_asks_the_model_nothing(fresh_database):
     model = ScriptedModel()
 
     with psycopg.connect(fresh_database) as connection:
-        assert propose_next(connection, graph_of(model)) is None
+        assert work_next(connection, graph_of(model)) is None
 
     assert model.prompts == []
 
 
 def test_the_oldest_queued_run_goes_first(fresh_database):
+    ledger(fresh_database)
     later = queue(fresh_database, "late", minute=30)
     earlier = queue(fresh_database, "early", minute=5)
 
     with psycopg.connect(fresh_database) as connection:
-        outcome = propose_next(connection, happy_graph())
+        outcome = work_next(connection, happy_graph())
 
     assert str(outcome.run_id) == earlier
     assert row(fresh_database, later)["status"] == "queued"
@@ -172,7 +294,7 @@ def test_runs_that_are_not_queued_are_left_alone(fresh_database):
         connection.execute("UPDATE runs SET status = 'waiting_approval' WHERE id = %s", (run_id,))
 
     with psycopg.connect(fresh_database) as connection:
-        assert propose_next(connection, happy_graph()) is None
+        assert work_next(connection, happy_graph()) is None
 
 
 def test_a_claimed_run_is_marked_as_running_with_its_worker(fresh_database):
@@ -212,18 +334,18 @@ def test_driving_on_a_connection_already_in_a_transaction_is_refused(fresh_datab
     with psycopg.connect(fresh_database) as connection:
         connection.execute("SELECT 1")
         with pytest.raises(RuntimeError, match="own transaction"):
-            propose_next(connection, happy_graph())
+            work_next(connection, happy_graph())
 
 
 # --- when the model does not cooperate ------------------------------------------
 
 
-def test_an_escalation_is_recorded_and_still_waits_for_a_person(fresh_database):
+def test_an_escalation_is_recorded_executed_and_waits_for_a_person(fresh_database):
     run_id = queue(fresh_database)
     graph = graph_of(ScriptedModel(classify="no idea at all"))
 
     with psycopg.connect(fresh_database) as connection:
-        propose_next(connection, graph)
+        work_next(connection, graph)
 
     stored = row(fresh_database, run_id)
     assert stored["status"] == "waiting_approval"
@@ -231,6 +353,86 @@ def test_an_escalation_is_recorded_and_still_waits_for_a_person(fresh_database):
     assert stored["state"]["agent"]["proposal"]["tool"] == "escalate_to_human"
     assert "classify" in stored["state"]["agent"]["failure"]
     assert stored["cost_usd"] > 0, "the failed attempts were still paid for"
+    assert keys(fresh_database, run_id) == [f"{run_id}:step_1:escalate_to_human"]
+
+
+def test_an_escalation_the_planner_proposes_runs_and_waits(fresh_database):
+    run_id = queue(fresh_database)
+    model = ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=PROPOSED_ESCALATE)
+
+    with psycopg.connect(fresh_database) as connection:
+        outcome = work_next(connection, graph_of(model))
+
+    stored = row(fresh_database, run_id)
+    assert (outcome.status, outcome.tool, outcome.failure) == ("waiting_approval", "escalate_to_human", None)
+    assert stored["state"]["agent"]["steps"][0]["result"] == {"escalated": True, "reason": "status question"}
+
+
+def test_a_repeated_proposal_is_escalated_not_run_again(fresh_database):
+    """Seen as a risk with small models: asking for the same lookup forever."""
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    model = ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=PROPOSED_LOOKUP)
+
+    with psycopg.connect(fresh_database) as connection:
+        outcome = work_next(connection, graph_of(model))
+
+    stored = row(fresh_database, run_id)
+    assert outcome.tool == "escalate_to_human"
+    assert "repeated" in outcome.failure
+    assert stored["status"] == "waiting_approval"
+    assert keys(fresh_database, run_id) == [
+        f"{run_id}:step_1:get_order",
+        f"{run_id}:step_2:escalate_to_human",
+    ]
+
+
+def test_the_step_budget_hands_the_case_to_a_person(fresh_database):
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    model = ScriptedModel(
+        classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=[PROPOSED_LOOKUP, LOOKUP_3310]
+    )
+
+    with psycopg.connect(fresh_database) as connection:
+        outcome = work_next(connection, graph_of(model), max_steps=1)
+
+    assert outcome.tool == "escalate_to_human"
+    assert "step budget" in outcome.failure
+    assert keys(fresh_database, run_id) == [
+        f"{run_id}:step_1:get_order",
+        f"{run_id}:step_2:escalate_to_human",
+    ]
+
+
+def test_every_tool_the_model_can_propose_has_exactly_one_decision():
+    """
+    Found in security review. Whether a tool runs is decided only here, so a tool
+    added to app/tools.py must be placed deliberately -- never run, or not run, by default.
+    """
+    from app.executor import TOOLS as IMPLEMENTED
+    from app.run_agent import NOT_RUN_HERE, RUNS_NOW, WAITS_FOR_APPROVAL
+    from app.tools import TOOLS
+
+    decisions = [RUNS_NOW, WAITS_FOR_APPROVAL, NOT_RUN_HERE]
+    proposable = {tool.name for tool in TOOLS}
+
+    assert set().union(*decisions) == proposable
+    assert sum(len(decision) for decision in decisions) == len(proposable), "a tool is in two groups"
+    assert RUNS_NOW | WAITS_FOR_APPROVAL <= set(IMPLEMENTED), "a decided tool has no implementation"
+
+
+def test_a_proposal_the_executor_cannot_run_is_escalated(fresh_database):
+    """search_policy is offered only when retrieval found nothing; searching again would find nothing too."""
+    run_id = queue(fresh_database)
+    model = ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=PROPOSED_SEARCH)
+
+    with psycopg.connect(fresh_database) as connection:
+        outcome = work_next(connection, graph_of(model, FakeRetriever(passages=[])))
+
+    assert outcome.tool == "escalate_to_human"
+    assert "search_policy" in outcome.failure
+    assert keys(fresh_database, run_id) == [f"{run_id}:step_1:escalate_to_human"]
 
 
 def test_an_unreachable_model_puts_the_run_back_in_the_queue(fresh_database):
@@ -243,12 +445,36 @@ def test_an_unreachable_model_puts_the_run_back_in_the_queue(fresh_database):
     run_id = queue(fresh_database)
 
     with psycopg.connect(fresh_database) as connection, pytest.raises(ModelUnavailable):
-        propose_next(connection, graph_of(Down()))
+        work_next(connection, graph_of(Down()))
 
     stored = row(fresh_database, run_id)
-    assert (stored["status"], stored["locked_by"], stored["locked_at"]) == ("queued", None, None)
+    assert (stored["status"], stored["locked_by"], stored["locked_at"]) == ("failed", None, None)
     assert "agent" not in stored["state"]
     assert stored["attempt"] == 1, "the attempt still counts toward max_attempts"
+
+
+def test_an_outage_after_a_committed_step_keeps_it_and_resumes_there(fresh_database):
+    """The lookup happened and was paid for. The next worker plans from it, without repeating it."""
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    first = ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=[PROPOSED_LOOKUP, OUTAGE])
+
+    with psycopg.connect(fresh_database) as connection, pytest.raises(ModelUnavailable):
+        work_next(connection, graph_of(first))
+
+    stored = row(fresh_database, run_id)
+    assert stored["status"] == "failed"
+    assert len(stored["state"]["agent"]["steps"]) == 1
+    with psycopg.connect(fresh_database) as connection:
+        connection.execute("UPDATE runs SET next_retry_at = now() WHERE id = %s", (run_id,))
+
+    second = ScriptedModel(plan=PROPOSED_REFUND)
+    with psycopg.connect(fresh_database) as connection:
+        outcome = work_next(connection, graph_of(second))
+
+    assert second.tasks() == ["plan"]
+    assert (outcome.status, outcome.tool) == ("waiting_approval", "issue_refund")
+    assert keys(fresh_database, run_id) == [f"{run_id}:step_1:get_order"]
 
 
 # --- review findings: attempts run out, claims can be lost ------------------------
@@ -269,7 +495,7 @@ def test_a_run_out_of_attempts_is_dead_not_requeued(fresh_database):
         connection.execute("UPDATE runs SET attempt = max_attempts - 1 WHERE id = %s", (run_id,))
 
     with psycopg.connect(fresh_database) as connection, pytest.raises(ModelUnavailable):
-        propose_next(connection, graph_of(Down()))
+        work_next(connection, graph_of(Down()))
 
     with psycopg.connect(fresh_database) as connection:
         status, failure_class, locked_by = connection.execute(
@@ -279,7 +505,7 @@ def test_a_run_out_of_attempts_is_dead_not_requeued(fresh_database):
 
 
 class ReclaimedMidRun:
-    """Stands in for week 4's lock expiry: another worker takes the run while the model thinks."""
+    """Another worker takes the run while the model thinks, as lock expiry will allow."""
 
     def __init__(self, dsn: str, inner=None, then_raise: Exception | None = None):
         self.dsn, self.inner, self.then_raise = dsn, inner, then_raise
@@ -292,16 +518,18 @@ class ReclaimedMidRun:
         yield from self.inner.stream(initial, stream_mode=stream_mode)
 
 
-def test_a_proposal_is_not_recorded_over_a_claim_that_was_lost(fresh_database):
+def test_a_step_is_not_executed_or_recorded_over_a_claim_that_was_lost(fresh_database):
+    ledger(fresh_database)
     run_id = queue(fresh_database)
     graph = ReclaimedMidRun(fresh_database, inner=happy_graph())
 
     with psycopg.connect(fresh_database) as connection, pytest.raises(LostClaim):
-        propose_next(connection, graph, worker="worker-a")
+        work_next(connection, graph, worker="worker-a")
 
     stored = row(fresh_database, run_id)
     assert stored["locked_by"] == "worker-b"
     assert "agent" not in stored["state"]
+    assert keys(fresh_database, run_id) == [], "a worker that lost its claim must execute nothing"
 
 
 def test_an_outage_does_not_release_a_claim_that_was_lost(fresh_database):
@@ -309,7 +537,7 @@ def test_an_outage_does_not_release_a_claim_that_was_lost(fresh_database):
     graph = ReclaimedMidRun(fresh_database, then_raise=ModelUnavailable("down"))
 
     with psycopg.connect(fresh_database) as connection, pytest.raises(ModelUnavailable):
-        propose_next(connection, graph, worker="worker-a")
+        work_next(connection, graph, worker="worker-a")
 
     stored = row(fresh_database, run_id)
     assert (stored["status"], stored["locked_by"]) == ("running", "worker-b")
@@ -324,10 +552,10 @@ def test_an_outage_partway_through_still_charges_for_finished_steps(fresh_databa
     graph = graph_of(ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=OUTAGE))
 
     with psycopg.connect(fresh_database) as connection, pytest.raises(ModelUnavailable):
-        propose_next(connection, graph)
+        work_next(connection, graph)
 
     stored = row(fresh_database, run_id)
-    assert stored["status"] == "queued"
+    assert stored["status"] == "failed"
     assert stored["cost_usd"] == token_cost(10, 5, REFERENCE_RATE).quantize(Decimal("0.000001"))
 
 
@@ -342,10 +570,10 @@ def test_a_policy_store_outage_puts_the_run_back_in_the_queue(fresh_database):
     graph = build_graph(ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821), PolicyStoreDown())
 
     with psycopg.connect(fresh_database) as connection, pytest.raises(PolicySearchUnavailable):
-        propose_next(connection, graph)
+        work_next(connection, graph)
 
     stored = row(fresh_database, run_id)
-    assert (stored["status"], stored["locked_by"]) == ("queued", None)
+    assert (stored["status"], stored["locked_by"]) == ("failed", None)
     assert stored["cost_usd"] == token_cost(20, 10, REFERENCE_RATE).quantize(Decimal("0.000001"))
 
 
@@ -356,7 +584,7 @@ def test_a_policy_store_outage_on_the_last_attempt_says_what_failed(fresh_databa
     graph = build_graph(ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821), PolicyStoreDown())
 
     with psycopg.connect(fresh_database) as connection, pytest.raises(PolicySearchUnavailable):
-        propose_next(connection, graph)
+        work_next(connection, graph)
 
     with psycopg.connect(fresh_database) as connection:
         status, failure_class = connection.execute(

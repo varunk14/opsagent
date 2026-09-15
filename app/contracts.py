@@ -100,6 +100,18 @@ class IncomingMessage(BaseModel):
 
     _no_blanks = field_validator("external_id", "sender", "body")(_reject_blank)
 
+    @field_validator("sender", mode="before")
+    @classmethod
+    def strip_sender(cls, value: object) -> object:
+        """
+        Surrounding whitespace is not part of an address. Left in, ' priya@example.com'
+        was a different sender from 'priya@example.com' -- a separate rate-limit bucket
+        for the same person. Stripped before the blank check, so '   ' is still refused.
+        """
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
     @field_validator("received_at")
     @classmethod
     def must_know_its_timezone(cls, value: datetime) -> datetime:
@@ -332,3 +344,21 @@ class ProposedAction(BaseModel):
     @field_serializer("args")
     def serialise_args(self, args: Mapping[str, Any]) -> dict[str, Any]:
         return dict(args)
+
+
+class StepRecord(BaseModel):
+    """
+    One tool call a run actually executed, as stored in state.agent.steps.
+
+    The same record is shown back to the planner on the next tick, so it says
+    what ran, with which arguments, what came back, and whether the executor
+    replayed an earlier result rather than running it again.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    step: int = Field(ge=1)
+    tool: str
+    args: dict[str, Any]
+    result: dict[str, Any]
+    replayed: bool
