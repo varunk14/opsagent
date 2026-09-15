@@ -17,7 +17,6 @@ import time
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-import psycopg
 import pytest
 from opentelemetry import trace
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
@@ -337,17 +336,245 @@ def test_the_exported_copy_and_the_recorded_rows_are_the_same_spans(db, exported
     assert recorded == {format(span.context.span_id, "016x") for span in exported.get_finished_spans()}
 
 
+# --- found in review: which run a span belongs to is settled when it starts -----------
+
+
+def test_a_span_started_in_a_run_is_kept_for_it_even_when_it_ends_outside(tracing, exported):
+    """Its trace id was fixed when it started; ending after the run's context closed must not lose it."""
+    with run_context(RUN):
+        late = tracer().start_span("plan.generate")
+    late.end()
+
+    assert [span.name for span in tracing.recorder.take(RUN)] == ["plan.generate"]
+
+
+def test_a_span_that_ends_inside_another_runs_context_stays_with_its_own_run(tracing, exported):
+    with run_context(RUN):
+        span = tracer().start_span("tick")
+    with run_context(OTHER_RUN):
+        span.end()
+
+    assert [held.name for held in tracing.recorder.take(RUN)] == ["tick"]
+    assert tracing.recorder.take(OTHER_RUN) == []
+
+
+# --- found in review: nothing about a span may abort the step it is written with -----
+
+WELL_FORMED = {
+    Attr.TYPE: "generation",
+    Attr.MODEL: "llama3.1:8b",
+    Attr.INPUT_TOKENS: 310,
+    Attr.OUTPUT_TOKENS: 40,
+    Attr.COST_USD: "0.0000705",
+    Attr.PROMPT_VERSION: "4c0e5dd7b3a9",
+}
+COLUMN_OF = {
+    Attr.INPUT_TOKENS: "input_tokens",
+    Attr.OUTPUT_TOKENS: "output_tokens",
+    Attr.COST_USD: "cost_usd",
+    Attr.PROMPT_VERSION: "prompt_version",
+}
+
+
+def stored_row(connection, run_id: UUID) -> dict:
+    cursor = connection.execute("SELECT * FROM spans WHERE trace_id = %s", (run_id,))
+    names = [column.name for column in cursor.description]
+    (values,) = cursor.fetchall()
+    return dict(zip(names, values, strict=True))
+
+
 @pytest.mark.db
-def test_a_generation_row_is_refused_without_its_cost(db, exported):
-    """The table itself insists a model call is costed: a free-looking call is the lie cost work must not tell."""
+def test_a_generation_missing_its_cost_is_written_as_a_plain_span_not_refused(db, exported):
+    """
+    The table refuses a generation with no cost, and record_spans runs in the transaction
+    that may be paying a refund. So such a span is written as a plain span that says
+    why, rather than taking the payment down with it.
+    """
     run_id = uuid4()
     insert_run(db, run_id)
     with run_context(run_id), tracer().start_as_current_span("generate") as span:
         span.set_attribute(Attr.TYPE, "generation")
         span.set_attribute(Attr.MODEL, "llama3.1:8b")
 
-    with pytest.raises(psycopg.errors.CheckViolation, match="spans_generation_is_costed"):
-        record_spans(db, run_id)
+    assert record_spans(db, run_id) == 1
+
+    stored = stored_row(db, run_id)
+    assert stored["kind"] == "span"
+    assert stored["attributes"][Attr.RECORDED_AS_SPAN] == "a generation needs a model, token counts and a cost"
+
+
+@pytest.mark.db
+@pytest.mark.parametrize(
+    ("attribute", "value"),
+    [
+        (Attr.INPUT_TOKENS, "many"),
+        (Attr.INPUT_TOKENS, -3),
+        (Attr.OUTPUT_TOKENS, 12.7),
+        (Attr.OUTPUT_TOKENS, True),
+        (Attr.COST_USD, "free"),
+        (Attr.COST_USD, "-0.01"),
+        (Attr.COST_USD, "NaN"),
+        (Attr.COST_USD, "Infinity"),
+        (Attr.PROMPT_VERSION, "v3"),
+    ],
+)
+def test_a_malformed_count_cost_or_version_is_left_out_never_refused(db, exported, attribute, value):
+    run_id = uuid4()
+    insert_run(db, run_id)
+    with run_context(run_id), tracer().start_as_current_span("generate") as span:
+        span.set_attributes({**WELL_FORMED, attribute: value})
+
+    assert record_spans(db, run_id) == 1
+
+    stored = stored_row(db, run_id)
+    assert stored[COLUMN_OF[attribute]] is None
+    assert stored["attributes"][attribute] == value  # kept as it was set, for whoever investigates
+    # A version is optional; a generation without its counts or cost is no longer a generation.
+    assert stored["kind"] == ("generation" if attribute == Attr.PROMPT_VERSION else "span")
+
+
+@pytest.mark.db
+def test_a_span_ended_before_it_started_is_written_with_no_duration(db, exported):
+    run_id = uuid4()
+    insert_run(db, run_id)
+    instant = 1_757_937_600_000_000_000
+    with run_context(run_id):
+        span = tracer().start_span("tick", start_time=instant)
+        span.end(end_time=instant - 5_000_000)
+
+    assert record_spans(db, run_id) == 1
+
+    stored = stored_row(db, run_id)
+    assert stored["ended_at"] == stored["started_at"]
+
+
+@pytest.mark.db
+def test_a_span_with_a_blank_name_is_written_under_a_placeholder(db, exported):
+    run_id = uuid4()
+    insert_run(db, run_id)
+    with run_context(run_id):
+        tracer().start_span("   ").end()
+
+    assert record_spans(db, run_id) == 1
+
+    assert stored_row(db, run_id)["name"] == "unnamed"
+
+
+@pytest.mark.db
+def test_every_field_is_stored_in_the_column_of_the_same_name(db, exported):
+    """Two literals list the columns -- the row and the INSERT; a swap between them must fail here."""
+    from dataclasses import asdict
+
+    run_id = uuid4()
+    insert_run(db, run_id)
+    with run_context(run_id), tracer().start_as_current_span("plan.generate") as span:
+        span.set_attributes(WELL_FORMED)
+        span.set_status(StatusCode.ERROR, "model_unavailable")
+    (expected,) = rows_for(exported.get_finished_spans())
+
+    record_spans(db, run_id)
+
+    assert stored_row(db, run_id) == asdict(expected)
+
+
+# --- found in security review: loopback means where the connection goes, not the URL ---
+
+
+class Listener:
+    """An HTTP server on a free loopback port that records every request reaching it, or answers with a redirect."""
+
+    def __init__(self, redirect_to: str | None = None):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        hits: list[str] = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                hits.append(self.path)
+                self.send_response(200 if redirect_to is None else 307)
+                if redirect_to is not None:
+                    self.send_header("Location", redirect_to)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        self.hits = hits
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_port}"
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def export_one_span(endpoint: str) -> None:
+    own = Tracing(loopback_exporter(endpoint, **KEYS), immediate=True)
+    with own.tracer.start_as_current_span("tick"):
+        pass
+    own.shutdown()
+
+
+def test_a_proxy_set_in_the_environment_is_never_used_for_traces(monkeypatch):
+    """requests honours HTTP_PROXY by default, which would carry spans addressed to 127.0.0.1 to the proxy's host."""
+    with Listener() as langfuse, Listener() as proxy:
+        for name in ("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+            monkeypatch.setenv(name, proxy.url)
+        for name in ("NO_PROXY", "no_proxy"):
+            monkeypatch.delenv(name, raising=False)
+
+        export_one_span(f"{langfuse.url}/api/public/otel/v1/traces")
+
+    assert proxy.hits == []
+    assert langfuse.hits == ["/api/public/otel/v1/traces"]
+
+
+def test_a_redirect_from_the_endpoint_is_not_followed():
+    """A 307 would have the whole batch of spans sent again, to wherever it points."""
+    with Listener() as elsewhere, Listener(redirect_to=f"{elsewhere.url}/stolen") as endpoint:
+        export_one_span(f"{endpoint.url}/api/public/otel/v1/traces")
+
+    assert endpoint.hits == ["/api/public/otel/v1/traces"]
+    assert elsewhere.hits == []
+
+
+def test_one_run_holds_a_bounded_number_of_spans(tracing, exported, monkeypatch):
+    """A retry storm inside one step must not grow the worker's memory without limit."""
+    from app import tracing as module
+
+    monkeypatch.setattr(module, "MAX_HELD_SPANS_PER_RUN", 5)
+    with run_context(RUN):
+        for number in range(8):
+            tracer().start_span(f"call {number}").end()
+
+    assert [span.name for span in tracing.recorder.take(RUN)] == [f"call {number}" for number in range(5)]
+
+
+@pytest.mark.db
+def test_spans_past_the_bound_are_reported_when_the_rest_are_written(db, exported, monkeypatch, capsys):
+    from app import tracing as module
+
+    monkeypatch.setattr(module, "MAX_HELD_SPANS_PER_RUN", 2)
+    run_id = uuid4()
+    insert_run(db, run_id)
+    with run_context(run_id):
+        for number in range(5):
+            tracer().start_span(f"call {number}").end()
+
+    assert record_spans(db, run_id) == 2
+    assert f"3 spans of run {run_id} were not recorded" in capsys.readouterr().err
+    with run_context(run_id):
+        tracer().start_span("next step").end()
+    assert record_spans(db, run_id) == 1
+    assert "not recorded" not in capsys.readouterr().err  # the count was cleared with what it counted
 
 
 # --- found by mutation checks ------------------------------------------------------
