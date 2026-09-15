@@ -137,6 +137,52 @@ def test_a_span_knows_how_long_it_took_in_milliseconds():
     assert only.duration_ms == 1234
 
 
+def test_walking_a_trace_gives_each_parent_then_its_children_in_order():
+    roots = build_tree(
+        [
+            span("tick", None, 0, 50),
+            span("classify", "tick", 1, 20),
+            span("classify.generate", "classify", 2, 9, kind="generation", cost="0.0000045"),
+            span("plan", "tick", 30, 40),
+            span("tick 2", None, 60, 90),
+        ]
+    )
+
+    assert names(list(walk(roots))) == ["tick", "classify", "classify.generate", "plan", "tick 2"]
+
+
+def test_a_loop_cut_loose_takes_its_place_among_the_roots_by_when_it_started():
+    roots = build_tree([span("a", "b", 0, 10), span("b", "a", 5, 8), span("tick", None, 20, 30)])
+
+    assert names(roots) == ["a", "tick"]
+
+
+def test_building_the_same_spans_twice_gives_the_same_tree():
+    spans = [span("tick", None, 0, 50), span("classify", "tick", 1, 20)]
+    build_tree(spans)
+
+    (tick,) = build_tree(spans)
+
+    assert names(tick.children) == ["classify"]
+
+
+def test_the_calls_total_adds_up_model_calls_only_and_is_rounded_once():
+    run = RunSummary(
+        id=uuid4(), status="done", received_at=T0, sender=None, subject=None,
+        steps=1, cost_usd=Decimal("0.000001"), prompt_version=None, failure_class=None,
+    )
+    roots = build_tree(
+        [
+            span("tick", None, 0, 50),
+            span("classify.generate", "tick", 1, 9, kind="generation", cost="0.0000004"),
+            span("plan.generate", "tick", 10, 19, kind="generation", cost="0.0000004"),
+            span("embed_query", "tick", 20, 25, kind="embedding", cost="0.5"),
+        ]
+    )
+
+    assert RunTrace(run=run, roots=roots, approvals=[]).calls_cost == Decimal("0.000001")
+
+
 # --- runs, as a person picks one ------------------------------------------------------
 
 
@@ -194,6 +240,20 @@ def test_the_list_is_capped(fresh_database):
         assert len(list_runs(connection, limit=2)) == 2
 
 
+@pytest.mark.db
+def test_the_list_never_holds_more_than_a_hundred_runs_or_fewer_than_one(fresh_database):
+    with psycopg.connect(fresh_database) as connection:
+        connection.execute(
+            "INSERT INTO runs (id, channel, status, current_node, state, idempotency_key) "
+            "SELECT gen_random_uuid(), 'email', 'done', 'act', '{}'::jsonb, 'email_msg_' || n "
+            "FROM generate_series(1, 101) AS n"
+        )
+
+    with psycopg.connect(fresh_database) as connection:
+        assert len(list_runs(connection, limit=1000)) == 100
+        assert len(list_runs(connection, limit=0)) == 1
+
+
 def test_nothing_read_back_carries_the_worker_or_the_raw_state():
     for shape in (RunSummary, RunTrace, TraceSpan):
         names_of_fields = {field.name for field in fields(shape)}
@@ -231,6 +291,20 @@ def test_a_run_not_worked_yet_has_an_empty_trace(fresh_database):
 
     assert trace is not None
     assert (trace.run.status, trace.roots, trace.approvals) == ("queued", [], [])
+
+
+@pytest.mark.db
+def test_a_trace_holds_only_its_own_runs_spans_and_approvals(fresh_database, exported):
+    ledger(fresh_database)
+    worked = queue(fresh_database)
+    work(fresh_database, refund_model(720_000))
+    other = insert_run(fresh_database, minute=0, sender="arjun@example.com", subject="Where is my parcel?")
+
+    with psycopg.connect(fresh_database) as connection:
+        assert trace_of(connection, UUID(worked)).approvals
+        trace = trace_of(connection, UUID(other))
+
+    assert (trace.roots, trace.approvals) == ([], [])
 
 
 @pytest.mark.db

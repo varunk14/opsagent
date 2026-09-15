@@ -24,12 +24,12 @@ from app.graph.build import build_graph
 from app.graph.prompts import PROMPT_VERSIONS
 from app.llm import ModelUnavailable
 from app.run_agent import work_next
-from app.web import SECURITY_HEADERS, create_app
+from app.web import SECURITY_HEADERS, create_app, langfuse_link_base, span_view
 from tests.fakes import CLASSIFIED_DUPLICATE, OUTAGE, FakeRetriever, ScriptedModel
 from tests.test_approval_path import decide_on, refund_model, work
 from tests.test_retrieval import loaded, retriever
 from tests.test_run_agent import happy_model, ledger, queue
-from tests.test_traces import insert_run
+from tests.test_traces import insert_run, span
 from tests.test_web import LOCAL, XSS, client_for
 
 pytestmark = pytest.mark.db
@@ -160,9 +160,18 @@ def test_the_approvals_a_run_waited_on_are_listed_with_who_decided(fresh_databas
 
     html = client_for(fresh_database).get(f"/runs/{run_id}").text
 
-    assert "Rs 7,200 is not under the Rs 5,000 limit" in html
+    assert '<p class="reason">Rs 7,200 is not under the Rs 5,000 limit' in html
     assert "approved" in html
     assert "asha" in html
+
+
+def test_only_a_model_call_shows_a_cost_and_only_whole_counts_show_tokens():
+    step = span_view(span("classify", "tick", 1, 20), 1)
+    half_counted = span("classify.generate", "classify", 2, 9, kind="generation", cost="0.0000045")
+    half_counted.output_tokens = None
+
+    assert (step["cost"], step["tokens"]) == ("", "")
+    assert span_view(half_counted, 2)["tokens"] == ""
 
 
 def test_a_run_not_worked_yet_says_so(fresh_database):
@@ -239,11 +248,23 @@ def test_no_langfuse_link_without_one_configured(fresh_database, exported):
     html = client_for(fresh_database).get(f"/runs/{run_id}").text
 
     assert "/traces/" not in html
+    assert "in Langfuse" not in html
+
+
+@pytest.mark.parametrize("url", [None, "", "   "])
+def test_a_blank_langfuse_setting_means_no_link(url):
+    assert langfuse_link_base(url) is None
 
 
 @pytest.mark.parametrize(
     "url",
-    ["https://cloud.langfuse.com/project/x", "http://10.0.0.5:3000/project/x", "javascript:alert(1)", "http://127.0.0.1.evil.example/project/x"],
+    [
+        "https://cloud.langfuse.com/project/x",
+        "http://10.0.0.5:3000/project/x",
+        "javascript:alert(1)",
+        "http://127.0.0.1.evil.example/project/x",
+        "https://127.0.0.1:3000/project/x",
+    ],
 )
 def test_a_langfuse_link_off_this_machine_is_refused(url):
     with pytest.raises(ValueError, match="this machine"):
