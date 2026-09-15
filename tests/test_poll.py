@@ -102,9 +102,11 @@ def test_a_bad_line_leaves_no_half_finished_pass(fresh_database, tmp_path):
     inbox = tmp_path / "broken.jsonl"
     inbox.write_text(f"{good}\n{{not json\n")
 
-    with psycopg.connect(fresh_database) as connection:
-        with pytest.raises(ValueError, match="line 2"):
-            poll_once(connection, inbox)
+    with (
+        psycopg.connect(fresh_database) as connection,
+        pytest.raises(ValueError, match="line 2"),
+    ):
+        poll_once(connection, inbox)
 
     assert run_count(fresh_database) == 0
 

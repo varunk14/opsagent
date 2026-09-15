@@ -126,7 +126,7 @@ class RunRecord(BaseModel):
     next_retry_at: datetime | None = None
     idempotency_key: str
     prompt_version: str | None = None
-    cost_usd: Decimal = Field(default=Decimal("0"), ge=0, max_digits=10, decimal_places=6)
+    cost_usd: Decimal = Field(default=Decimal(0), ge=0, max_digits=10, decimal_places=6)
     failure_class: str | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -140,7 +140,8 @@ class RunRecord(BaseModel):
         int, or a Decimal.
         """
         if isinstance(value, float):
-            raise ValueError("use Decimal or str, not float: binary floats lose money")
+            # Must stay ValueError: pydantic only turns ValueError into a ValidationError.
+            raise ValueError("use Decimal or str, not float: binary floats lose money")  # noqa: TRY004
         return value
 
     @classmethod
