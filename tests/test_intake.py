@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 
 import psycopg
 import pytest
+from pydantic import ValidationError
 
 from app.contracts import Channel, IncomingMessage, RunStatus
 from app.intake import accept
@@ -266,6 +267,12 @@ def test_surrounding_whitespace_is_not_part_of_the_sender(db):
     run_id = accept(db, padded.model_copy(update={"external_id": "padded"})).run_id
     stored = db.execute("SELECT state -> 'untrusted' ->> 'sender' FROM runs WHERE id = %s", (run_id,)).fetchone()[0]
     assert stored == "priya@example.com"
+
+
+def test_a_sender_that_is_not_text_is_refused(db):
+    """Trimming applies to text only; anything else still meets the str type and is refused."""
+    with pytest.raises(ValidationError):
+        IncomingMessage.model_validate({**PRIYA.model_dump(), "sender": 12345})
 
 
 def test_the_row_matches_the_record_the_contract_describes(db):
