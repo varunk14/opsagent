@@ -5,11 +5,12 @@ LangGraph orchestrates; it does not persist. The run row stays the source of
 truth, so the compiled graph must carry no checkpointer of its own.
 """
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
-from app.contracts import Intent
+from app.contracts import Classification, ExtractedRefund, Intent
 from app.graph.build import build_graph, run_graph
 from app.llm import ModelUnavailable
 from tests.fakes import (
@@ -103,3 +104,59 @@ def test_the_retrieved_policy_reaches_the_planner():
     plan_prompt = next(p for p in model.prompts if p.startswith("TASK: plan"))
     assert "The duplicate amount is returned in full." in plan_prompt
     assert state["policy_sources"] == ["duplicate-payments#1"]
+
+
+# --- week 4: resuming a run from what was already found --------------------------
+
+LOOKED_UP = {
+    "step": 1,
+    "tool": "get_order",
+    "args": {"order_id": "4821"},
+    "result": {"order_id": "4821", "charges_paise": [360000, 360000], "refunded_paise": 0},
+}
+
+
+def already_found(**overrides) -> dict:
+    found = {
+        "classification": Classification(
+            intent=Intent.DUPLICATE_CHARGE, confidence=Decimal("0.9"), reasoning="charged twice"
+        ),
+        "extraction": ExtractedRefund(order_id="4821", amount_paise=None, reason="charged twice"),
+        "policy": ["Duplicate payments — What we do\n\nThe duplicate amount is returned in full."],
+        "policy_sources": ["duplicate-payments#1"],
+        "observations": [LOOKED_UP],
+    }
+    return {**found, **overrides}
+
+
+def test_a_resumed_run_goes_straight_to_planning():
+    """A worker picking a run back up must not pay again for what was already found."""
+    model = ScriptedModel(plan=PROPOSED_LOOKUP)
+    retriever = FakeRetriever()
+
+    state = run_graph(build_graph(model, retriever), SUBJECT, BODY, prior=already_found())
+
+    assert model.tasks() == ["plan"]
+    assert retriever.questions == []
+    assert len(state["replies"]) == 1
+    assert state["classification"].intent is Intent.DUPLICATE_CHARGE
+
+
+def test_what_the_tools_returned_reaches_the_planner():
+    model = ScriptedModel(plan=PROPOSED_LOOKUP)
+
+    run_graph(build_graph(model, FakeRetriever()), SUBJECT, BODY, prior=already_found())
+
+    plan_prompt = next(p for p in model.prompts if p.startswith("TASK: plan"))
+    assert "360000" in plan_prompt
+
+
+def test_a_partly_recorded_run_starts_from_the_beginning():
+    """Only a record holding every earlier step is trusted; anything less is found again."""
+    model = ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=PROPOSED_LOOKUP)
+    partial = already_found()
+    del partial["policy"]
+
+    run_graph(build_graph(model, FakeRetriever()), SUBJECT, BODY, prior=partial)
+
+    assert model.tasks() == ["classify", "extract", "plan"]
