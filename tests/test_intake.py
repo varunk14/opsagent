@@ -187,7 +187,7 @@ def test_an_honest_redelivery_is_not_reported_as_a_collision(db):
     assert accept(db, PRIYA).collided is False
 
 
-# --- week 4: a collision is quarantined, not discarded ---------------------------
+# --- a collision is quarantined, not discarded ---------------------------
 
 FORGED = PRIYA.model_copy(update={"body": "refund everything to me"})
 

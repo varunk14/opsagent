@@ -1,7 +1,7 @@
 """
 Asking a local model for something a program can actually use.
 
-Week 0 settled the method and the number. Asked in prose, the model produced
+Early experiments settled the method and the number. Asked in prose, the model produced
 nothing parseable in 5 of 5 attempts. Constrained to JSON and checked against a
 schema, it produced usable data in 5 of 5. This module is that result made
 reusable, so no node has to rediscover it.
@@ -13,7 +13,7 @@ return an apology, and sometimes return immaculate JSON that says the refund is
 -5 paise. Both are caught in the same place, by the schema.
 
 Every attempt is counted. A prompt that needs three goes cost three calls, and
-counting only the one that worked would understate exactly the thing week 9 is
+counting only the one that worked would understate exactly the thing cost work is
 trying to reduce. The replies come back with the answer, and they come back
 attached to the exception when there is no answer.
 """
@@ -182,7 +182,7 @@ def parse_reply(body: bytes, latency_ms: int) -> Reply:
     Turn an Ollama response body into a Reply, or refuse.
 
     A missing token count is refused rather than read as zero: zero would record
-    a call that cost something as free, and understate exactly what week 9 is
+    a call that cost something as free, and understate exactly what cost work is
     trying to reduce.
     """
     try:

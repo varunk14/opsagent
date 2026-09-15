@@ -1,7 +1,7 @@
 """
 The approval path in the worker: the guardrail decides at the act step, a person decides the rest.
 
-Week 5. A refund the guardrail allows is paid through the keyed executor and
+A refund the guardrail allows is paid through the keyed executor and
 the run is done. One it does not allow becomes a pending approval, and the run
 waits with nothing paid. Approved, the worker pays exactly the stored refund --
 without asking the model again, and without judging it again, since a person has

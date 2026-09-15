@@ -1,5 +1,5 @@
 """
-The handbook's done-when for week 5, word for word, as tests.
+The acceptance criterion for guardrails, word for word, as tests.
 
   "A Rs 7,200 refund pauses for approval and a Rs 900 one does not, and changing
    the threshold changes the behaviour without a code change."
@@ -75,7 +75,7 @@ def test_lowering_the_threshold_pauses_the_rs_900_refund_without_a_code_change(f
 
 
 def test_raising_the_confidence_threshold_pauses_the_rs_900_refund_too(fresh_database):
-    """The other threshold the handbook's week 5 names: confidence."""
+    """The other threshold: confidence."""
     ledger(fresh_database)
     run_id = queue(fresh_database)
     change_threshold(fresh_database, min_confidence=Decimal("0.95"))

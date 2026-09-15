@@ -1,7 +1,7 @@
 """
 One pass over an inbox, end to end.
 
-This is Week 1's "done when": a message arrives and a row appears with the right
+This is intake's acceptance test: a message arrives and a row appears with the right
 fields. The second pass is the part that matters. Running it again over the same
 inbox must leave the database exactly as it was, because in a month that is a
 poller restarting after a deploy, re-reading everything it had already handled.

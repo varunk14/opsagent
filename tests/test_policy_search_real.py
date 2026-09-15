@@ -1,5 +1,5 @@
 """
-Week 3's done-when, on the real embedding model and the real policy documents.
+Retrieval's acceptance test, on the real embedding model and the real policy documents.
 
 "charged twice" must find the duplicate-payment policy, whose text contains
 neither word (tests/test_policy_chunking.py guards that), among unrelated

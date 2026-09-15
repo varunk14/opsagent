@@ -5,7 +5,7 @@
 -- the suite. Only 000_bootstrap.sql runs at container start, since creating a
 -- database is the one thing a normal connection cannot do.
 --
--- Two deliberate departures from the handbook's sketch, both making the database
+-- Two deliberate departures from the original design sketch, both making the database
 -- enforce what was written there only as a comment:
 --
 --   * status columns carry CHECK constraints. A typo that invents a seventh run

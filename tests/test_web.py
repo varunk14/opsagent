@@ -143,7 +143,7 @@ def test_what_the_model_wrote_is_escaped(fresh_database):
 
 
 def test_the_worker_that_held_the_run_is_never_shown(fresh_database):
-    """Carried from week 4: locked_by is a hostname and a process id."""
+    """Carried from an earlier review: locked_by is a hostname and a process id."""
     waiting_refund(fresh_database, locked_by="build-host-4242")
 
     assert "build-host-4242" not in client_for(fresh_database).get("/approvals").text

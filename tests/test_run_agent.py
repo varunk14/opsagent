@@ -1,8 +1,8 @@
 """
 The driver: take a queued run and work it one committed step at a time.
 
-From week 4 the tools run. get_order and escalate_to_human execute through the
-keyed executor; from week 5 issue_refund is judged by the guardrail, and paid or
+The tools run. get_order and escalate_to_human execute through the
+keyed executor; issue_refund is judged by the guardrail, and paid or
 handed to a person (tests/test_approval_path.py covers that path). Each
 executed step is committed with the run's record before the next one starts, so
 a worker that dies loses at most the step in flight.

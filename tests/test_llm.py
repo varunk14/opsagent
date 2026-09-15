@@ -1,7 +1,7 @@
 """
 Asking a model for something a program can use.
 
-Week 0 settled what works: constrain the output and check it against a schema at
+Early experiments settled what works: constrain the output and check it against a schema at
 the boundary. Raw prose scored 0 of 5; constrained output plus validation scored
 5 of 5. This module is that result made reusable, so no node has to remember it.
 
@@ -74,7 +74,7 @@ def test_one_good_reply_costs_one_call():
 
 def test_prose_instead_of_json_is_retried():
     """
-    The exact week 0 failure. The model explains itself instead of answering,
+    The exact failure the early experiments found. The model explains itself instead of answering,
     and the explanation is worthless to a program.
     """
     model = FakeModel(
@@ -139,7 +139,7 @@ def test_every_attempt_is_counted_not_only_the_one_that_worked():
     """
     The attempts that failed were still paid for. Counting only the successful
     one understates the cost of a prompt that needs two goes, which is exactly
-    the cost week 9 is trying to bring down.
+    the cost later work is trying to bring down.
     """
     model = FakeModel("rubbish", "more rubbish", '{"order_id": "1", "amount_paise": 0}')
 

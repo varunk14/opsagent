@@ -128,7 +128,7 @@ def test_the_order_id_is_shown_without_quote_marks():
     assert "'4821'" not in plan()
 
 
-# --- week 4: tools run, and their results come back ----------------------------
+# --- tools run, and their results come back ----------------------------
 
 LOOKUP = {
     "step": 1,
@@ -156,12 +156,12 @@ def observed(prompt: str) -> str:
 
 
 def test_the_plan_no_longer_claims_nothing_runs():
-    """From week 4 get_order and escalate_to_human really run; the old line would be a lie."""
+    """get_order and escalate_to_human really run; the old line would be a lie."""
     assert "Nothing you propose runs on its own" not in plan()
 
 
 def test_the_plan_says_a_refund_may_wait_for_a_person():
-    """From week 5 some refunds are paid at once; the old line would be a lie in the other direction."""
+    """Some refunds are now paid at once; the old line would be a lie in the other direction."""
     assert "issue_refund does not run" not in plan()
     assert "may need a person's approval before it is paid" in plan()
 

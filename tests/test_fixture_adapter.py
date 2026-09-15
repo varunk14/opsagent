@@ -5,7 +5,7 @@ Gmail comes later and is the same shape -- something that produces
 IncomingMessage objects and knows nothing about what happens next. Starting with
 a file is not a shortcut. It means the whole intake path is testable with no
 credential, runs identically in CI, and is replayable: the same file in, the same
-run ids out, which is exactly what week 7's golden set will need.
+run ids out, which is exactly what an evaluation golden set will need.
 
 JSONL because that is the format the eval set will use, and having one format
 for both means a case that breaks in production can be appended to the golden

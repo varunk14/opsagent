@@ -304,7 +304,7 @@ def test_the_handed_over_list_never_carries_the_worker_either(db):
 
 
 def test_the_list_never_carries_the_worker_that_held_the_run(db):
-    """Carried from week 4: locked_by is a hostname and a process id, and has no business on a screen."""
+    """Carried from an earlier review: locked_by is a hostname and a process id, and has no business on a screen."""
     run_id = waiting_run(db, locked_by="build-host-4242")
     ask(db, run_id)
 

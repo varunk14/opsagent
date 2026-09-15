@@ -7,7 +7,7 @@ there), every intent is defined (without definitions a duplicate charge read as
 a generic refund), and customer text is fenced as data, with the fence made
 impossible for that text to close.
 
-From week 4 the planner also sees what this run's tool calls returned, fenced the
+The planner also sees what this run's tool calls returned, fenced the
 same way: an order's fields come from our database, but the arguments and any
 reason text were shaped by a model that had read the customer's message.
 """

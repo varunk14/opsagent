@@ -6,7 +6,7 @@
 **Settings:** one model for everything. No routing, no caching, no prompt
 trimming, no structured output. The naive version, deliberately.
 
-## The numbers week 9 will be compared against
+## The numbers later optimisation will be compared against
 
 | | |
 |---|---|
@@ -20,7 +20,7 @@ trimming, no structured output. The naive version, deliberately.
 Read the p95 with care. Percentiles here are nearest-rank: sort the
 12 runs from fastest to slowest and take the 12th. With a sample
 this small that is the slowest run observed, not an estimate of a tail. It is
-reported because week 9 needs the same statistic computed the same way, not
+reported because the later comparison needs the same statistic computed the same way, not
 because 12 runs can characterise a distribution.
 
 A warm-up run is made and discarded before measuring, so a cold model load does
@@ -49,5 +49,5 @@ property of the prompt and should reproduce. Latency depends on the machine and
 will not.
 
 Every run behind the table above is in `baseline-measurements.json`, so a real
-price list can be substituted later and both ends of the week 9 comparison
+price list can be substituted later and both ends of the before-and-after comparison
 re-derived without measuring anything again.

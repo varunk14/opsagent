@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS guardrails (
     updated_at              timestamptz NOT NULL DEFAULT now()
 );
 
--- The handbook's defaults: under Rs 5,000, at least 0.85 confident.
+-- The defaults: under Rs 5,000, at least 0.85 confident.
 INSERT INTO guardrails (auto_refund_limit_paise, min_confidence, updated_by)
 VALUES (500000, 0.85, 'migration 006')
 ON CONFLICT DO NOTHING;

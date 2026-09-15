@@ -85,7 +85,7 @@ POLICIES = Path(__file__).resolve().parent.parent / "policies"
 
 def test_the_duplicate_payment_policy_never_says_charged_or_twice():
     """
-    Week 3 is done when "charged twice" finds this policy by meaning. If the
+    Retrieval is done when "charged twice" finds this policy by meaning. If the
     words were in the text, keyword matching would pass that test by accident.
     """
     text = (POLICIES / "duplicate-payments.md").read_text()

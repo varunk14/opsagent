@@ -44,7 +44,7 @@ to fail first, because the failure is the part worth seeing.
 | `app/approvals.py`, `app/web.py` | The approval queue, and a local screen on `127.0.0.1:8055` to approve or reject with the evidence in front of you. It also lists every run waiting for a person with nothing to approve. Everything shown is escaped, every decision needs the page's token, and the screen cannot pay anything itself. |
 | `app/dead_letters.py` | Runs that ran out of attempts, and quarantined messages, each with the reason. `python -m app.dead_letters` lists them and requeues a run. |
 | `app/seed.py` | Loads a small fictional ledger: customers, orders, and the charges behind them. |
-| `app/baseline.py` | What a run costs before any optimisation, so week 9 has something to compare against. |
+| `app/baseline.py` | What a run costs before any optimisation, so later cost work has something to compare against. |
 
 The tables are defined in `migrations/`, including a refund ledger that refuses, inside Postgres, to
 pay back more than an order was charged. `policies/` holds six short fictional store policies.
@@ -110,7 +110,7 @@ that step without repeating it.
 ## Cost
 
 `BASELINE.md` holds what one run costs before any optimisation — tokens, latency,
-and a cost derived from a fixed reference rate. Week 9 is measured against it.
+and a cost derived from a fixed reference rate. Cost optimisation is measured against it.
 The rate is arbitrary and says so; it is the same on both sides, so the ratio is
 what survives.
 
@@ -137,9 +137,9 @@ failure modes are the interesting part, and each one is pinned by a test.
 
 ## Planned
 
-Tracing and a live deployment (week 6), an evaluation
-suite gating every pull request (week 7), a failure taxonomy (week 8), and cost routing measured
-against `BASELINE.md` (week 9).
+Tracing and a live deployment, an evaluation
+suite gating every pull request, a failure taxonomy, and cost routing measured
+against `BASELINE.md`.
 
 ## Running the experiments
 
