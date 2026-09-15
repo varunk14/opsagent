@@ -97,6 +97,13 @@ def test_a_run_that_died_of_infrastructure_keeps_its_failure_class_and_gets_no_c
     assert classify(dead) is None
 
 
+def test_a_dead_run_gets_no_category_even_with_a_loop_in_its_last_state():
+    """Found by mutation: a run that looped and then died of infrastructure is the dead-letter list's, not ours."""
+    dead = rest(status="dead", failure_class="lock_expired", failure="plan: repeated an earlier step", refunds_paise=())
+
+    assert classify(dead) is None
+
+
 @pytest.mark.parametrize("failure", ["plan: repeated an earlier step", "plan: step budget of 4 used"])
 def test_repeating_a_step_or_using_the_whole_budget_is_a_loop(failure):
     handed_over = rest(status="waiting_approval", failure=failure, refunds_paise=(), steps=[LOOKUP])
@@ -267,6 +274,22 @@ def test_backfill_classifies_runs_that_rested_before_the_column_existed_once(fre
         (category,) = connection.execute("SELECT failure_category FROM runs").fetchone()
 
     assert (first, second, category) == (1, 0, "loop")
+
+
+@pytest.mark.db
+def test_backfill_counts_only_the_runs_that_got_a_category(fresh_database):
+    """Found by mutation: a run that did what it should is looked at, gets nothing, and is not counted."""
+    looping, paying = CASES["n-002"], CASES["n-001"]
+    run_cases(fresh_database, [looping], looping_model(looping), FakeEmbedder())
+    run_cases(fresh_database, [paying], script_for(paying.expect.order_id, paying.expect.refund_paise), FakeEmbedder())
+
+    with psycopg.connect(fresh_database) as connection:
+        connection.execute("UPDATE runs SET failure_category = NULL")
+        written = backfill(connection)
+        rows = connection.execute("SELECT status, failure_category FROM runs ORDER BY created_at").fetchall()
+
+    assert written == 1
+    assert rows == [("waiting_approval", "loop"), ("done", None)]
 
 
 @pytest.mark.db
