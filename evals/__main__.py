@@ -14,10 +14,13 @@ model judges each smoke case, and its verdicts are recorded with everything else
 
 `gate` fails -- exit status 1, every reason printed -- when a measure is worse than the
 committed baseline, when a case that was safe became unsafe, when a prompt or case changed
-since recording, or when the committed scoreboard no longer says what the recordings score.
-The judge's verdicts are on that scoreboard, so a changed verdict shows, but the judge's score
-fails nothing. There is no baseline until `accept` writes one, and changing it is a reviewed
-change to a committed file.
+since recording, when the committed scoreboard no longer says what the recordings score, or
+when the history does not end with the baseline. The judge's verdicts are on that scoreboard,
+so a changed verdict shows, but the judge's score fails nothing. There is no baseline until
+`accept` writes one, and changing it is a reviewed change to a committed file.
+
+`accept` writes the baseline and the scoreboard and appends one line to evals/history.jsonl:
+the trend the failure chart shows, one point per accepted baseline.
 
 `verify` is the check a replay cannot make. A recording is keyed by its prompt, not by what the
 model said, so a hand-edited reply or verdict would replay as real; recording again live, where
@@ -46,6 +49,7 @@ from psycopg.conninfo import make_conninfo
 
 from app.embeddings import EMBEDDING_MODEL, Embedder, OllamaEmbedder
 from app.llm import DEFAULT_MODEL, Model, Ollama
+from evals import history
 from evals.golden import EVALS_DIR, GoldenCase, load_cases
 from evals.judge import Verdict, judge_board_of, judge_cases, render_judge
 from evals.recording import (
@@ -62,6 +66,7 @@ from evals.scoring import Scoreboard, compare, render_markdown, scoreboard_of
 RECORDINGS = EVALS_DIR / "recordings.jsonl"
 BASELINE = EVALS_DIR / "baseline.json"
 SCOREBOARD = EVALS_DIR / "scoreboard.md"
+HISTORY = history.HISTORY
 FULL = EVALS_DIR / "full.md"
 
 ADMIN_URL_VAR = "OPSAGENT_EVAL_ADMIN_URL"
@@ -206,20 +211,28 @@ def gate(
     scoreboard_path: Path = SCOREBOARD,
     model_name: str = DEFAULT_MODEL,
     embedding_model: str = EMBEDDING_MODEL,
+    history_path: Path = HISTORY,
 ) -> list[str]:
     """Every reason the recordings do not pass. Empty means nothing is worse and no safe case became unsafe."""
-    if not baseline_path.exists():
-        return [f"there is no baseline at {baseline_path}: run `python -m evals accept` once and commit what it writes"]
+    for path, what in ((baseline_path, "baseline"), (history_path, "history")):
+        if not path.exists():
+            return [f"there is no {what} at {path}: run `python -m evals accept` once and commit what it writes"]
     try:
         results = replay(admin_url, cases, recordings_path, model_name, embedding_model)
         verdicts = recorded_verdicts(cases, results, recordings_path, model_name)
     except RecordingMissing as missing:
         return [str(missing)]
 
-    problems = compare(scoreboard_of(cases, results), Scoreboard.from_json(baseline_path.read_text()))
+    board = scoreboard_of(cases, results)
+    problems = compare(board, Scoreboard.from_json(baseline_path.read_text()))
     if not scoreboard_path.exists() or scoreboard_path.read_text() != scoreboard_text(cases, results, verdicts):
         problems.append(
             f"the committed scoreboard {scoreboard_path.name} does not say what the recordings score: "
+            "run `python -m evals accept` if the change is deliberate"
+        )
+    if not history.ends_with(history_path, board):
+        problems.append(
+            f"the history {history_path.name} does not end with what the recordings score: "
             "run `python -m evals accept` if the change is deliberate"
         )
     return problems
@@ -233,12 +246,14 @@ def accept(
     scoreboard_path: Path = SCOREBOARD,
     model_name: str = DEFAULT_MODEL,
     embedding_model: str = EMBEDDING_MODEL,
+    history_path: Path = HISTORY,
 ) -> Scoreboard:
-    """Score the recordings and write that as the baseline and scoreboard, for a reviewed commit."""
+    """Score the recordings and write that as the baseline, the scoreboard and one line of history, for a reviewed commit."""
     results = replay(admin_url, cases, recordings_path, model_name, embedding_model)
     board = scoreboard_of(cases, results)
     baseline_path.write_text(board.to_json())
     scoreboard_path.write_text(scoreboard_text(cases, results, recorded_verdicts(cases, results, recordings_path, model_name)))
+    history.append(history_path, board)
     return board
 
 
@@ -258,7 +273,7 @@ def main(argv: list[str]) -> int:
     for name, purpose in (
         ("record", "run the golden cases with the live model and keep what it said"),
         ("gate", "replay the recordings and fail on anything worse than the baseline or newly unsafe"),
-        ("accept", "write the baseline and scoreboard the recordings score"),
+        ("accept", "write the baseline, the scoreboard and a line of history the recordings score"),
         ("verify", "record every case again, live, and report anything that differs from the committed recordings"),
         ("full", "record and judge every case with the live model, and write the whole board"),
     ):
@@ -272,6 +287,7 @@ def main(argv: list[str]) -> int:
         command.add_argument("--recordings", type=Path, default=RECORDINGS)
         command.add_argument("--baseline", type=Path, default=BASELINE)
         command.add_argument("--scoreboard", type=Path, default=SCOREBOARD)
+        command.add_argument("--history", type=Path, default=HISTORY)
         command.add_argument("--full", type=Path, default=FULL, help="where `full` writes the whole board")
         if name == "record":
             command.add_argument("--fresh", action="store_true", help="discard what is recorded and ask the model again")
@@ -302,14 +318,14 @@ def main(argv: list[str]) -> int:
     if arguments.command == "accept":
         accept(
             arguments.admin_url, cases, arguments.recordings, arguments.baseline, arguments.scoreboard,
-            embedding_model=EMBEDDING_MODEL,
+            embedding_model=EMBEDDING_MODEL, history_path=arguments.history,
         )
         print(arguments.scoreboard.read_text())
         return 0
 
     problems = gate(
         arguments.admin_url, cases, arguments.recordings, arguments.baseline, arguments.scoreboard,
-        embedding_model=EMBEDDING_MODEL,
+        embedding_model=EMBEDDING_MODEL, history_path=arguments.history,
     )
     return report(problems, f"{len(cases)} case(s): no worse than the baseline, no safe case became unsafe")
 
