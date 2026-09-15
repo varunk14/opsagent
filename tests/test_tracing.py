@@ -1,0 +1,360 @@
+"""
+Tracing: one OpenTelemetry trace per run, kept in our own table and copied to Langfuse.
+
+A run's trace id is the run's own UUID, so every tick, every worker, a resume after a
+crash and an approval days later all land in one trace. Finished spans are buffered in
+memory and written to the spans table inside the transaction that commits the step, so
+a tick that never committed leaves no spans, exactly as it leaves no steps. The copy
+to Langfuse goes over OTLP to a loopback address only, and a Langfuse that is down or
+slow never raises into a tick or holds it up.
+
+The resource sent with every span names the service and nothing about this machine:
+the worker's host name and pid are what `locked_by` holds, and they stay out of spans
+for the same reason they stay off the approvals screen.
+"""
+
+import time
+from decimal import Decimal
+from uuid import UUID, uuid4
+
+import psycopg
+import pytest
+from opentelemetry import trace
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
+from psycopg.types.json import Jsonb
+
+from app.tracing import (
+    SERVICE_NAME,
+    Attr,
+    Tracing,
+    discard,
+    exporter_from_env,
+    loopback_exporter,
+    record_spans,
+    rows_for,
+    run_context,
+    tracer,
+)
+
+RUN = UUID("a2a97b37-62fb-4a4d-ab07-60172aa05ef9")
+OTHER_RUN = UUID("812d8a9e-cd5b-41b5-bf36-618f2155bfb7")
+KEYS = {"public_key": "pk-lf-test", "secret_key": "sk-lf-test"}
+
+
+def finished(exported: InMemorySpanExporter) -> dict[str, object]:
+    return {span.name: span for span in exported.get_finished_spans()}
+
+
+# --- one trace per run ------------------------------------------------------------
+
+
+def test_a_span_inside_a_run_takes_the_run_id_as_its_trace_id(exported):
+    with run_context(RUN), tracer().start_as_current_span("tick"):
+        with tracer().start_as_current_span("classify"):
+            pass
+
+    spans = finished(exported)
+    assert spans["tick"].context.trace_id == RUN.int
+    assert spans["classify"].context.trace_id == RUN.int
+    assert spans["classify"].parent.span_id == spans["tick"].context.span_id
+
+
+def test_two_ticks_of_one_run_in_separate_contexts_share_the_trace(exported):
+    for _ in range(2):
+        with run_context(RUN), tracer().start_as_current_span("tick"):
+            pass
+
+    first, second = exported.get_finished_spans()
+    assert first.context.trace_id == second.context.trace_id == RUN.int
+    assert first.context.span_id != second.context.span_id
+
+
+def test_two_runs_in_one_process_never_share_a_trace(exported):
+    with run_context(RUN), tracer().start_as_current_span("tick"):
+        pass
+    with run_context(OTHER_RUN), tracer().start_as_current_span("tick"):
+        pass
+
+    first, second = exported.get_finished_spans()
+    assert (first.context.trace_id, second.context.trace_id) == (RUN.int, OTHER_RUN.int)
+
+
+def test_a_span_outside_any_run_gets_a_trace_id_of_its_own(exported):
+    with tracer().start_as_current_span("housekeeping"):
+        pass
+    with tracer().start_as_current_span("housekeeping"):
+        pass
+
+    first, second = exported.get_finished_spans()
+    assert first.context.trace_id not in (0, second.context.trace_id)
+
+
+# --- nothing about this machine leaves it ---------------------------------------
+
+
+def test_the_resource_names_the_service_and_nothing_else(monkeypatch):
+    """Even with the standard environment variable set, no host name or pid travels with a span."""
+    monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", "host.name=leaky-mac,process.pid=4242")
+    exported = InMemorySpanExporter()
+    own = Tracing(exported, immediate=True)
+
+    with own.tracer.start_as_current_span("tick"):
+        pass
+
+    (span,) = exported.get_finished_spans()
+    assert dict(span.resource.attributes) == {"service.name": SERVICE_NAME}
+    own.shutdown()
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://example.com/api/public/otel/v1/traces",
+        "http://10.0.0.5:3000/api/public/otel/v1/traces",
+        "http://langfuse:3000/api/public/otel/v1/traces",
+        "https://cloud.langfuse.com/api/public/otel/v1/traces",
+        "http://127.0.0.1.evil.example/api/public/otel/v1/traces",
+        "ftp://127.0.0.1/api/public/otel/v1/traces",
+    ],
+)
+def test_an_endpoint_off_this_machine_is_refused(endpoint):
+    with pytest.raises(ValueError, match="this machine"):
+        loopback_exporter(endpoint, **KEYS)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    ["http://127.0.0.1:3000/api/public/otel/v1/traces", "http://localhost:3000/api/public/otel/v1/traces"],
+)
+def test_a_loopback_endpoint_is_accepted(endpoint):
+    assert loopback_exporter(endpoint, **KEYS) is not None
+
+
+def test_nothing_is_exported_unless_the_endpoint_is_set():
+    assert exporter_from_env({}) is None
+
+
+def test_an_endpoint_without_the_langfuse_keys_is_refused():
+    with pytest.raises(ValueError, match="OPSAGENT_LANGFUSE_SECRET_KEY"):
+        exporter_from_env(
+            {"OPSAGENT_OTLP_ENDPOINT": "http://127.0.0.1:3000/api/public/otel", "OPSAGENT_LANGFUSE_PUBLIC_KEY": "pk"}
+        )
+
+
+def test_the_environment_builds_a_loopback_exporter():
+    environ = {
+        "OPSAGENT_OTLP_ENDPOINT": "http://127.0.0.1:3000/api/public/otel",
+        "OPSAGENT_LANGFUSE_PUBLIC_KEY": "pk-lf-x",
+        "OPSAGENT_LANGFUSE_SECRET_KEY": "sk-lf-y",
+    }
+
+    assert exporter_from_env(environ) is not None
+
+
+def test_a_langfuse_that_cannot_be_reached_neither_raises_nor_stalls():
+    """Port 9 on loopback has nothing listening. Spans still finish at once, and shutdown is bounded."""
+    own = Tracing(loopback_exporter("http://127.0.0.1:9/api/public/otel/v1/traces", **KEYS))
+
+    started = time.perf_counter()
+    for _ in range(50):
+        with own.tracer.start_as_current_span("tick"):
+            pass
+    assert time.perf_counter() - started < 1.0
+
+    started = time.perf_counter()
+    own.shutdown()
+    assert time.perf_counter() - started < 15.0
+
+
+def test_installing_a_second_tracing_in_one_process_is_refused(tracing):
+    """OpenTelemetry keeps the first global provider; a silent second one would trace nothing."""
+    second = Tracing(InMemorySpanExporter(), immediate=True)
+
+    with pytest.raises(RuntimeError, match="already installed"):
+        second.install()
+    second.shutdown()
+
+
+def test_the_global_tracer_provider_is_the_installed_one(tracing):
+    assert trace.get_tracer_provider() is tracing.provider
+
+
+# --- what a span becomes as a row ----------------------------------------------
+
+
+def test_rows_are_ordered_parents_first_by_start_time(exported):
+    with run_context(RUN), tracer().start_as_current_span("tick"):
+        with tracer().start_as_current_span("classify"):
+            with tracer().start_as_current_span("generate"):
+                pass
+        with tracer().start_as_current_span("act"):
+            pass
+
+    rows = rows_for(exported.get_finished_spans())
+
+    assert [row.name for row in rows] == ["tick", "classify", "generate", "act"]
+    by_name = {row.name: row for row in rows}
+    assert by_name["classify"].parent_span_id == by_name["tick"].span_id
+    assert by_name["generate"].parent_span_id == by_name["classify"].span_id
+    assert by_name["tick"].parent_span_id is None
+    assert all(row.trace_id == RUN for row in rows)
+    assert all(len(row.span_id) == 16 for row in rows)
+    assert by_name["generate"].started_at >= by_name["classify"].started_at
+    assert by_name["generate"].ended_at <= by_name["classify"].ended_at
+
+
+def test_a_generation_row_carries_model_tokens_cost_and_version(exported):
+    with run_context(RUN), tracer().start_as_current_span("generate") as span:
+        span.set_attribute(Attr.TYPE, "generation")
+        span.set_attribute(Attr.MODEL, "llama3.1:8b")
+        span.set_attribute(Attr.INPUT_TOKENS, 310)
+        span.set_attribute(Attr.OUTPUT_TOKENS, 40)
+        span.set_attribute(Attr.COST_USD, "0.0000705")
+        span.set_attribute(Attr.PROMPT_VERSION, "4c0e5dd7b3a9")
+        span.set_attribute(Attr.LATENCY_MS, 412)
+
+    (row,) = rows_for(exported.get_finished_spans())
+
+    assert (row.kind, row.model, row.input_tokens, row.output_tokens) == ("generation", "llama3.1:8b", 310, 40)
+    assert row.cost_usd == Decimal("0.0000705")
+    assert row.prompt_version == "4c0e5dd7b3a9"
+    assert row.status == "ok"
+    assert row.attributes[Attr.LATENCY_MS] == 412
+
+
+def test_a_span_with_no_type_is_a_plain_span_with_nothing_counted(exported):
+    with run_context(RUN), tracer().start_as_current_span("tick"):
+        pass
+
+    (row,) = rows_for(exported.get_finished_spans())
+
+    assert (row.kind, row.model, row.input_tokens, row.output_tokens, row.cost_usd, row.prompt_version) == (
+        "span",
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+
+def test_an_error_span_keeps_its_status_and_message(exported):
+    with run_context(RUN), tracer().start_as_current_span("classify") as span:
+        span.set_status(StatusCode.ERROR, "model_unavailable")
+
+    (row,) = rows_for(exported.get_finished_spans())
+
+    assert (row.status, row.status_message) == ("error", "model_unavailable")
+
+
+# --- written with the step, or not at all ----------------------------------------
+
+
+def insert_run(connection, run_id: UUID) -> None:
+    connection.execute(
+        "INSERT INTO runs (id, channel, status, current_node, state, idempotency_key) "
+        "VALUES (%s, 'email', 'running', 'classify', %s, %s)",
+        (run_id, Jsonb({}), f"email_msg_{run_id.hex}"),
+    )
+
+
+def stored(connection, run_id: UUID) -> list[tuple]:
+    return connection.execute(
+        "SELECT name, parent_span_id IS NULL FROM spans WHERE trace_id = %s ORDER BY started_at, span_id", (run_id,)
+    ).fetchall()
+
+
+@pytest.mark.db
+def test_record_spans_writes_the_buffer_in_the_callers_transaction(db, exported):
+    run_id = uuid4()
+    insert_run(db, run_id)
+    with run_context(run_id), tracer().start_as_current_span("tick"):
+        with tracer().start_as_current_span("classify"):
+            pass
+
+    written = record_spans(db, run_id)
+
+    assert written == 2
+    assert stored(db, run_id) == [("tick", True), ("classify", False)]
+    assert record_spans(db, run_id) == 0  # the buffer was taken, not copied
+
+
+@pytest.mark.db
+def test_another_runs_spans_are_not_written_with_this_one(db, exported):
+    mine, theirs = uuid4(), uuid4()
+    insert_run(db, mine)
+    insert_run(db, theirs)
+    with run_context(theirs), tracer().start_as_current_span("tick"):
+        pass
+    with run_context(mine), tracer().start_as_current_span("tick"):
+        pass
+
+    assert record_spans(db, mine) == 1
+    assert stored(db, theirs) == []
+    assert record_spans(db, theirs) == 1
+
+
+@pytest.mark.db
+def test_discard_drops_what_a_tick_that_never_committed_buffered(db, exported):
+    """A worker that lost its claim, or raised, must not write those spans with its next tick."""
+    run_id = uuid4()
+    insert_run(db, run_id)
+    with run_context(run_id), tracer().start_as_current_span("tick"):
+        pass
+
+    discard(run_id)
+    with run_context(run_id), tracer().start_as_current_span("tick"):
+        pass
+
+    assert record_spans(db, run_id) == 1
+
+
+@pytest.mark.db
+def test_a_span_that_ends_after_the_write_waits_for_the_next_one(db, exported):
+    """Only finished spans are written; one still open goes with the next write."""
+    run_id = uuid4()
+    insert_run(db, run_id)
+    with run_context(run_id), tracer().start_as_current_span("tick"):
+        with tracer().start_as_current_span("classify"):
+            pass
+        assert record_spans(db, run_id) == 1
+
+    assert record_spans(db, run_id) == 1
+    assert [name for name, _ in stored(db, run_id)] == ["tick", "classify"]
+
+
+@pytest.mark.db
+def test_the_exported_copy_and_the_recorded_rows_are_the_same_spans(db, exported):
+    run_id = uuid4()
+    insert_run(db, run_id)
+    with run_context(run_id), tracer().start_as_current_span("tick"):
+        with tracer().start_as_current_span("plan"):
+            pass
+
+    record_spans(db, run_id)
+
+    recorded = {span_id for (span_id,) in db.execute("SELECT span_id FROM spans WHERE trace_id = %s", (run_id,))}
+    assert recorded == {format(span.context.span_id, "016x") for span in exported.get_finished_spans()}
+
+
+@pytest.mark.db
+def test_a_generation_row_is_refused_without_its_cost(db, exported):
+    """The table itself insists a model call is costed: a free-looking call is the lie cost work must not tell."""
+    run_id = uuid4()
+    insert_run(db, run_id)
+    with run_context(run_id), tracer().start_as_current_span("generate") as span:
+        span.set_attribute(Attr.TYPE, "generation")
+        span.set_attribute(Attr.MODEL, "llama3.1:8b")
+
+    with pytest.raises(psycopg.errors.CheckViolation, match="spans_generation_is_costed"):
+        record_spans(db, run_id)
+
+
+def test_record_spans_writes_nothing_when_tracing_is_not_installed(monkeypatch):
+    """A process that never set tracing up has nothing to write, and must not fail for it."""
+    from app import tracing as module
+
+    monkeypatch.setattr(module, "_installed", None)
+
+    assert record_spans(object(), uuid4()) == 0

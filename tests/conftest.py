@@ -75,6 +75,31 @@ def db(migrated_database: str):
         connection.close()
 
 
+@pytest.fixture(scope="session")
+def tracing():
+    """
+    The one tracing set-up a test process gets, exporting straight into memory.
+
+    OpenTelemetry allows one global provider per process, so it is installed once
+    here and every test that traces shares it; `exported` empties it per test.
+    """
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from app.tracing import Tracing
+
+    installed = Tracing(InMemorySpanExporter(), immediate=True).install()
+    yield installed
+    installed.shutdown()
+
+
+@pytest.fixture
+def exported(tracing):
+    """The in-memory exporter, empty at the start of every test, with an empty span buffer."""
+    tracing.exporter.clear()
+    tracing.recorder.clear()
+    return tracing.exporter
+
+
 @pytest.fixture
 def fixture_inbox() -> Path:
     """The sample inbox committed to the repository."""
