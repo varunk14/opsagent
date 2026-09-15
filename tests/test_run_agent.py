@@ -20,6 +20,7 @@ from psycopg import sql
 from app.baseline import REFERENCE_RATE, token_cost
 from app.contracts import Channel, IncomingMessage
 from app.graph.build import build_graph
+from app.graph.prompts import run_prompt_version
 from app.intake import accept
 from app.llm import ModelUnavailable, Reply
 from app.retrieval import PolicySearchUnavailable
@@ -629,3 +630,44 @@ def test_the_driver_reports_how_many_policy_passages_are_loaded(fresh_database):
 
     with psycopg.connect(fresh_database) as connection:
         assert prepare_database(connection) == 2
+
+
+# --- the prompt version a run was worked under ------------------------------------
+
+
+def prompt_version_of(dsn: str, run_id: str) -> str | None:
+    with psycopg.connect(dsn) as connection:
+        return connection.execute("SELECT prompt_version FROM runs WHERE id = %s", (run_id,)).fetchone()[0]
+
+
+def test_a_worked_run_records_the_prompt_version_it_was_planned_under(fresh_database):
+    """Which prompts produced an outcome is on the run, so a later change in behaviour is attributable."""
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    assert prompt_version_of(fresh_database, run_id) is None
+
+    with psycopg.connect(fresh_database) as connection:
+        work_next(connection, happy_graph())
+
+    assert prompt_version_of(fresh_database, run_id) == run_prompt_version()
+
+
+def test_a_run_handed_to_a_person_records_the_prompt_version(fresh_database):
+    run_id = queue(fresh_database)
+    model = ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=PROPOSED_ESCALATE)
+
+    with psycopg.connect(fresh_database) as connection:
+        outcome = work_next(connection, graph_of(model))
+
+    assert outcome.status == "waiting_approval"
+    assert prompt_version_of(fresh_database, run_id) == run_prompt_version()
+
+
+def test_a_run_that_hit_an_outage_records_the_prompt_version_it_was_tried_under(fresh_database):
+    run_id = queue(fresh_database)
+
+    with psycopg.connect(fresh_database) as connection, pytest.raises(ModelUnavailable):
+        work_next(connection, graph_of(ScriptedModel(classify=OUTAGE)))
+
+    assert row(fresh_database, run_id)["status"] == "failed"
+    assert prompt_version_of(fresh_database, run_id) == run_prompt_version()
