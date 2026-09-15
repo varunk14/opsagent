@@ -34,26 +34,31 @@ to fail first, because the failure is the part worth seeing.
 | `app/intake.py`, `app/poll.py` | A message becomes a run exactly once; a bounded pass owns its transaction. |
 | `app/adapters/fixture.py` | The first intake adapter. Reads JSONL; Gmail will be the second. |
 | `app/llm.py` | Asks a local model for JSON that fits a schema, retries with the error fenced as data, counts every attempt's tokens. |
-| `app/tools.py` | What the agent may propose, with argument limits. No implementations: nothing can execute yet. |
-| `app/graph/` | The LangGraph agent: classify → extract → retrieve → plan. Proposes one checked action; never touches the database. |
+| `app/tools.py` | What the agent may propose, as the model sees it: names, descriptions and argument limits, and nothing executable. |
+| `app/graph/` | The LangGraph agent: classify → extract → retrieve → plan. Proposes one checked action; never touches the database. A run picked back up starts at planning with what its earlier steps found. |
 | `app/embeddings.py`, `app/policies.py` | Policy documents chunked, embedded locally with `nomic-embed-text`, stored in pgvector. Reloading unchanged documents embeds nothing. |
 | `app/retrieval.py` | Search by meaning: nearest passages within a distance cutoff, same embedding model only. |
-| `app/run_agent.py` | Claims a queued run with `FOR UPDATE SKIP LOCKED`, walks the graph, records the proposal, its policy sources and its exact cost. |
+| `app/executor.py` | Runs a tool for real, exactly once per operation: every call is keyed `run:step:tool`, and a repeat replays the stored result. An order is reachable only by the customer who placed it. |
+| `app/run_agent.py` | Claims a run with `FOR UPDATE SKIP LOCKED` and works it one committed step at a time. A lookup runs and the agent plans again with the result; a refund is recorded and waits for a person. A run whose worker died is reclaimed once its lock expires and continues from its last committed step. |
+| `app/seed.py` | Loads a small fictional ledger: customers, orders, and the charges behind them. |
 | `app/baseline.py` | What a run costs before any optimisation, so week 9 has something to compare against. |
 
-The six tables are defined in `migrations/`; `policies/` holds six short fictional store policies.
+The tables are defined in `migrations/`, including a refund ledger that refuses, inside Postgres, to
+pay back more than an order was charged. `policies/` holds six short fictional store policies.
 
 ### Running it
 
     docker compose up -d
     ollama pull llama3.1:8b && ollama pull nomic-embed-text
     .venv/bin/python -m app.policies                      # migrate, then load policies
+    .venv/bin/python -m app.seed                          # the fictional ledger
     .venv/bin/python -m app.poll fixtures/inbox.jsonl     # messages become runs
-    .venv/bin/python -m app.run_agent                     # each run gets one proposal
+    .venv/bin/python -m app.run_agent                     # work each run until it waits
 
-Priya's email ("charged twice for order #4821") is classified `duplicate_charge`, retrieves the
-duplicate-payment policy -- which never uses the words "charged" or "twice" -- and ends waiting for
-a decision with the proposal `get_order(4821)`. Nothing executes: that is week 4.
+Priya's email ("charged twice for order #4821") is classified `duplicate_charge` and retrieves the
+duplicate-payment policy -- which never uses the words "charged" or "twice". The agent then looks
+order 4821 up for real and plans again with what the ledger says. A refund it proposes is recorded
+and the run waits for a person: nothing pays out until the approval step in week 5.
 
 ### The experiments
 
@@ -88,6 +93,10 @@ fractional paisa instead of refusing it; a migration runner that does not commit
 against an empty database; an outage partway through a run used to lose the cost of the steps that
 had finished.
 
+Crash recovery is tested with a real crash. `tests/test_resume.py` starts a worker process, kills it
+with SIGKILL the moment its first step commits, and checks that a second worker finishes the run from
+that step without repeating it.
+
 ## Cost
 
 `BASELINE.md` holds what one run costs before any optimisation — tokens, latency,
@@ -95,9 +104,24 @@ and a cost derived from a fixed reference rate. Week 9 is measured against it.
 The rate is arbitrary and says so; it is the same on both sides, so the ratio is
 what survives.
 
+## Why the durability is hand-rolled
+
+A run is a row in Postgres, not a workflow in Temporal. Workers claim runs with
+`FOR UPDATE SKIP LOCKED`, commit after every step, and take back a run whose worker has been silent
+for five minutes. Every tool call carries an idempotency key built from the operation -- run, step,
+tool -- so a retry replays the first result instead of acting twice.
+
+Temporal would handle all of this. Its cloud version costs money this project does not have, and the
+self-hosted server wants memory the local models need. Building it by hand was also the point: the
+failure modes are the interesting part, and each one is pinned by a test.
+
+* Calling refund twice with one key produces one refund, including two workers racing on the key.
+* A worker killed with SIGKILL mid-run is resumed by another from its last committed step.
+* A worker that lost its claim executes nothing.
+
 ## Planned
 
-Real tools behind idempotency keys with retries and a dead-letter queue (week 4), a human approval
+Retries with backoff, rate limiting and a dead-letter table (the rest of week 4), a human approval
 queue and policy limits in code (week 5), tracing and a live deployment (week 6), an evaluation
 suite gating every pull request (week 7), a failure taxonomy (week 8), and cost routing measured
 against `BASELINE.md` (week 9).
