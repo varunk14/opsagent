@@ -17,9 +17,9 @@ import json
 from dataclasses import replace
 
 import pytest
-from evals.failures import failure_mix, failure_of
 
 from evals.__main__ import accept, gate
+from evals.failures import failure_mix, failure_of
 from evals.golden import load_cases
 from evals.scoring import Scoreboard, render_markdown
 from tests.fakes import FakeEmbedder
