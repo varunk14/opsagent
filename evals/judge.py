@@ -14,7 +14,8 @@ the judge's own score, and only that score falling, or more cases left unjudged,
 failure. Agreement measures the judge, not the agent.
 
 The smoke cases are judged on every pull request, from recorded verdicts; the board is kept
-in a baseline of its own, refused by name when it is not a real board.
+in a baseline of its own, refused by name when it is not a real board. Before a release,
+every case is judged (layer 3), on a machine with the model.
 """
 
 import json
@@ -127,19 +128,27 @@ def judge_case(model: Model, case: GoldenCase, result: CaseResult) -> Verdict | 
     return verdict
 
 
+def chosen(cases: Sequence[GoldenCase], every_case: bool) -> list[GoldenCase]:
+    """The cases the judge looks at: the smoke cases, or every case before a release."""
+    return [case for case in cases if every_case or case.smoke]
+
+
 def results_by_id(cases: Sequence[GoldenCase], results: Sequence[CaseResult]) -> dict[str, CaseResult]:
-    """Each result by its case id. A smoke case with no result is refused by id."""
+    """Each result by its case id. A case to be judged with no result is refused by id."""
     by_id = {result.case_id: result for result in results}
-    missing = [case.id for case in cases if case.smoke and case.id not in by_id]
+    missing = [case.id for case in cases if case.id not in by_id]
     if missing:
         raise ValueError(f"no result for case(s) {', '.join(missing)}")
     return by_id
 
 
-def judge_cases(model: Model, cases: Sequence[GoldenCase], results: Sequence[CaseResult]) -> dict[str, Verdict | None]:
-    """The judge's verdict on every smoke case among `cases`, by case id."""
-    by_id = results_by_id(cases, results)
-    return {case.id: judge_case(model, case, by_id[case.id]) for case in cases if case.smoke}
+def judge_cases(
+    model: Model, cases: Sequence[GoldenCase], results: Sequence[CaseResult], every_case: bool = False
+) -> dict[str, Verdict | None]:
+    """The judge's verdict on every smoke case among `cases` -- or on every case -- by case id."""
+    judged = chosen(cases, every_case)
+    by_id = results_by_id(judged, results)
+    return {case.id: judge_case(model, case, by_id[case.id]) for case in judged}
 
 
 JUDGE_SHARES = ("grounded", "appropriate", "agreement")
@@ -181,18 +190,21 @@ class JudgeBoard:
 
 
 def judge_board_of(
-    cases: Sequence[GoldenCase], results: Sequence[CaseResult], verdicts: Mapping[str, Verdict | None]
+    cases: Sequence[GoldenCase],
+    results: Sequence[CaseResult],
+    verdicts: Mapping[str, Verdict | None],
+    every_case: bool = False,
 ) -> JudgeBoard:
-    """The judge's verdicts on the smoke cases among `cases`, and how often they agree with layer 1."""
-    smoke = [case for case in cases if case.smoke]
-    missing = [case.id for case in smoke if case.id not in verdicts]
+    """The judge's verdicts on the smoke cases -- or every case -- and how often they agree with layer 1."""
+    looked_at = chosen(cases, every_case)
+    missing = [case.id for case in looked_at if case.id not in verdicts]
     if missing:
         raise ValueError(f"no verdict for case(s) {', '.join(missing)}")
-    by_id = results_by_id(cases, results)
-    judged = [(case, verdict) for case in smoke if (verdict := verdicts[case.id]) is not None]
+    by_id = results_by_id(looked_at, results)
+    judged = [(case, verdict) for case in looked_at if (verdict := verdicts[case.id]) is not None]
     return JudgeBoard(
         judged=len(judged),
-        unjudged=len(smoke) - len(judged),
+        unjudged=len(looked_at) - len(judged),
         grounded=rate(sum(verdict.grounded for _, verdict in judged), len(judged)),
         appropriate=rate(sum(verdict.appropriate for _, verdict in judged), len(judged)),
         agreement=rate(
@@ -213,14 +225,15 @@ def compare_judge(current: JudgeBoard, baseline: JudgeBoard) -> list[str]:
     return problems
 
 
-def render_judge(board: JudgeBoard) -> str:
-    """The judge's section of the scoreboard, its agreement with layer 1 beside its score."""
+def render_judge(board: JudgeBoard, every_case: bool = False) -> str:
+    """The judge's section of a scoreboard, its agreement with layer 1 beside its score."""
     rows = [
         ("Cases judged", f"{board.judged} ({board.unjudged} unjudged)"),
         ("Judged grounded", shown(board.grounded)),
         ("Judged appropriate", shown(board.appropriate)),
         ("Agreement with layer 1", shown(board.agreement)),
     ]
-    lines = ["", "## Judge (smoke cases)", "", "| Measure | Value |", "|---|---|"]
+    heading = "## Judge (all cases)" if every_case else "## Judge (smoke cases)"
+    lines = ["", heading, "", "| Measure | Value |", "|---|---|"]
     lines += [f"| {name} | {value} |" for name, value in rows]
     return "\n".join(lines) + "\n"

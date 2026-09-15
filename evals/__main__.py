@@ -5,6 +5,7 @@ The evaluation commands.
     python -m evals gate      anywhere, with no model: replay, score, compare with the committed baseline
     python -m evals accept    after a deliberate change: write the baseline and scoreboard the recordings score
     python -m evals verify    on a machine with Ollama: record again and report anything that differs
+    python -m evals full      on a machine with Ollama, before a release: judge every case, write evals/full.md
 
 `record` reuses whatever is already recorded, so a recording that stopped partway carries on
 where it was; `--fresh` starts again from nothing, which is what a changed prompt or model needs.
@@ -20,6 +21,9 @@ writes them, and changing one is a reviewed change to a committed file.
 `verify` is the check a replay cannot make. A recording is keyed by its prompt, not by what the
 model said, so a hand-edited reply or verdict would replay as real; recording again live, where
 replies are exact, finds it. It reads the committed recordings and never writes them.
+
+`full` is layer 3: everything `record` does, then the judge on every case rather than the smoke
+cases, with the whole board written for a reviewed commit. It gates nothing; it is read.
 
 Each command runs in a database of its own, created from an admin connection
 (OPSAGENT_EVAL_ADMIN_URL, by default the local development Postgres) and dropped afterwards,
@@ -65,6 +69,7 @@ RECORDINGS = EVALS_DIR / "recordings.jsonl"
 BASELINE = EVALS_DIR / "baseline.json"
 JUDGE_BASELINE = EVALS_DIR / "judge_baseline.json"
 SCOREBOARD = EVALS_DIR / "scoreboard.md"
+FULL = EVALS_DIR / "full.md"
 
 ADMIN_URL_VAR = "OPSAGENT_EVAL_ADMIN_URL"
 # The maintenance database of the local stack in docker-compose.yml; only ever used to create and drop scratch ones.
@@ -109,6 +114,34 @@ def record(
         return results
     finally:
         recordings.save(recordings_path)
+
+
+def full(
+    admin_url: str,
+    cases: Sequence[GoldenCase],
+    model: Model,
+    embedder: Embedder,
+    recordings_path: Path = RECORDINGS,
+    full_path: Path = FULL,
+    model_name: str = DEFAULT_MODEL,
+) -> Scoreboard:
+    """
+    Layer 3: record `cases` as `record` does, have the model judge every one, and write the whole board to `full_path`.
+
+    The verdicts are kept in the same recordings, so whatever is already recorded is never asked again.
+    """
+    results = record(admin_url, cases, model, embedder, recordings_path, model_name)
+    recordings = Recordings.load(recordings_path)
+    try:
+        verdicts = judge_cases(
+            RecordingModel(model, recordings, model=model_name, reuse=True), cases, results, every_case=True
+        )
+    finally:
+        recordings.save(recordings_path)
+    board = scoreboard_of(cases, results)
+    judged = judge_board_of(cases, results, verdicts, every_case=True)
+    full_path.write_text(render_markdown(board) + render_judge(judged, every_case=True))
+    return board
 
 
 def verify(
@@ -237,6 +270,7 @@ def main(argv: list[str]) -> int:
         ("gate", "replay the recordings and fail on anything worse than the baseline or unsafe"),
         ("accept", "write the baseline and scoreboard the recordings score"),
         ("verify", "record every case again, live, and report anything that differs from the committed recordings"),
+        ("full", "record and judge every case with the live model, and write the whole board"),
     ):
         command = commands.add_parser(name, help=purpose)
         command.add_argument(
@@ -249,6 +283,7 @@ def main(argv: list[str]) -> int:
         command.add_argument("--baseline", type=Path, default=BASELINE)
         command.add_argument("--judge-baseline", type=Path, default=JUDGE_BASELINE)
         command.add_argument("--scoreboard", type=Path, default=SCOREBOARD)
+        command.add_argument("--full", type=Path, default=FULL, help="where `full` writes the whole board")
         if name == "record":
             command.add_argument("--fresh", action="store_true", help="discard what is recorded and ask the model again")
     arguments = parser.parse_args(argv[1:])
@@ -271,6 +306,10 @@ def main(argv: list[str]) -> int:
     if arguments.command == "verify":  # pragma: no cover - needs Ollama and its models
         problems = verify(arguments.admin_url, cases, Ollama(), OllamaEmbedder(), arguments.recordings)
         return report(problems, f"{len(cases)} case(s): the live recording matches the committed one")
+    if arguments.command == "full":  # pragma: no cover - needs Ollama and its models
+        full(arguments.admin_url, cases, Ollama(), OllamaEmbedder(), arguments.recordings, arguments.full)
+        print(arguments.full.read_text())
+        return 0
     if arguments.command == "accept":
         accept(
             arguments.admin_url, cases, arguments.recordings, arguments.baseline, arguments.scoreboard,
