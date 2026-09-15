@@ -270,6 +270,64 @@ def test_a_handed_over_case_reads_back_why_and_the_amount_the_customer_stated(fr
     assert (result.refunds_paise, result.approval_paise) == ((), None)
 
 
+# --- a recordings file is an input, and a pull request can change it --------------------------
+
+
+def test_a_recordings_file_too_large_to_be_real_is_refused(tmp_path, monkeypatch):
+    from evals import recording
+
+    path = tmp_path / "recordings.jsonl"
+    recorded('{"intent": "other"}').save(path)
+    monkeypatch.setattr(recording, "MAX_RECORDINGS_BYTES", path.stat().st_size - 1)
+
+    with pytest.raises(ValueError, match="too large"):
+        Recordings.load(path)
+
+
+def test_a_vector_longer_than_any_embedding_is_refused_before_it_is_decoded(tmp_path, monkeypatch):
+    from evals import recording
+
+    recordings = Recordings()
+    RecordingEmbedder(FakeEmbedder(dimensions=8), recordings).embed(["search_query: x"])
+    path = tmp_path / "recordings.jsonl"
+    recordings.save(path)
+    monkeypatch.setattr(recording, "MAX_VECTOR_FLOATS", 4)
+
+    with pytest.raises(ValueError, match="vector"):
+        Recordings.load(path)
+
+
+def test_a_vector_that_is_not_whole_floats_is_refused(tmp_path):
+    import base64
+    import json
+
+    path = tmp_path / "recordings.jsonl"
+    torn = base64.b64encode(b"\x00" * 7).decode()
+    path.write_text(json.dumps({"kind": "embedding", "key": "k", "model": "m", "vector": torn}) + "\n")
+
+    with pytest.raises(ValueError, match="vector"):
+        Recordings.load(path)
+
+
+def test_a_reply_longer_than_the_model_client_accepts_is_refused(tmp_path, monkeypatch):
+    from evals import recording
+
+    path = tmp_path / "recordings.jsonl"
+    recorded('{"reasoning": "' + "x" * 50 + '"}').save(path)
+    monkeypatch.setattr(recording, "MAX_REPLY_CHARS", 20)
+
+    with pytest.raises(ValueError, match="reply"):
+        Recordings.load(path)
+
+
+def test_cases_are_never_run_against_the_applications_own_database(monkeypatch):
+    # An unreachable host: were a connection attempted, this would fail differently.
+    monkeypatch.setenv("OPSAGENT_DATABASE_URL", "postgresql://opsagent:dev@127.0.0.1:1/opsagent")
+
+    with pytest.raises(ValueError, match="own database"):
+        run_cases("postgresql://opsagent:dev@127.0.0.1:1/opsagent", [], ScriptedModel(), FakeEmbedder())
+
+
 def test_blank_lines_in_a_recordings_file_are_skipped(tmp_path):
     path = tmp_path / "recordings.jsonl"
     recorded('{"intent": "other"}').save(path)
