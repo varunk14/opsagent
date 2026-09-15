@@ -19,8 +19,10 @@ would report a refund that was never made for what was asked.
 An order is reachable only by the run whose sender placed it. Anyone can email
 in quoting a guessed order number, so another customer's order is answered
 exactly as a missing one is: nothing confirms it exists. The sender is the
-address the message came from, which a forged From header can still claim; the
-approval step in week 5 is what stands between that and money.
+address the message came from, which a forged From header can still claim. What
+that could move without a person is bounded by the guardrail's limit on the
+order's total refunds (app/guardrails.py), and by the ledger cap: refunds go back
+against the order's own charges, never above them.
 
 Refusals a person or the planner should see -- an unknown order, a refund above
 what was charged -- are returned as data and stored like any result, so the same

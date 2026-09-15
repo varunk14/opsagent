@@ -18,11 +18,25 @@ These tests commit, so each one gets its own scratch database.
 import psycopg
 import pytest
 
-from app.approvals import decide, list_pending
+from app.approvals import approved_unexecuted, decide, list_pending
 from app.guardrails import set_limits
-from app.run_agent import LostClaim, claim_next, work_next
-from tests.fakes import CLASSIFIED_DUPLICATE, EXTRACTED_4821, PROPOSED_LOOKUP, ScriptedModel, proposed_refund
-from tests.test_run_agent import ReclaimedMidRun, count, graph_of, keys, ledger, queue, row
+from app.run_agent import LostClaim, act_on_approval, claim_next, work_next
+from tests.fakes import (
+    CLASSIFIED_DUPLICATE,
+    EXTRACTED_4821,
+    PROPOSED_LOOKUP,
+    ScriptedModel,
+    proposed_refund,
+)
+from tests.test_run_agent import (
+    ReclaimedMidRun,
+    count,
+    graph_of,
+    keys,
+    ledger,
+    queue,
+    row,
+)
 
 pytestmark = pytest.mark.db
 
@@ -201,6 +215,23 @@ def test_a_refund_the_ledger_refuses_goes_to_a_person(fresh_database):
     assert work(fresh_database, MustNotBeAsked()) is None, "a refused refund is not retried"
 
 
+def test_a_refund_on_someone_elses_order_is_refused_not_paid(fresh_database):
+    """Order 3310 is Dev's. Priya's run counts nothing against it, and the executor answers as if it were missing."""
+    ledger(fresh_database)
+    queue(fresh_database)
+    model = ScriptedModel(
+        classify=CLASSIFIED_DUPLICATE,
+        extract=EXTRACTED_4821,
+        plan=[PROPOSED_LOOKUP, proposed_refund(90_000, order_id="3310")],
+    )
+
+    outcome = work(fresh_database, model)
+
+    assert outcome.status == "waiting_approval"
+    assert outcome.failure == "act: the ledger refused the refund: no order 3310"
+    assert refunds(fresh_database) == []
+
+
 # --- after a person decides -----------------------------------------------------------------
 
 
@@ -261,6 +292,27 @@ def test_an_approved_refund_survives_the_worker_that_took_it_dying(fresh_databas
     assert outcome.status == "done"
     assert refunds(fresh_database) == [("4821", 720_000, run_id)]
     assert work(fresh_database, MustNotBeAsked()) is None
+
+
+def test_a_worker_that_lost_its_claim_pays_nothing_that_was_approved(fresh_database):
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    work(fresh_database, refund_model(720_000))
+    decide_on(fresh_database, run_id, approved=True)
+    with psycopg.connect(fresh_database) as connection:
+        stale = claim_next(connection, worker="worker-a")
+        connection.execute("UPDATE runs SET locked_at = now() - interval '10 minutes' WHERE id = %s", (run_id,))
+    with psycopg.connect(fresh_database) as connection:
+        assert claim_next(connection, worker="worker-b") is not None
+
+    with psycopg.connect(fresh_database) as connection:
+        with connection.transaction():
+            approved = approved_unexecuted(connection, stale.run_id)
+        with pytest.raises(LostClaim):
+            act_on_approval(connection, stale, approved)
+
+    assert refunds(fresh_database) == []
+    assert approvals_of(fresh_database, run_id)[0]["executed_at"] is None
 
 
 def test_an_approved_refund_the_ledger_refuses_goes_back_to_a_person(fresh_database):

@@ -70,18 +70,30 @@ def _shown(confidence: Decimal) -> str:
     return str(confidence.quantize(TWO_PLACES)) if confidence == confidence.quantize(TWO_PLACES) else str(confidence)
 
 
-def judge(action: ProposedAction, guardrails: Guardrails) -> Verdict:
-    """Decide whether a refund runs on its own. Every reason that applies is given."""
+def judge(action: ProposedAction, guardrails: Guardrails, already_refunded_paise: int = 0) -> Verdict:
+    """
+    Decide whether a refund runs on its own. Every reason that applies is given.
+
+    The limit applies to what the order would have had back in total, so a refund
+    split into parts under the limit is judged as the whole it adds up to.
+    """
     if action.tool != JUDGED:
         raise ValueError(f"only {JUDGED} is judged by the guardrail, not {action.tool}")
+    if already_refunded_paise < 0:
+        raise ValueError("already refunded paise cannot be negative")
 
     amount = action.args["amount_paise"]
+    total = already_refunded_paise + amount
+    limit = rupees(guardrails.auto_refund_limit_paise)
     reasons = []
-    if not amount < guardrails.auto_refund_limit_paise:
-        reasons.append(
-            f"{rupees(amount)} is not under the {rupees(guardrails.auto_refund_limit_paise)} "
-            "limit for automatic refunds"
-        )
+    if not total < guardrails.auto_refund_limit_paise:
+        if already_refunded_paise:
+            reasons.append(
+                f"{rupees(amount)} would bring refunds on order {action.args['order_id']} to {rupees(total)}, "
+                f"not under the {limit} limit for automatic refunds"
+            )
+        else:
+            reasons.append(f"{rupees(amount)} is not under the {limit} limit for automatic refunds")
     if action.confidence < guardrails.min_confidence:
         reasons.append(
             f"confidence {_shown(action.confidence)} is below the "

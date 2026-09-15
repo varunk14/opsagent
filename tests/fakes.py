@@ -51,12 +51,12 @@ PROPOSED_REFUND = (
 )
 
 
-def proposed_refund(amount_paise: int, confidence: str = "0.9") -> str:
-    """A refund on order 4821 for any amount at any confidence, as the model would send it."""
+def proposed_refund(amount_paise: int, confidence: str = "0.9", order_id: str = "4821") -> str:
+    """A refund for any amount at any confidence, as the model would send it."""
     return json.dumps(
         {
             "tool": "issue_refund",
-            "args": {"order_id": "4821", "amount_paise": amount_paise, "reason": "the ledger shows a duplicate"},
+            "args": {"order_id": order_id, "amount_paise": amount_paise, "reason": "the ledger shows a duplicate"},
             "confidence": float(confidence),
             "reasoning": "one of the two charges is a duplicate",
         }

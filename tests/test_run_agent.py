@@ -151,7 +151,7 @@ def test_the_lookup_really_ran_against_the_ledger(fresh_database):
         work_next(connection, happy_graph())
 
     steps = row(fresh_database, run_id)["state"]["agent"]["steps"]
-    assert len(steps) == 1
+    assert [step["tool"] for step in steps] == ["get_order", "issue_refund"]
     assert steps[0]["step"] == 1
     assert steps[0]["tool"] == "get_order"
     assert steps[0]["args"] == {"order_id": "4821"}
