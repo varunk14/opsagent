@@ -103,7 +103,9 @@ def keys(dsn: str, run_id: str) -> list[str]:
         return [
             key
             for (key,) in connection.execute(
-                "SELECT idempotency_key FROM tool_calls WHERE run_id = %s ORDER BY created_at, idempotency_key",
+                # By step number, not as text: 'step_10' sorts before 'step_2' as a string.
+                "SELECT idempotency_key FROM tool_calls WHERE run_id = %s "
+                "ORDER BY substring(idempotency_key from ':step_([0-9]+):')::int",
                 (run_id,),
             ).fetchall()
         ]
@@ -401,6 +403,23 @@ def test_the_step_budget_hands_the_case_to_a_person(fresh_database):
         f"{run_id}:step_1:get_order",
         f"{run_id}:step_2:escalate_to_human",
     ]
+
+
+def test_every_tool_the_model_can_propose_has_exactly_one_decision():
+    """
+    Found in security review. Whether a tool runs is decided only here, so a tool
+    added to app/tools.py must be placed deliberately -- never run, or not run, by default.
+    """
+    from app.executor import TOOLS as IMPLEMENTED
+    from app.run_agent import NOT_RUN_HERE, RUNS_NOW, WAITS_FOR_APPROVAL
+    from app.tools import TOOLS
+
+    decisions = [RUNS_NOW, WAITS_FOR_APPROVAL, NOT_RUN_HERE]
+    proposable = {tool.name for tool in TOOLS}
+
+    assert set().union(*decisions) == proposable
+    assert sum(len(decision) for decision in decisions) == len(proposable), "a tool is in two groups"
+    assert RUNS_NOW | WAITS_FOR_APPROVAL <= set(IMPLEMENTED), "a decided tool has no implementation"
 
 
 def test_a_proposal_the_executor_cannot_run_is_escalated(fresh_database):
