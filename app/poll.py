@@ -128,8 +128,8 @@ def main(argv: list[str]) -> int:  # pragma: no cover - the interactive driver
     if summary.collisions:
         print(f"\n  COLLIDED  {summary.collisions}")
         print("  A message arrived reusing a key that already exists, carrying")
-        print("  different text. It was not a re-delivery, and its contents have")
-        print("  been discarded. Someone should look at that.")
+        print("  different text. It was not a re-delivery, so it did not become a")
+        print("  run; it is quarantined. `python -m app.dead_letters` lists it.")
     if summary.more_waiting:
         print("\n  More waiting. Run it again.")
     elif summary.accepted == 0 and summary.seen:
