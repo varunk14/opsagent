@@ -21,7 +21,9 @@ results are identical.
 
 import socket
 from decimal import Decimal
+from uuid import uuid4
 
+import psycopg
 import pytest
 
 from app.llm import Reply
@@ -34,7 +36,7 @@ from evals.recording import (
     RecordingModel,
     Recordings,
 )
-from evals.runner import CaseResult, run_cases
+from evals.runner import CaseResult, read_back, run_cases
 from tests.fakes import (
     CLASSIFIED_DUPLICATE,
     FakeEmbedder,
@@ -247,3 +249,19 @@ def test_a_case_whose_prompts_were_never_recorded_stops_with_recording_missing(f
             RecordedModel(recordings, model="llama3.1:8b"),
             RecordedEmbedder(recordings, model=FakeEmbedder.model),
         )
+
+
+def test_blank_lines_in_a_recordings_file_are_skipped(tmp_path):
+    path = tmp_path / "recordings.jsonl"
+    recorded('{"intent": "other"}').save(path)
+    path.write_text("\n  \n" + path.read_text() + "\n\n")
+
+    reply = RecordedModel(Recordings.load(path), model="llama3.1:8b").generate(CLASSIFY_PROMPT)
+
+    assert reply.text == '{"intent": "other"}'
+
+
+@pytest.mark.db
+def test_a_run_that_is_not_in_the_database_is_refused_naming_its_case(fresh_database):
+    with psycopg.connect(fresh_database) as connection, pytest.raises(LookupError, match="n-001"):
+        read_back(connection, "n-001", uuid4())
