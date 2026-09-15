@@ -120,6 +120,7 @@ def plan(state: AgentState, model: Model) -> AgentState:
         classification=classification,
         extraction=state.get("extraction"),
         policy=state.get("policy", []),
+        observations=state.get("observations", []),
     )
     answer, update = ask("plan", model, prompt, ProposedAction)
     if answer is not None:

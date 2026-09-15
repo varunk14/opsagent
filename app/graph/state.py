@@ -3,11 +3,13 @@ The state carried between steps, and the one port to the outside world.
 
 Replies accumulate, so every model call is costed. Retrieval is reached only
 through the Retriever protocol, which keeps the graph free of storage code.
+Observations are what this run's earlier tool calls returned, read back from
+the runs table by the driver; the graph never fetches them itself.
 """
 
 import operator
 from dataclasses import dataclass
-from typing import Annotated, Protocol, TypedDict
+from typing import Annotated, Any, Protocol, TypedDict
 
 from app.contracts import Classification, ExtractedRefund, ProposedAction
 from app.llm import Reply
@@ -40,6 +42,7 @@ class AgentState(TypedDict, total=False):
     extraction: ExtractedRefund | None
     policy: list[str]
     policy_sources: list[str]
+    observations: list[dict[str, Any]]
     proposal: ProposedAction
     failure: str
     replies: Annotated[list[Reply], operator.add]
