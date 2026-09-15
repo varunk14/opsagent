@@ -21,7 +21,7 @@ Run:  .venv/bin/python experiments/duplicate_refund_bug.py
 """
 
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 # ---------------------------------------------------------------------------
 # THE "BANK". Synthetic. Money is integer paise. Timestamps are ISO 8601.
@@ -52,7 +52,7 @@ def bank_issue_refund(order_id: str, amount_paise: int) -> dict:
         "refund_id": f"rf_{len(BANK_LEDGER) + 1:03d}",
         "order_id": order_id,
         "amount_paise": amount_paise,
-        "at": datetime.now().isoformat(timespec="seconds"),
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
     BANK_LEDGER.append(refund)
     print(f"      [bank] processed {refund['refund_id']}: {amount_paise} paise")
