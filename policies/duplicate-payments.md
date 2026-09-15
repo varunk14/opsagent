@@ -9,8 +9,11 @@ gone through. The extra payment is not owed to us.
 ## What we do
 
 Once the order record confirms a second, identical payment for the same order, the
-duplicate amount is returned in full to the original payment method. No questions
-about the reason are needed, and there is no deduction.
+duplicate amount is returned in full to the original payment method, with no
+deduction. The customer does not need to explain why it happened.
+
+The confirmation on the order record is what allows the return. Without it, the
+case goes to a person.
 
 ## How long it takes
 
