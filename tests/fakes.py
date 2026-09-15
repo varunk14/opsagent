@@ -1,6 +1,9 @@
 """A model that answers from a script, chosen by the TASK line each prompt opens with."""
 
-from app.llm import Reply
+from app.llm import ModelUnavailable, Reply
+
+# A scripted reply that means: the model is unreachable for this call.
+OUTAGE = "__MODEL_UNAVAILABLE__"
 
 
 class ScriptedModel:
@@ -20,6 +23,8 @@ class ScriptedModel:
         self.prompts.append(prompt)
         queue = self.replies[task_of(prompt)]
         text = queue.pop(0) if len(queue) > 1 else queue[0]
+        if text == OUTAGE:
+            raise ModelUnavailable("scripted outage")
         return Reply(text=text, prompt_tokens=10, completion_tokens=5, latency_ms=1)
 
     def tasks(self) -> list[str]:

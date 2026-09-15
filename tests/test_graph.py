@@ -7,12 +7,16 @@ truth, so the compiled graph must carry no checkpointer of its own.
 
 from pathlib import Path
 
+import pytest
+
 from app.contracts import Intent
 from app.graph.build import build_graph, run_graph
+from app.llm import ModelUnavailable
 from tests.fakes import (
     CLASSIFIED_DUPLICATE,
     CLASSIFIED_STATUS,
     EXTRACTED_4821,
+    OUTAGE,
     PROPOSED_ESCALATE,
     PROPOSED_LOOKUP,
     ScriptedModel,
@@ -78,3 +82,13 @@ def test_the_graph_cannot_touch_the_database():
         assert "psycopg" not in text, source
         assert "app.db" not in text, source
         assert "app.intake" not in text, source
+
+
+def test_an_outage_partway_through_keeps_the_cost_of_finished_steps():
+    """classify answered and was paid for; extract then found the model down."""
+    model = ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=OUTAGE)
+
+    with pytest.raises(ModelUnavailable) as raised:
+        run_graph(build_graph(model), SUBJECT, BODY)
+
+    assert len(raised.value.replies) == 1

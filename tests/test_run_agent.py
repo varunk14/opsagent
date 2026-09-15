@@ -23,6 +23,7 @@ from app.run_agent import LostClaim, claim_next, propose_next
 from tests.fakes import (
     CLASSIFIED_DUPLICATE,
     EXTRACTED_4821,
+    OUTAGE,
     PROPOSED_LOOKUP,
     ScriptedModel,
 )
@@ -304,3 +305,19 @@ def test_an_outage_does_not_release_a_claim_that_was_lost(fresh_database):
 
     stored = row(fresh_database, run_id)
     assert (stored["status"], stored["locked_by"]) == ("running", "worker-b")
+
+
+def test_an_outage_partway_through_still_charges_for_finished_steps(fresh_database):
+    """
+    Found in milestone review. classify answered, then the model went down. The
+    run goes back to the queue, but the classify call was paid for and is charged.
+    """
+    run_id = queue(fresh_database)
+    graph = build_graph(ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=OUTAGE))
+
+    with psycopg.connect(fresh_database) as connection, pytest.raises(ModelUnavailable):
+        propose_next(connection, graph)
+
+    stored = row(fresh_database, run_id)
+    assert stored["status"] == "queued"
+    assert stored["cost_usd"] == token_cost(10, 5, REFERENCE_RATE).quantize(Decimal("0.000001"))
