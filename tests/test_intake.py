@@ -244,6 +244,30 @@ def test_two_different_forgeries_are_both_kept(db):
     assert len(quarantined(db)) == 2
 
 
+def test_one_message_id_keeps_only_a_few_quarantined_texts(db):
+    """Security review: one-byte variations on a known key must not fill the table."""
+    from app import intake
+
+    accept(db, PRIYA)
+    for number in range(intake.MAX_QUARANTINED_PER_KEY + 3):
+        accept(db, PRIYA.model_copy(update={"body": f"forgery number {number}"}))
+
+    assert len(quarantined(db)) == intake.MAX_QUARANTINED_PER_KEY
+
+
+def test_surrounding_whitespace_is_not_part_of_the_sender(db):
+    """
+    Security review: ' priya@example.com' was a different sender from
+    'priya@example.com' -- a separate rate-limit bucket for the same address.
+    """
+    padded = IncomingMessage.model_validate({**PRIYA.model_dump(), "sender": "  priya@example.com \n"})
+
+    assert padded.sender == "priya@example.com"
+    run_id = accept(db, padded.model_copy(update={"external_id": "padded"})).run_id
+    stored = db.execute("SELECT state -> 'untrusted' ->> 'sender' FROM runs WHERE id = %s", (run_id,)).fetchone()[0]
+    assert stored == "priya@example.com"
+
+
 def test_the_row_matches_the_record_the_contract_describes(db):
     """
     Whatever RunRecord says a new run looks like is what lands in the table.

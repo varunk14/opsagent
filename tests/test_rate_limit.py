@@ -16,6 +16,7 @@ that test rather than the whole file.
 """
 
 import threading
+from decimal import Decimal
 from uuid import uuid4
 
 import psycopg
@@ -23,10 +24,12 @@ import pytest
 from psycopg.types.json import Jsonb
 
 import app.run_agent as agent
+from app.baseline import REFERENCE_RATE, token_cost
 from tests.fakes import (
     CLASSIFIED_DUPLICATE,
     EXTRACTED_4821,
     PROPOSED_ESCALATE,
+    PROPOSED_LOOKUP,
     ScriptedModel,
 )
 from tests.test_run_agent import graph_of, happy_graph, keys, ledger, queue, row
@@ -167,3 +170,62 @@ def test_two_workers_racing_for_the_last_slot_use_it_once(fresh_database):
     executed = len(keys(fresh_database, first)) + len(keys(fresh_database, second))
     assert executed == 1, "exactly one of the two runs got the last lookup"
     assert sorted(outcome.status for outcome in outcomes) == ["queued", "waiting_approval"]
+
+
+# --- found in review: a deferral must not repeat work, or go on forever -------------
+
+
+def make_due(dsn: str, run_id: str) -> None:
+    with psycopg.connect(dsn) as connection:
+        connection.execute("UPDATE runs SET next_retry_at = now() WHERE id = %s", (run_id,))
+
+
+def test_a_deferred_run_resumes_at_planning(fresh_database):
+    """Classify and extract were paid for before the deferral; they are not asked again."""
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    past_lookups(fresh_database, PRIYA, agent.RATE_LIMIT)
+    with psycopg.connect(fresh_database) as connection:
+        agent.work_next(connection, happy_graph())
+    make_due(fresh_database, run_id)
+
+    resumed = ScriptedModel(plan=PROPOSED_LOOKUP)
+    with psycopg.connect(fresh_database) as connection:
+        agent.work_next(connection, graph_of(resumed))
+
+    assert resumed.tasks() == ["plan"]
+
+
+def test_deferrals_charge_each_model_call_once(fresh_database):
+    """Python review reproduced the cost doubling on a second deferral."""
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    past_lookups(fresh_database, PRIYA, agent.RATE_LIMIT)
+    with psycopg.connect(fresh_database) as connection:
+        agent.work_next(connection, happy_graph())  # classify, extract, plan: deferred
+    make_due(fresh_database, run_id)
+
+    with psycopg.connect(fresh_database) as connection:
+        agent.work_next(connection, graph_of(ScriptedModel(plan=PROPOSED_LOOKUP)))  # plan: deferred again
+
+    stored = row(fresh_database, run_id)
+    assert stored["cost_usd"] == token_cost(40, 20, REFERENCE_RATE).quantize(Decimal("0.000001"))
+    assert stored["state"]["agent"]["model_calls"] == 4
+
+
+def test_a_run_deferred_too_often_is_handed_to_a_person(fresh_database):
+    """Security review: a sender kept over the limit must not keep a run cycling forever."""
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    past_lookups(fresh_database, PRIYA, agent.RATE_LIMIT)
+    with psycopg.connect(fresh_database) as connection:
+        agent.work_next(connection, happy_graph())
+
+    for _ in range(agent.MAX_DEFERRALS):
+        make_due(fresh_database, run_id)
+        with psycopg.connect(fresh_database) as connection:
+            outcome = agent.work_next(connection, graph_of(ScriptedModel(plan=PROPOSED_LOOKUP)))
+
+    assert (outcome.status, outcome.tool) == ("waiting_approval", "escalate_to_human")
+    assert "deferred" in outcome.failure
+    assert keys(fresh_database, run_id) == [f"{run_id}:step_1:escalate_to_human"]
