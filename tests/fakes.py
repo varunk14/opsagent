@@ -7,6 +7,9 @@ class ScriptedModel:
     """
     Replies per task. A list is consumed in order, and its last entry repeats,
     so a test can script "garbage, then valid" or "garbage forever".
+
+    Keyed on each prompt's first line (TASK: classify, extract, plan). Renaming a
+    task in app/graph/prompts.py fails loudly here with a KeyError, not silently.
     """
 
     def __init__(self, **replies: str | list[str]):

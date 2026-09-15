@@ -6,16 +6,20 @@ checkpointer, because the runs table is the one record of a run; a second store
 of state would eventually disagree with it.
 """
 
-from typing import Any
+from collections.abc import Callable
+from typing import cast
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from app.graph import nodes
 from app.graph.state import AgentState
 from app.llm import Model
 
+AgentGraph = CompiledStateGraph[AgentState, None, AgentState, AgentState]
 
-def stop_if_proposed(next_step: str) -> Any:
+
+def stop_if_proposed(next_step: str) -> Callable[[AgentState], str]:
     """A step that already escalated has decided; later steps must not plan over it."""
 
     def route(state: AgentState) -> str:
@@ -24,8 +28,8 @@ def stop_if_proposed(next_step: str) -> Any:
     return route
 
 
-def build_graph(model: Model) -> Any:
-    graph = StateGraph(AgentState)
+def build_graph(model: Model) -> AgentGraph:
+    graph: StateGraph[AgentState, None, AgentState, AgentState] = StateGraph(AgentState)
 
     graph.add_node("classify", lambda state: nodes.classify(state, model))
     graph.add_node("extract", lambda state: nodes.extract(state, model))
@@ -35,13 +39,13 @@ def build_graph(model: Model) -> Any:
     graph.add_edge(START, "classify")
     graph.add_conditional_edges("classify", stop_if_proposed("extract"), ["extract", END])
     graph.add_conditional_edges("extract", stop_if_proposed("retrieve"), ["retrieve", END])
-    graph.add_edge("retrieve", "plan")
+    graph.add_conditional_edges("retrieve", stop_if_proposed("plan"), ["plan", END])
     graph.add_edge("plan", END)
 
     return graph.compile()
 
 
-def run_graph(graph: Any, subject: str | None, body: str) -> AgentState:
+def run_graph(graph: AgentGraph, subject: str | None, body: str) -> AgentState:
     """Walk one message through the graph and return everything it found."""
-    result: AgentState = graph.invoke({"subject": subject, "body": body, "replies": []})
-    return result
+    # invoke() is typed as returning dict[str, Any]; the state schema is AgentState.
+    return cast(AgentState, graph.invoke({"subject": subject, "body": body, "replies": []}))
