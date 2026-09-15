@@ -100,6 +100,18 @@ class IncomingMessage(BaseModel):
 
     _no_blanks = field_validator("external_id", "sender", "body")(_reject_blank)
 
+    @field_validator("sender", mode="before")
+    @classmethod
+    def strip_sender(cls, value: object) -> object:
+        """
+        Surrounding whitespace is not part of an address. Left in, ' priya@example.com'
+        was a different sender from 'priya@example.com' -- a separate rate-limit bucket
+        for the same person. Stripped before the blank check, so '   ' is still refused.
+        """
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
     @field_validator("received_at")
     @classmethod
     def must_know_its_timezone(cls, value: datetime) -> datetime:

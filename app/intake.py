@@ -41,11 +41,19 @@ INSERT_RUN = """
     RETURNING id
 """
 
-# The same forged text arriving again is kept once, so resending it cannot flood
-# the quarantine. The conflict target is migration 005's partial unique index.
+# How many different colliding texts one key keeps. Past this, a forger varying one
+# byte at a time is ignored instead of filling the table; the first few are enough
+# for a person to see what was attempted.
+MAX_QUARANTINED_PER_KEY = 5
+
+# The same forged text arriving again is kept once, and one key keeps at most
+# MAX_QUARANTINED_PER_KEY texts. The conflict target is migration 005's partial
+# unique index. Two pollers quarantining for the same key at the same moment can
+# each see room for one more, so the cap can be passed by one row per poller.
 QUARANTINE = """
     INSERT INTO dead_letters (kind, idempotency_key, payload, reason)
-    VALUES ('message', %s, %s, 'idempotency key collision: same key, different text')
+    SELECT 'message', %s, %s, 'idempotency key collision: same key, different text'
+     WHERE (SELECT count(*) FROM dead_letters WHERE kind = 'message' AND idempotency_key = %s) < %s
     ON CONFLICT (idempotency_key, md5(payload::text)) WHERE kind = 'message' DO NOTHING
 """
 
@@ -128,5 +136,7 @@ def accept(connection: psycopg.Connection, message: IncomingMessage) -> IntakeRe
     if collided:
         # Kept, not discarded, in the caller's transaction: the run keeps the text
         # that arrived first, and the colliding text waits for a person.
-        connection.execute(QUARANTINE, (run.idempotency_key, Jsonb(run.state)))
+        connection.execute(
+            QUARANTINE, (run.idempotency_key, Jsonb(run.state), run.idempotency_key, MAX_QUARANTINED_PER_KEY)
+        )
     return IntakeResult(run_id=run_id, created=False, collided=collided)

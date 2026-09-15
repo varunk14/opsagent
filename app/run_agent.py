@@ -82,6 +82,10 @@ RATE_LIMIT = 10
 RATE_WINDOW = timedelta(hours=1)
 RATE_LIMITED = frozenset({"get_order"})
 
+# A run the rate limit defers this many times is handed to a person instead of
+# waiting again, so a sender kept over the limit cannot keep a run cycling forever.
+MAX_DEFERRALS = 3
+
 # Postgres ends a worker session that sits inside a transaction this long, and the
 # run's row lock goes with it; no single statement may run longer than the other.
 IDLE_IN_TRANSACTION_TIMEOUT = timedelta(seconds=60)
@@ -158,7 +162,7 @@ RECENT_LOOKUPS = """
 # Busy is not a failure: the attempt the claim spent is given back.
 DEFER = """
     UPDATE runs
-       SET status = 'queued', attempt = attempt - 1, next_retry_at = %s + %s,
+       SET status = 'queued', attempt = attempt - 1, next_retry_at = %s + %s, state = state || %s,
            current_node = 'act', cost_usd = cost_usd + %s, locked_by = NULL, locked_at = NULL
      WHERE id = %s AND locked_by = %s
 """
@@ -376,6 +380,7 @@ def summarise_agent(
         "proposal": proposal.model_dump(mode="json"),
         "failure": failure,
         "steps": steps,
+        "deferrals": before.get("deferrals", 0),
         "model_calls": before.get("model_calls", 0) + len(replies),
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
@@ -420,17 +425,29 @@ def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_st
             connection.execute(LOCK_SENDER, (claimed.run_id,))
             recent = connection.execute(RECENT_LOOKUPS, (RATE_WINDOW, claimed.run_id)).fetchone()
             if recent is not None and recent[0] >= RATE_LIMIT:
-                # Charged for the model calls already made; nothing is executed.
-                cost = cost_of(state.get("replies", []))
-                connection.execute(DEFER, (recent[1], RATE_WINDOW, cost, claimed.run_id, claimed.worker))
-                return RunOutcome(
-                    run_id=claimed.run_id,
-                    status="queued",
-                    tool=proposal.tool,
-                    steps=len(steps),
-                    failure=None,
-                    cost_usd=cost,
-                )
+                deferrals = before.get("deferrals", 0)
+                if deferrals >= MAX_DEFERRALS:
+                    proposal, failure = hand_over(
+                        f"deferred {deferrals} times by the rate limit",
+                        "The sender kept this case over the lookup limit; a person should look at it.",
+                    )
+                else:
+                    # What this tick found is kept, so the next one plans from it and each
+                    # model call is charged once. Nothing is executed and no attempt is spent.
+                    deferred, cost = summarise_agent(state, before, proposal, None, steps)
+                    deferred["deferrals"] = deferrals + 1
+                    connection.execute(
+                        DEFER,
+                        (recent[1], RATE_WINDOW, Jsonb({"agent": deferred}), cost, claimed.run_id, claimed.worker),
+                    )
+                    return RunOutcome(
+                        run_id=claimed.run_id,
+                        status="queued",
+                        tool=proposal.tool,
+                        steps=len(steps),
+                        failure=None,
+                        cost_usd=cost,
+                    )
 
         if proposal.tool in RUNS_NOW:
             number = len(steps) + 1
