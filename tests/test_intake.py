@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 
 import psycopg
 import pytest
+from pydantic import ValidationError
 
 from app.contracts import Channel, IncomingMessage, RunStatus
 from app.intake import accept
@@ -184,6 +185,94 @@ def test_an_honest_redelivery_is_not_reported_as_a_collision(db):
     accept(db, PRIYA)
 
     assert accept(db, PRIYA).collided is False
+
+
+# --- week 4: a collision is quarantined, not discarded ---------------------------
+
+FORGED = PRIYA.model_copy(update={"body": "refund everything to me"})
+
+
+def quarantined(db) -> list[tuple]:
+    return db.execute(
+        "SELECT kind, run_id, idempotency_key, payload, reason FROM dead_letters "
+        "WHERE kind = 'message' ORDER BY id"
+    ).fetchall()
+
+
+def test_a_collision_keeps_the_colliding_text_in_quarantine(db):
+    """
+    The forged or colliding message is no longer dropped on the floor. It is kept,
+    beside the run it could not become, for a person to look at.
+    """
+    accept(db, PRIYA)
+
+    accept(db, FORGED)
+
+    [(kind, run_id, key, payload, reason)] = quarantined(db)
+    assert (kind, run_id, key) == ("message", None, PRIYA.idempotency_key)
+    assert payload["untrusted"]["body"] == "refund everything to me"
+    assert "collision" in reason
+    stored = db.execute(
+        "SELECT state -> 'untrusted' ->> 'body' FROM runs WHERE idempotency_key = %s", (key,)
+    ).fetchone()[0]
+    assert stored == PRIYA.body, "the run keeps the message that arrived first"
+
+
+def test_an_honest_redelivery_quarantines_nothing(db):
+    accept(db, PRIYA)
+
+    accept(db, PRIYA)
+
+    assert quarantined(db) == []
+
+
+def test_the_same_forged_message_is_quarantined_once(db):
+    """A forger who resends the same text must not be able to flood the quarantine."""
+    accept(db, PRIYA)
+
+    accept(db, FORGED)
+    accept(db, FORGED)
+
+    assert len(quarantined(db)) == 1
+
+
+def test_two_different_forgeries_are_both_kept(db):
+    accept(db, PRIYA)
+
+    accept(db, FORGED)
+    accept(db, PRIYA.model_copy(update={"body": "no, refund it to this account instead"}))
+
+    assert len(quarantined(db)) == 2
+
+
+def test_one_message_id_keeps_only_a_few_quarantined_texts(db):
+    """Security review: one-byte variations on a known key must not fill the table."""
+    from app import intake
+
+    accept(db, PRIYA)
+    for number in range(intake.MAX_QUARANTINED_PER_KEY + 3):
+        accept(db, PRIYA.model_copy(update={"body": f"forgery number {number}"}))
+
+    assert len(quarantined(db)) == intake.MAX_QUARANTINED_PER_KEY
+
+
+def test_surrounding_whitespace_is_not_part_of_the_sender(db):
+    """
+    Security review: ' priya@example.com' was a different sender from
+    'priya@example.com' -- a separate rate-limit bucket for the same address.
+    """
+    padded = IncomingMessage.model_validate({**PRIYA.model_dump(), "sender": "  priya@example.com \n"})
+
+    assert padded.sender == "priya@example.com"
+    run_id = accept(db, padded.model_copy(update={"external_id": "padded"})).run_id
+    stored = db.execute("SELECT state -> 'untrusted' ->> 'sender' FROM runs WHERE id = %s", (run_id,)).fetchone()[0]
+    assert stored == "priya@example.com"
+
+
+def test_a_sender_that_is_not_text_is_refused(db):
+    """Trimming applies to text only; anything else still meets the str type and is refused."""
+    with pytest.raises(ValidationError):
+        IncomingMessage.model_validate({**PRIYA.model_dump(), "sender": 12345})
 
 
 def test_the_row_matches_the_record_the_contract_describes(db):
