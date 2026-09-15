@@ -47,18 +47,18 @@ def test_cost_is_exact_decimal_arithmetic():
     result drifts, and the drift is indistinguishable from the improvement being
     claimed.
     """
-    rate = ReferenceRate(name="test", input_per_million=Decimal("1"), output_per_million=Decimal("2"))
+    rate = ReferenceRate(name="test", input_per_million=Decimal(1), output_per_million=Decimal(2))
 
     summary = summarise([measurement(prompt=1_000_000, completion=1_000_000)], rate)
 
-    assert summary.cost_usd == Decimal("3")
+    assert summary.cost_usd == Decimal(3)
     assert isinstance(summary.cost_usd, Decimal)
 
 
 def test_a_run_that_used_no_tokens_costs_nothing():
     summary = summarise([measurement(prompt=0, completion=0)], REFERENCE_RATE)
 
-    assert summary.cost_usd == Decimal("0")
+    assert summary.cost_usd == Decimal(0)
 
 
 def test_cost_per_hundred_runs_scales_from_what_was_measured():
@@ -73,10 +73,10 @@ def test_changing_the_rate_moves_both_sides_by_the_same_factor():
     before-and-after ratio is untouched -- and the ratio is the claim.
     """
     single = ReferenceRate(
-        name="single", input_per_million=Decimal("1"), output_per_million=Decimal("1")
+        name="single", input_per_million=Decimal(1), output_per_million=Decimal(1)
     )
     double = ReferenceRate(
-        name="double", input_per_million=Decimal("2"), output_per_million=Decimal("2")
+        name="double", input_per_million=Decimal(2), output_per_million=Decimal(2)
     )
 
     cheap = summarise([measurement()], single)
@@ -126,7 +126,7 @@ def test_the_summary_counts_what_went_into_it():
     summary = summarise([measurement(), measurement()], REFERENCE_RATE)
 
     assert summary.runs == 2
-    assert summary.tokens_per_run == Decimal("1100")
+    assert summary.tokens_per_run == Decimal(1100)
 
 
 def test_the_rate_used_is_carried_with_the_result(tmp_path):

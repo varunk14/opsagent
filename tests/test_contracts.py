@@ -142,7 +142,7 @@ def test_cost_given_as_a_float_is_rejected():
 
 def test_cost_cannot_be_negative():
     with pytest.raises(ValidationError):
-        RunRecord(channel=Channel.EMAIL, idempotency_key="k", cost_usd=Decimal("-1"))
+        RunRecord(channel=Channel.EMAIL, idempotency_key="k", cost_usd=Decimal(-1))
 
 
 def test_a_run_is_built_from_a_message_without_restating_the_key():
@@ -227,4 +227,4 @@ def test_a_timestamp_without_a_timezone_is_rejected():
     handling customers in another, and "last Tuesday" has to mean one thing.
     """
     with pytest.raises(ValidationError):
-        a_message(received_at=datetime(2026, 9, 13, 9, 0))
+        a_message(received_at=datetime(2026, 9, 13, 9, 0))  # noqa: DTZ001 - naive on purpose
