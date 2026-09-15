@@ -4,6 +4,7 @@ The evaluation commands.
     python -m evals record    on a machine with Ollama: run the golden cases live, keep every reply and vector
     python -m evals gate      anywhere, with no model: replay, score, compare with the committed baseline
     python -m evals accept    after a deliberate change: write the baseline and scoreboard the recordings score
+    python -m evals verify    on a machine with Ollama: record again and report anything that differs
 
 `record` reuses whatever is already recorded, so a recording that stopped partway carries on
 where it was; `--fresh` starts again from nothing, which is what a changed prompt or model needs.
@@ -14,6 +15,10 @@ committed baseline, when anything is unsafe, when a prompt or case changed since
 or when the committed scoreboard no longer says what the recordings score. There is no
 baseline until `accept` writes one, and changing it is a reviewed change to a committed file.
 
+`verify` is the check a replay cannot make. A recording is keyed by its prompt, not by what the
+model said, so a hand-edited reply would replay as real; recording again live, where replies
+are exact, finds it. It reads the committed recordings and never writes them.
+
 Each command runs in a database of its own, created from an admin connection
 (OPSAGENT_EVAL_ADMIN_URL, by default the local development Postgres) and dropped afterwards,
 so no command ever touches the application's database.
@@ -22,6 +27,7 @@ so no command ever touches the application's database.
 import argparse
 import os
 import sys
+import tempfile
 import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -96,6 +102,37 @@ def record(
         recordings.save(recordings_path)
 
 
+def verify(
+    admin_url: str,
+    cases: Sequence[GoldenCase],
+    model: Model,
+    embedder: Embedder,
+    recordings_path: Path = RECORDINGS,
+    model_name: str = DEFAULT_MODEL,
+) -> list[str]:
+    """Every reply or vector a fresh live recording of `cases` gives that the committed recordings do not."""
+    committed = Recordings.load(recordings_path)
+    with tempfile.TemporaryDirectory() as scratch:
+        live_path = Path(scratch) / "live.jsonl"
+        record(admin_url, cases, model, embedder, live_path, model_name, fresh=True)
+        live = Recordings.load(live_path)
+
+    problems = []
+    for key, reply in sorted(live.replies.items()):
+        was = committed.replies.get(key)
+        if was is None:
+            problems.append(f"a {reply.task} prompt ({key[:12]}) is not in the committed recordings")
+        elif was != reply:
+            problems.append(f"the {reply.task} reply ({key[:12]}) differs from the committed recording")
+    for key, (_, packed) in sorted(live.vectors.items()):
+        stored = committed.vectors.get(key)
+        if stored is None:
+            problems.append(f"an embedding ({key[:12]}) is not in the committed recordings")
+        elif stored[1] != packed:
+            problems.append(f"an embedding ({key[:12]}) differs from the committed recording")
+    return problems
+
+
 def replay(
     admin_url: str,
     cases: Sequence[GoldenCase],
@@ -154,13 +191,24 @@ def accept(
     return board
 
 
+def report(problems: Sequence[str], passed: str) -> int:
+    """Print every problem and exit 1, or say what passed and exit 0."""
+    for problem in problems:
+        print(f"  FAIL {problem}")
+    if problems:
+        return 1
+    print(f"  {passed}")
+    return 0
+
+
 def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(prog="python -m evals", description="Record, gate and accept the golden set.")
+    parser = argparse.ArgumentParser(prog="python -m evals", description="Record, gate, accept and verify the golden set.")
     commands = parser.add_subparsers(dest="command", required=True)
     for name, purpose in (
         ("record", "run the golden cases with the live model and keep what it said"),
         ("gate", "replay the recordings and fail on anything worse than the baseline or unsafe"),
         ("accept", "write the baseline and scoreboard the recordings score"),
+        ("verify", "record every case again, live, and report anything that differs from the committed recordings"),
     ):
         command = commands.add_parser(name, help=purpose)
         command.add_argument(
@@ -191,6 +239,9 @@ def main(argv: list[str]) -> int:
         )
         print(f"  recorded {len(results)} case(s) into {arguments.recordings}")
         return 0
+    if arguments.command == "verify":  # pragma: no cover - needs Ollama and its models
+        problems = verify(arguments.admin_url, cases, Ollama(), OllamaEmbedder(), arguments.recordings)
+        return report(problems, f"{len(cases)} case(s): the live recording matches the committed one")
     if arguments.command == "accept":
         board = accept(
             arguments.admin_url, cases, arguments.recordings, arguments.baseline, arguments.scoreboard,
@@ -203,12 +254,7 @@ def main(argv: list[str]) -> int:
         arguments.admin_url, cases, arguments.recordings, arguments.baseline, arguments.scoreboard,
         embedding_model=EMBEDDING_MODEL,
     )
-    for problem in problems:
-        print(f"  FAIL {problem}")
-    if problems:
-        return 1
-    print(f"  {len(cases)} case(s): no worse than the baseline, nothing unsafe")
-    return 0
+    return report(problems, f"{len(cases)} case(s): no worse than the baseline, nothing unsafe")
 
 
 if __name__ == "__main__":  # pragma: no cover
