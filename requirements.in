@@ -8,3 +8,7 @@ fastapi==0.141.1
 uvicorn==0.53.0
 jinja2==3.1.6
 python-multipart==0.0.32
+# Tracing: the vendor-neutral SDK, exporting over OTLP/HTTP (Langfuse accepts no gRPC).
+opentelemetry-api==1.44.0
+opentelemetry-sdk==1.44.0
+opentelemetry-exporter-otlp-proto-http==1.44.0

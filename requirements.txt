@@ -23,6 +23,8 @@ distro==1.9.0
     # via langsmith
 fastapi==0.141.1
     # via -r requirements.in
+googleapis-common-protos==1.75.3
+    # via opentelemetry-exporter-otlp-proto-http
 h11==0.16.0
     # via
     #   httpcore
@@ -76,6 +78,26 @@ langsmith==0.12.4
     # via langchain-core
 markupsafe==3.0.3
     # via jinja2
+opentelemetry-api==1.44.0
+    # via
+    #   -r requirements.in
+    #   opentelemetry-exporter-otlp-proto-http
+    #   opentelemetry-sdk
+    #   opentelemetry-semantic-conventions
+opentelemetry-exporter-otlp-proto-common==1.44.0
+    # via opentelemetry-exporter-otlp-proto-http
+opentelemetry-exporter-otlp-proto-http==1.44.0
+    # via -r requirements.in
+opentelemetry-proto==1.44.0
+    # via
+    #   opentelemetry-exporter-otlp-proto-common
+    #   opentelemetry-exporter-otlp-proto-http
+opentelemetry-sdk==1.44.0
+    # via
+    #   -r requirements.in
+    #   opentelemetry-exporter-otlp-proto-http
+opentelemetry-semantic-conventions==0.65b0
+    # via opentelemetry-sdk
 orjson==3.12.0
     # via
     #   langgraph-sdk
@@ -86,6 +108,10 @@ packaging==26.3
     # via
     #   langchain-core
     #   langsmith
+protobuf==7.36.1
+    # via
+    #   googleapis-common-protos
+    #   opentelemetry-proto
 psycopg==3.3.5
     # via -r requirements.in
 psycopg-binary==3.3.5 ; implementation_name != 'pypy'
@@ -106,6 +132,7 @@ pyyaml==6.0.3
 requests==2.34.2
     # via
     #   langsmith
+    #   opentelemetry-exporter-otlp-proto-http
     #   requests-toolbelt
 requests-toolbelt==1.0.0
     # via langsmith
@@ -126,6 +153,10 @@ typing-extensions==4.16.0
     #   langchain-core
     #   langchain-protocol
     #   langsmith
+    #   opentelemetry-api
+    #   opentelemetry-exporter-otlp-proto-http
+    #   opentelemetry-sdk
+    #   opentelemetry-semantic-conventions
     #   pydantic
     #   pydantic-core
     #   typing-inspection
