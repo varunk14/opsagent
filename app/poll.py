@@ -32,6 +32,7 @@ Run:  .venv/bin/python -m app.poll fixtures/inbox.jsonl
 """
 
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,6 +40,7 @@ import psycopg
 from psycopg.pq import TransactionStatus
 
 from app.adapters.fixture import read_messages
+from app.contracts import IncomingMessage
 from app.db import connect
 from app.intake import accept
 
@@ -57,6 +59,19 @@ class PollSummary:
     @property
     def seen(self) -> int:
         return self.accepted + self.duplicates + self.collisions
+
+
+def has_more(messages: Iterator[IncomingMessage]) -> bool:
+    """
+    Peek past the limit without letting that line decide this pass.
+
+    A malformed line counts as waiting. The next pass reads it for real and
+    fails loudly there, instead of rolling back runs accepted here.
+    """
+    try:
+        return next(messages, None) is not None
+    except ValueError:
+        return True
 
 
 def poll_once(
@@ -89,7 +104,7 @@ def poll_once(
                 duplicates += 1
 
             if accepted + collisions >= limit:
-                more_waiting = next(messages, None) is not None
+                more_waiting = has_more(messages)
                 break
 
     return PollSummary(
