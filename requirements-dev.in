@@ -5,3 +5,5 @@ pytest==9.1.1
 pytest-cov==7.1.0
 ruff==0.16.7
 mypy==2.3.1
+# FastAPI's TestClient. Already locked through langgraph; pinned here so the tests do not depend on that.
+httpx==0.28.1

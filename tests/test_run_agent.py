@@ -2,7 +2,8 @@
 The driver: take a queued run and work it one committed step at a time.
 
 From week 4 the tools run. get_order and escalate_to_human execute through the
-keyed executor; issue_refund is recorded and waits for a person (week 5). Each
+keyed executor; from week 5 issue_refund is judged by the guardrail, and paid or
+handed to a person (tests/test_approval_path.py covers that path). Each
 executed step is committed with the run's record before the next one starts, so
 a worker that dies loses at most the step in flight.
 
@@ -33,6 +34,7 @@ from tests.fakes import (
     PROPOSED_REFUND,
     FakeRetriever,
     ScriptedModel,
+    proposed_refund,
 )
 
 pytestmark = pytest.mark.db
@@ -124,7 +126,8 @@ def plan_prompts(model: ScriptedModel) -> list[str]:
 # --- the ordinary case --------------------------------------------------------
 
 
-def test_a_run_looks_the_order_up_then_waits_with_a_refund_proposal(fresh_database):
+def test_a_run_looks_the_order_up_then_refunds_what_the_ledger_supports(fresh_database):
+    """Rs 3,600 at 0.9 confidence is under the default guardrail, so it is paid without waiting."""
     ledger(fresh_database)
     run_id = queue(fresh_database)
 
@@ -132,10 +135,10 @@ def test_a_run_looks_the_order_up_then_waits_with_a_refund_proposal(fresh_databa
         outcome = work_next(connection, happy_graph())
 
     assert str(outcome.run_id) == run_id
-    assert (outcome.status, outcome.tool, outcome.steps) == ("waiting_approval", "issue_refund", 1)
+    assert (outcome.status, outcome.tool, outcome.steps) == ("done", "issue_refund", 2)
     stored = row(fresh_database, run_id)
-    assert stored["status"] == "waiting_approval"
-    assert stored["current_node"] == "plan"
+    assert stored["status"] == "done"
+    assert stored["current_node"] == "act"
     assert stored["state"]["agent"]["proposal"]["tool"] == "issue_refund"
     assert stored["state"]["agent"]["proposal"]["args"]["amount_paise"] == 360_000
 
@@ -148,7 +151,7 @@ def test_the_lookup_really_ran_against_the_ledger(fresh_database):
         work_next(connection, happy_graph())
 
     steps = row(fresh_database, run_id)["state"]["agent"]["steps"]
-    assert len(steps) == 1
+    assert [step["tool"] for step in steps] == ["get_order", "issue_refund"]
     assert steps[0]["step"] == 1
     assert steps[0]["tool"] == "get_order"
     assert steps[0]["args"] == {"order_id": "4821"}
@@ -156,17 +159,20 @@ def test_the_lookup_really_ran_against_the_ledger(fresh_database):
     assert steps[0]["replayed"] is False
 
 
-def test_a_refund_is_proposed_but_never_executed(fresh_database):
-    """Week 4 runs the lookup; money waits for a person in week 5."""
+def test_a_refund_over_the_limit_is_proposed_but_never_executed(fresh_database):
+    """The lookup runs; Rs 7,200 waits for a person with an approval to decide."""
     ledger(fresh_database)
     queue(fresh_database)
+    model = ScriptedModel(
+        classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=[PROPOSED_LOOKUP, proposed_refund(720_000)]
+    )
 
     with psycopg.connect(fresh_database) as connection:
-        work_next(connection, happy_graph())
+        work_next(connection, graph_of(model))
 
     assert count(fresh_database, "tool_calls") == 1
     assert count(fresh_database, "refunds") == 0
-    assert count(fresh_database, "approvals") == 0
+    assert count(fresh_database, "approvals") == 1
 
 
 def test_each_executed_step_is_keyed_by_its_step_number(fresh_database):
@@ -176,7 +182,7 @@ def test_each_executed_step_is_keyed_by_its_step_number(fresh_database):
     with psycopg.connect(fresh_database) as connection:
         work_next(connection, happy_graph())
 
-    assert keys(fresh_database, run_id) == [f"{run_id}:step_1:get_order"]
+    assert keys(fresh_database, run_id) == [f"{run_id}:step_1:get_order", f"{run_id}:step_2:issue_refund"]
 
 
 def test_what_the_lookup_returned_reaches_the_next_plan(fresh_database):
@@ -411,15 +417,17 @@ def test_every_tool_the_model_can_propose_has_exactly_one_decision():
     added to app/tools.py must be placed deliberately -- never run, or not run, by default.
     """
     from app.executor import TOOLS as IMPLEMENTED
-    from app.run_agent import NOT_RUN_HERE, RUNS_NOW, WAITS_FOR_APPROVAL
+    from app.guardrails import JUDGED
+    from app.run_agent import GUARDED, NOT_RUN_HERE, RUNS_NOW
     from app.tools import TOOLS
 
-    decisions = [RUNS_NOW, WAITS_FOR_APPROVAL, NOT_RUN_HERE]
+    decisions = [RUNS_NOW, GUARDED, NOT_RUN_HERE]
     proposable = {tool.name for tool in TOOLS}
 
     assert set().union(*decisions) == proposable
     assert sum(len(decision) for decision in decisions) == len(proposable), "a tool is in two groups"
-    assert RUNS_NOW | WAITS_FOR_APPROVAL <= set(IMPLEMENTED), "a decided tool has no implementation"
+    assert RUNS_NOW | GUARDED <= set(IMPLEMENTED), "a decided tool has no implementation"
+    assert GUARDED == {JUDGED}, "a guarded tool the guardrail does not judge would never be decided"
 
 
 def test_a_proposal_the_executor_cannot_run_is_escalated(fresh_database):
@@ -473,8 +481,8 @@ def test_an_outage_after_a_committed_step_keeps_it_and_resumes_there(fresh_datab
         outcome = work_next(connection, graph_of(second))
 
     assert second.tasks() == ["plan"]
-    assert (outcome.status, outcome.tool) == ("waiting_approval", "issue_refund")
-    assert keys(fresh_database, run_id) == [f"{run_id}:step_1:get_order"]
+    assert (outcome.status, outcome.tool) == ("done", "issue_refund")
+    assert keys(fresh_database, run_id) == [f"{run_id}:step_1:get_order", f"{run_id}:step_2:issue_refund"]
 
 
 # --- review findings: attempts run out, claims can be lost ------------------------

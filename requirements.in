@@ -3,3 +3,8 @@
 pydantic==2.13.5
 psycopg[binary]==3.3.5
 langgraph==1.2.11
+# The local approvals screen (week 5). Plain uvicorn: no uvloop, httptools or file watcher.
+fastapi==0.141.1
+uvicorn==0.53.0
+jinja2==3.1.6
+python-multipart==0.0.32

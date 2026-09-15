@@ -1,5 +1,7 @@
 """A model that answers from a script, chosen by the TASK line each prompt opens with."""
 
+import json
+
 from app.llm import ModelUnavailable, Reply
 
 # A scripted reply that means: the model is unreachable for this call.
@@ -47,6 +49,20 @@ PROPOSED_REFUND = (
     ' "reason": "the ledger shows two charges of 360000"}, "confidence": 0.9,'
     ' "reasoning": "one of the two charges is a duplicate"}'
 )
+
+
+def proposed_refund(amount_paise: int, confidence: str = "0.9", order_id: str = "4821") -> str:
+    """A refund for any amount at any confidence, as the model would send it."""
+    return json.dumps(
+        {
+            "tool": "issue_refund",
+            "args": {"order_id": order_id, "amount_paise": amount_paise, "reason": "the ledger shows a duplicate"},
+            "confidence": float(confidence),
+            "reasoning": "one of the two charges is a duplicate",
+        }
+    )
+
+
 PROPOSED_ESCALATE = (
     '{"tool": "escalate_to_human", "args": {"reason": "status question"},'
     ' "confidence": 0.7, "reasoning": "no tool answers delivery questions"}'

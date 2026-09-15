@@ -105,7 +105,7 @@ def plan_prompt(
     return f"""TASK: plan
 Propose exactly ONE next tool call. get_order and escalate_to_human run as soon as
 you propose them, and what they return is shown to you on the next step.
-issue_refund does not run: it is recorded and waits for a person to approve it.
+issue_refund may need a person's approval before it is paid.
 Look an order up before proposing any refund, and never repeat a lookup whose
 result is already shown below. When unsure, use escalate_to_human.
 

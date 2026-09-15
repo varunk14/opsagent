@@ -15,8 +15,12 @@ back. The transactions are kept deliberately separate and short:
 
 get_order runs and the run goes round again, its lock refreshed so a run making
 progress is never mistaken for a stuck one. escalate_to_human runs and the run
-waits for a person. issue_refund is recorded and the run waits for a person
-too: approval is week 5, and the sender is only a From header. A proposal that
+waits for a person. issue_refund is judged by the guardrail (app/guardrails.py)
+with the limits in force at that moment: allowed, it is paid through the keyed
+executor and the run is done; not allowed, an approval is opened and the run
+waits for a person. Once a person approves, the next worker to claim the run
+pays exactly what was approved, asking no model and judging nothing again. A
+refund the ledger refuses, however it was allowed, goes to a person. A proposal that
 repeats an earlier step, a run past its step budget, or a tool this worker does
 not run are all handed to a person instead of executed. A sender who has caused
 RATE_LIMIT lookups within RATE_WINDOW has further lookups deferred: the run goes
@@ -52,15 +56,25 @@ from uuid import UUID
 import psycopg
 from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
+from pydantic import ValidationError
 
+from app.approvals import (
+    EXCERPT_CHARS,
+    ApprovedAction,
+    approved_unexecuted,
+    mark_executed,
+    open_approval,
+)
 from app.baseline import REFERENCE_RATE, token_cost
 from app.contracts import Classification, ExtractedRefund, ProposedAction, StepRecord
 from app.db import apply_migrations, connect
 from app.embeddings import OllamaEmbedder
-from app.executor import execute
+from app.executor import OWNED_ORDER, ToolOutcome, execute
 from app.graph.build import build_graph, run_graph
 from app.graph.nodes import escalation
 from app.graph.state import AgentState
+from app.guardrails import judge
+from app.guardrails import load as load_guardrails
 from app.llm import Ollama, Reply, ServiceUnavailable
 from app.retrieval import PolicyRetriever
 
@@ -94,7 +108,8 @@ STATEMENT_TIMEOUT = timedelta(seconds=30)
 # Every tool the model can propose is in exactly one of these, and a test holds it
 # there, so a new tool in app/tools.py cannot run -- or fail to run -- by default.
 RUNS_NOW = frozenset({"get_order", "escalate_to_human"})
-WAITS_FOR_APPROVAL = frozenset({"issue_refund"})
+# Judged by the guardrail at the act step: paid now, or put to a person to approve.
+GUARDED = frozenset({"issue_refund"})
 # Retrieval already ran in the graph; a planner asking to search again is handed over.
 NOT_RUN_HERE = frozenset({"search_policy"})
 
@@ -180,6 +195,23 @@ PARK = """
      WHERE id = %s AND locked_by = %s
 """
 
+FINISH = """
+    UPDATE runs
+       SET status = 'done', current_node = 'act', state = state || %s,
+           cost_usd = cost_usd + %s, locked_by = NULL, locked_at = NULL
+     WHERE id = %s AND locked_by = %s
+"""
+
+# Taken before a refund is judged. Two runs refunding one order queue here, so the
+# second judges against a total that includes the first; the ledger's cap trigger
+# takes the same lock later in the transaction. The sum is a separate statement so
+# that, once the lock is ours, its snapshot includes whatever the holder committed.
+LOCK_OWNED_ORDER = OWNED_ORDER + "   FOR UPDATE OF o"
+REFUNDED_SO_FAR = "SELECT coalesce(sum(amount_paise), 0)::bigint FROM refunds WHERE order_id = %s"
+
+# How much of the customer's message is kept with an approval, for the person deciding.
+EVIDENCE_BODY_CHARS = EXCERPT_CHARS
+
 # One statement decides retry or dead, so nothing can change attempt in between,
 # and a run that dies is dead-lettered by that same statement.
 RELEASE = """
@@ -204,6 +236,10 @@ class LostClaim(RuntimeError):
     """The run was taken by another worker before this one could act on it."""
 
 
+class ApprovalAlreadyExecuted(RuntimeError):
+    """The approval this worker read had been executed before it could act on it."""
+
+
 @dataclass(frozen=True)
 class ClaimedRun:
     run_id: UUID
@@ -211,6 +247,7 @@ class ClaimedRun:
     body: str
     worker: str
     attempt: int
+    sender: str | None = None
 
 
 @dataclass(frozen=True)
@@ -282,6 +319,7 @@ def claim_next(
         body=untrusted.get("body", ""),
         worker=worker,
         attempt=attempt,
+        sender=untrusted.get("sender"),
     )
 
 
@@ -331,7 +369,7 @@ def decide(state: AgentState, steps: list[dict[str, Any]], max_steps: int) -> tu
     if failure is not None or proposal.tool == "escalate_to_human":
         return proposal, failure
 
-    if proposal.tool not in RUNS_NOW | WAITS_FOR_APPROVAL:
+    if proposal.tool not in RUNS_NOW | GUARDED:
         return hand_over(
             f"{proposal.tool} is not a tool this worker runs",
             f"The planner asked for {proposal.tool}, which does not run here.",
@@ -395,6 +433,54 @@ def agent_of(connection: psycopg.Connection, run_id: UUID) -> dict[str, Any]:
     return dict(row[0]) if row and row[0] else {}
 
 
+def record_step(
+    connection: psycopg.Connection, run_id: UUID, steps: list[dict[str, Any]], action: ProposedAction
+) -> ToolOutcome:
+    """Execute `action` as the run's next keyed step and append what it did."""
+    number = len(steps) + 1
+    done = execute(connection, run_id, number, action)
+    record = StepRecord(step=number, tool=action.tool, args=dict(action.args), result=done.result, replayed=done.replayed)
+    steps.append(record.model_dump(mode="json"))
+    return done
+
+
+def pay(
+    connection: psycopg.Connection, run_id: UUID, steps: list[dict[str, Any]], action: ProposedAction
+) -> str | None:
+    """Pay a refund as the next step. None if it was paid; otherwise why a person must look."""
+    done = record_step(connection, run_id, steps, action)
+    if done.result.get("refunded"):
+        return None
+    return f"act: the ledger refused the refund: {done.result.get('error', 'no reason given')}"
+
+
+def refunded_so_far(connection: psycopg.Connection, run_id: UUID, action: ProposedAction) -> int:
+    """
+    What the order has already had back, read under a lock on the order.
+
+    An order this run's sender does not own is neither locked nor counted: the
+    executor refuses it exactly as it refuses a missing one.
+    """
+    order_id = action.args["order_id"]
+    if connection.execute(LOCK_OWNED_ORDER, (run_id, order_id)).fetchone() is None:
+        return 0
+    row = connection.execute(REFUNDED_SO_FAR, (order_id,)).fetchone()
+    return int(row[0]) if row else 0
+
+
+def evidence_for(claimed: ClaimedRun, agent: Mapping[str, Any]) -> dict[str, Any]:
+    """What a person needs to decide, kept with the approval as it stood when they were asked."""
+    return {
+        "sender": claimed.sender,
+        "subject": claimed.subject,
+        "body": claimed.body[:EVIDENCE_BODY_CHARS],
+        "classification": agent["classification"],
+        "extraction": agent["extraction"],
+        "policy_sources": agent["policy_sources"],
+        "steps": agent["steps"],
+    }
+
+
 def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_steps: int) -> RunOutcome:
     """Walk the graph from what the run holds, then act on one proposal in one transaction."""
     before = agent_of(connection, claimed.run_id)
@@ -450,25 +536,79 @@ def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_st
                     )
 
         if proposal.tool in RUNS_NOW:
-            number = len(steps) + 1
-            done = execute(connection, claimed.run_id, number, proposal)
-            record = StepRecord(
-                step=number, tool=proposal.tool, args=dict(proposal.args), result=done.result, replayed=done.replayed
-            )
-            steps.append(record.model_dump(mode="json"))
+            record_step(connection, claimed.run_id, steps, proposal)
+
+        verdict = None
+        if proposal.tool in GUARDED:
+            # Read now, inside this transaction: a limit changed a second ago applies.
+            limits = load_guardrails(connection)
+            verdict = judge(proposal, limits, refunded_so_far(connection, claimed.run_id, proposal))
+            if verdict.runs:
+                failure = pay(connection, claimed.run_id, steps, proposal)
 
         agent, cost = summarise_agent(state, before, proposal, failure, steps)
+        stored = (Jsonb({"agent": agent}), cost, claimed.run_id, claimed.worker)
         if proposal.tool == "get_order":
             status = "running"
-            connection.execute(CONTINUE, (Jsonb({"agent": agent}), cost, claimed.run_id, claimed.worker))
+            connection.execute(CONTINUE, stored)
+        elif verdict is not None and not verdict.runs:
+            status = "waiting_approval"
+            open_approval(connection, claimed.run_id, proposal, evidence_for(claimed, agent), verdict.reason or "")
+            connection.execute(PARK, ("approval", *stored))
+        elif verdict is not None and failure is None:
+            status = "done"
+            connection.execute(FINISH, stored)
         else:
             status = "waiting_approval"
             # A run that escalated early stopped at the step that failed.
             node = failure.split(":", 1)[0] if failure else "plan"
-            connection.execute(PARK, (node, Jsonb({"agent": agent}), cost, claimed.run_id, claimed.worker))
+            connection.execute(PARK, (node, *stored))
 
     return RunOutcome(
         run_id=claimed.run_id, status=status, tool=proposal.tool, steps=len(steps), failure=failure, cost_usd=cost
+    )
+
+
+def act_on_approval(connection: psycopg.Connection, claimed: ClaimedRun, approved: ApprovedAction) -> RunOutcome:
+    """
+    Pay exactly what a person approved: no model is asked, and the guardrail is not
+    applied again, since a person has already overruled it. The keyed executor, the
+    sender's ownership of the order and the ledger cap all still apply.
+    """
+    before = agent_of(connection, claimed.run_id)
+    steps = list(before.get("steps", []))
+    tool = str(approved.action.get("tool", "unknown"))
+    with connection.transaction():
+        if connection.execute(HOLD_CLAIM, (claimed.run_id, claimed.worker)).fetchone() is None:
+            raise LostClaim(f"run {claimed.run_id} was reclaimed before this worker could act on it")
+        # Stamped first, in the transaction that pays: a copy of an approval that has
+        # since been executed pays nothing and records nothing.
+        if not mark_executed(connection, approved.id):
+            raise ApprovalAlreadyExecuted(f"approval {approved.id} was already executed")
+
+        failure: str | None
+        try:
+            action = ProposedAction.model_validate(approved.action)
+        except ValidationError as unreadable:
+            # It was valid when proposed, so only a schema change since can land here.
+            failure = f"act: the approved action could not be read ({unreadable.error_count()} validation errors)"
+        else:
+            failure = pay(connection, claimed.run_id, steps, action)
+        stored = (Jsonb({"agent": {**before, "steps": steps, "failure": failure}}), Decimal(0), claimed.run_id, claimed.worker)
+        if failure is None:
+            status = "done"
+            connection.execute(FINISH, stored)
+        else:
+            status = "waiting_approval"
+            connection.execute(PARK, ("act", *stored))
+
+    return RunOutcome(
+        run_id=claimed.run_id,
+        status=status,
+        tool=tool,
+        steps=len(steps),
+        failure=failure,
+        cost_usd=Decimal(0),  # no model is asked: paying what a person approved costs no tokens
     )
 
 
@@ -481,8 +621,9 @@ def work_next(
     lock_timeout: timedelta = LOCK_TIMEOUT,
 ) -> RunOutcome | None:
     """
-    Claim one run and work it until it waits for a person.
+    Claim one run and work it until it is done or waits for a person.
 
+    A run a person has approved is paid as approved, without walking the graph.
     `after_step` is called once each continuing step has been committed, with the
     run id and how many steps it now has -- the moment a dying worker loses nothing.
     """
@@ -490,6 +631,11 @@ def work_next(
     claimed = claim_next(connection, worker or default_worker(), lock_timeout)
     if claimed is None:
         return None
+
+    with connection.transaction():
+        approved = approved_unexecuted(connection, claimed.run_id)
+    if approved is not None:
+        return act_on_approval(connection, claimed, approved)
 
     while True:
         outcome = tick(connection, graph, claimed, max_steps)

@@ -5,7 +5,8 @@ A tool here is a name, a description and a JSON schema, and deliberately nothing
 executable: proposing a tool can never run it. What runs is decided elsewhere --
 app/executor.py holds the implementations, behind idempotency keys, and
 app/run_agent.py decides which proposals it executes (get_order,
-escalate_to_human) and which wait for a person (issue_refund).
+escalate_to_human) and which the guardrail judges first (issue_refund: paid, or
+put to a person to approve).
 
 The descriptions are written for the model, not for us. Every ambiguity a human
 would resolve from context is spelled out instead -- most importantly that money
@@ -17,7 +18,7 @@ from collections.abc import Collection
 from dataclasses import dataclass
 
 # Rs 10,00,000. A sanity ceiling on what could ever be one refund, not a
-# refund policy -- policy limits need the order record and arrive in week 5.
+# refund policy -- the policy limits live in the database (app/guardrails.py).
 MAX_AMOUNT_PAISE = 100_000_000
 
 # An order number, not a sentence. Letters, digits and hyphens, starting with a

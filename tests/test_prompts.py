@@ -160,8 +160,19 @@ def test_the_plan_no_longer_claims_nothing_runs():
     assert "Nothing you propose runs on its own" not in plan()
 
 
-def test_the_plan_says_a_refund_waits_for_a_person():
-    assert "waits for a person to approve" in plan()
+def test_the_plan_says_a_refund_may_wait_for_a_person():
+    """From week 5 some refunds are paid at once; the old line would be a lie in the other direction."""
+    assert "issue_refund does not run" not in plan()
+    assert "may need a person's approval before it is paid" in plan()
+
+
+def test_the_plan_does_not_state_the_limits():
+    """Concept 2.10: limits live in code. Stated in the prompt, they invite an email to argue with them."""
+    prompt = plan()
+
+    assert "5,000" not in prompt
+    assert "500000" not in prompt
+    assert "0.85" not in prompt
 
 
 def test_what_the_tools_returned_reaches_the_plan_fenced_as_data():

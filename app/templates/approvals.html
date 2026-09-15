@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Approvals — OpsAgent{% endblock %}
+{% block content %}
+{% if not operator %}
+<p class="warning">OPSAGENT_OPERATOR is not set, so decisions cannot be recorded. Restart the screen with your name in it.</p>
+{% endif %}
+
+<h1>Waiting for a decision</h1>
+{% for item in pending %}
+<section class="card">
+  <h2>Refund {{ item.amount }} on order {{ item.order_id }}</h2>
+  <p class="reason">{{ item.reason }}</p>
+  <dl>
+    <dt>From</dt><dd>{{ item.sender }}</dd>
+    <dt>Subject</dt><dd>{{ item.subject }}</dd>
+    <dt>Charged on the order</dt><dd>{% if item.charges %}{{ item.charges | join(", ") }}{% else %}no lookup on record{% endif %}</dd>
+    <dt>Already refunded</dt><dd>{{ item.refunded if item.refunded is not none else "unknown" }}</dd>
+    <dt>Why the agent proposes it</dt><dd>{{ item.refund_reason }}</dd>
+    <dt>Agent's confidence</dt><dd>{{ item.confidence }}</dd>
+    <dt>Asked</dt><dd>{{ item.asked_at.strftime("%Y-%m-%d %H:%M") }}</dd>
+  </dl>
+  <p>What the customer wrote:</p>
+  <div class="customer">{{ item.body }}</div>
+  <form method="post" action="/approvals/{{ item.id }}/approve">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Note (optional)<br><textarea name="note" rows="2" maxlength="1000"></textarea></label>
+    <button type="submit">Approve: pay {{ item.amount }}</button>
+  </form>
+  <form method="post" action="/approvals/{{ item.id }}/reject">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <label>Note (optional)<br><textarea name="note" rows="2" maxlength="1000"></textarea></label>
+    <button type="submit">Reject: pay nothing</button>
+  </form>
+</section>
+{% else %}
+<p>Nothing is waiting for a decision.</p>
+{% endfor %}
+
+<h1>Handed to a person, nothing to approve</h1>
+{% for run in handed_over %}
+<section class="card">
+  <p class="reason">{{ run.why or "no reason recorded" }}</p>
+  <dl>
+    <dt>From</dt><dd>{{ run.sender }}</dd>
+    <dt>Subject</dt><dd>{{ run.subject }}</dd>
+    <dt>Received</dt><dd>{{ run.created_at.strftime("%Y-%m-%d %H:%M") }}</dd>
+    <dt>Run</dt><dd>{{ run.run_id }}</dd>
+  </dl>
+  <div class="customer">{{ run.body }}</div>
+</section>
+{% else %}
+<p>No run is waiting without an approval.</p>
+{% endfor %}
+{% endblock %}

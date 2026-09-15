@@ -279,3 +279,235 @@ def test_a_requeued_run_that_dies_again_gets_a_new_dead_letter(db):
     insert_dead_letter(db, kind="run", run_id=run_id)
 
     assert db.execute("SELECT count(*) FROM dead_letters WHERE run_id = %s", (run_id,)).fetchone()[0] == 2
+
+
+# --- week 5: guardrails --------------------------------------------------------
+
+
+def test_the_guardrail_starts_at_the_handbook_defaults(db):
+    """Rs 5,000 and 0.85: a fresh database is safe before anyone configures it."""
+    limit, confidence = db.execute(
+        "SELECT auto_refund_limit_paise, min_confidence FROM guardrails"
+    ).fetchone()
+
+    assert (limit, str(confidence)) == (500_000, "0.85")
+
+
+def test_there_is_only_ever_one_guardrail_row(db):
+    """Two rows would make "the limit" ambiguous, and whichever was read first would win."""
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        db.execute(
+            "INSERT INTO guardrails (auto_refund_limit_paise, min_confidence, updated_by) "
+            "VALUES (100, 0.5, 'test')"
+        )
+
+
+def test_a_second_guardrail_row_cannot_dodge_the_key(db):
+    with pytest.raises(psycopg.errors.CheckViolation):
+        db.execute(
+            "INSERT INTO guardrails (singleton, auto_refund_limit_paise, min_confidence, updated_by) "
+            "VALUES (false, 100, 0.5, 'test')"
+        )
+
+
+def test_the_guardrail_row_cannot_be_deleted(db):
+    """With no row there is no limit; the database refuses rather than leaving it to Python."""
+    with pytest.raises(psycopg.errors.RaiseException):
+        db.execute("DELETE FROM guardrails")
+
+
+def test_the_guardrail_row_cannot_be_truncated_away_either(db):
+    """TRUNCATE fires no row-level DELETE trigger; found in the Unit A database review."""
+    with pytest.raises(psycopg.errors.RaiseException):
+        db.execute("TRUNCATE guardrails")
+
+
+@pytest.mark.parametrize(
+    "assignment",
+    [
+        "auto_refund_limit_paise = -1",
+        "min_confidence = 1.5",
+        "min_confidence = -0.1",
+        "updated_by = '   '",
+    ],
+)
+def test_a_guardrail_outside_its_range_is_refused(db, assignment):
+    with pytest.raises(psycopg.errors.CheckViolation):
+        db.execute(f"UPDATE guardrails SET {assignment}")
+
+
+def test_a_limit_of_zero_is_allowed(db):
+    """Zero is the kill switch: every refund needs a person."""
+    db.execute("UPDATE guardrails SET auto_refund_limit_paise = 0")
+
+
+# --- week 5: approvals --------------------------------------------------------
+
+
+def insert_approval(db, run_id: uuid.UUID, **columns) -> None:
+    values = {"action": '{"tool": "issue_refund"}', "evidence": "{}", "reason": "test"} | columns
+    names = ", ".join(values)
+    placeholders = ", ".join(["%s"] * len(values))
+    db.execute(
+        f"INSERT INTO approvals (run_id, {names}) VALUES (%s, {placeholders})",
+        (run_id, *values.values()),
+    )
+
+
+def test_a_run_has_at_most_one_pending_approval(db):
+    """Two would let one refund be approved twice, once per row."""
+    run_id = insert_run(db, key="email_msg_two_pending", status="waiting_approval")
+    insert_approval(db, run_id)
+
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        insert_approval(db, run_id)
+
+
+def test_a_decided_approval_does_not_block_a_new_one(db):
+    run_id = insert_run(db, key="email_msg_asked_again", status="waiting_approval")
+    insert_approval(db, run_id, status="rejected", decided_by="asha", decided_at="2026-09-15T10:00:00Z")
+
+    insert_approval(db, run_id)
+
+
+def approval_id(db, run_id: uuid.UUID) -> int:
+    return db.execute("SELECT id FROM approvals WHERE run_id = %s", (run_id,)).fetchone()[0]
+
+
+APPROVE = "UPDATE approvals SET status = 'approved', decided_by = 'asha', decided_at = now() WHERE id = %s"
+
+
+def test_a_pending_approval_can_be_decided(db):
+    """Guards the triggers below against refusing the one change they must allow."""
+    run_id = insert_run(db, key="email_msg_decide", status="waiting_approval")
+    insert_approval(db, run_id)
+
+    db.execute(APPROVE, (approval_id(db, run_id),))
+    db.execute("UPDATE approvals SET executed_at = now() WHERE id = %s", (approval_id(db, run_id),))
+
+
+def test_what_a_person_is_asked_to_approve_cannot_be_changed_under_them(db):
+    """The screen shows one refund; an edit before the click would execute another."""
+    run_id = insert_run(db, key="email_msg_swap_action", status="waiting_approval")
+    insert_approval(db, run_id)
+
+    with pytest.raises(psycopg.errors.RaiseException):
+        db.execute(
+            "UPDATE approvals SET action = '{\"tool\": \"issue_refund\", \"amount_paise\": 99}' WHERE id = %s",
+            (approval_id(db, run_id),),
+        )
+
+
+@pytest.mark.parametrize(
+    "column",
+    [
+        "evidence = '{\"forged\": true}'",
+        "confidence = 0.99",
+        "reason = 'nothing to see'",
+        "created_at = now() - interval '1 day'",
+    ],
+    ids=["evidence", "confidence", "reason", "asked-at"],
+)
+def test_the_case_put_to_a_person_is_fixed_once_asked(db, column):
+    run_id = insert_run(db, key="email_msg_swap_case", status="waiting_approval")
+    insert_approval(db, run_id)
+
+    with pytest.raises(psycopg.errors.RaiseException):
+        db.execute(f"UPDATE approvals SET {column} WHERE id = %s", (approval_id(db, run_id),))
+
+
+def test_an_approval_cannot_be_moved_to_another_run(db):
+    """Moved, an approval given for one customer's case would release another's refund."""
+    run_id = insert_run(db, key="email_msg_move_from", status="waiting_approval")
+    other = insert_run(db, key="email_msg_move_to", status="waiting_approval")
+    insert_approval(db, run_id)
+
+    with pytest.raises(psycopg.errors.RaiseException):
+        db.execute("UPDATE approvals SET run_id = %s WHERE id = %s", (other, approval_id(db, run_id)))
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "status = 'rejected'",
+        "status = 'pending', decided_by = NULL, decided_at = NULL",
+        "decided_by = 'someone else'",
+        "decided_at = now() - interval '1 day'",
+        "decision_note = 'rewritten'",
+    ],
+    ids=["flipped", "undecided", "reattributed", "backdated", "renoted"],
+)
+def test_a_decision_cannot_be_rewritten(db, change):
+    run_id = insert_run(db, key="email_msg_rewrite", status="queued")
+    insert_approval(db, run_id)
+    db.execute(APPROVE, (approval_id(db, run_id),))
+
+    with pytest.raises(psycopg.errors.RaiseException):
+        db.execute(f"UPDATE approvals SET {change} WHERE id = %s", (approval_id(db, run_id),))
+
+
+@pytest.mark.parametrize(
+    "change", ["executed_at = NULL", "executed_at = now() + interval '1 second'"], ids=["cleared", "restamped"]
+)
+def test_an_executed_approval_stays_executed(db, change):
+    """Clearing executed_at would make the worker execute the approved refund again."""
+    run_id = insert_run(db, key="email_msg_executed", status="done")
+    insert_approval(db, run_id)
+    db.execute(APPROVE, (approval_id(db, run_id),))
+    db.execute("UPDATE approvals SET executed_at = now() WHERE id = %s", (approval_id(db, run_id),))
+
+    with pytest.raises(psycopg.errors.RaiseException):
+        db.execute(f"UPDATE approvals SET {change} WHERE id = %s", (approval_id(db, run_id),))
+
+
+def test_pending_approvals_can_be_listed_in_order_from_the_index_alone(db):
+    """Database review: the screen orders by (created_at, id); an index on created_at alone still sorts."""
+    indexed = db.execute("SELECT indexdef FROM pg_indexes WHERE tablename = 'approvals'").fetchall()
+
+    assert any("(created_at, id)" in definition and "pending" in definition for (definition,) in indexed)
+
+
+def test_a_run_has_at_most_one_approved_action_waiting_to_execute(db):
+    run_id = insert_run(db, key="email_msg_two_approved", status="queued")
+    decided = {"status": "approved", "decided_by": "asha", "decided_at": "2026-09-15T10:00:00Z"}
+    insert_approval(db, run_id, **decided)
+
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        insert_approval(db, run_id, **decided)
+
+
+def test_an_approval_needs_a_reason(db):
+    """A person asked to decide must be told why they are being asked."""
+    run_id = insert_run(db, key="email_msg_no_reason", status="waiting_approval")
+
+    with pytest.raises(psycopg.errors.NotNullViolation):
+        insert_approval(db, run_id, reason=None)
+
+
+@pytest.mark.parametrize(
+    "columns",
+    [
+        {"status": "approved"},
+        {"status": "approved", "decided_by": "asha"},
+        {"status": "rejected", "decided_at": "2026-09-15T10:00:00Z"},
+        {"status": "approved", "decided_by": "  ", "decided_at": "2026-09-15T10:00:00Z"},
+        {"decided_by": "asha", "decided_at": "2026-09-15T10:00:00Z"},
+        {"executed_at": "2026-09-15T10:00:00Z"},
+        {"status": "rejected", "decided_by": "asha", "decided_at": "2026-09-15T10:00:00Z",
+         "executed_at": "2026-09-15T10:00:00Z"},
+    ],
+    ids=[
+        "approved-by-nobody",
+        "approved-at-no-time",
+        "rejected-by-nobody",
+        "approved-by-a-blank-name",
+        "pending-but-decided",
+        "pending-but-executed",
+        "rejected-but-executed",
+    ],
+)
+def test_a_decision_is_recorded_whole_or_not_at_all(db, columns):
+    run_id = insert_run(db, key="email_msg_half_decided", status="waiting_approval")
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        insert_approval(db, run_id, **columns)

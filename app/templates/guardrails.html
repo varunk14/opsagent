@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}Guardrails — OpsAgent{% endblock %}
+{% block content %}
+<h1>Guardrails in force</h1>
+<dl>
+  <dt>Refunds paid without a person</dt><dd>when the order's refunds stay under {{ limit }}</dd>
+  <dt>Confidence needed</dt><dd>at least {{ min_confidence }}</dd>
+</dl>
+<p>Everything else waits for a decision. Change these with
+<code>python -m app.guardrails set --limit-rupees N --by NAME</code>; a limit of Rs 0 stops automatic refunds.</p>
+{% endblock %}

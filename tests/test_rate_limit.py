@@ -64,8 +64,12 @@ def test_a_sender_under_the_limit_is_served(fresh_database):
     with psycopg.connect(fresh_database) as connection:
         outcome = agent.work_next(connection, happy_graph())
 
-    assert outcome.status == "waiting_approval"
-    assert keys(fresh_database, run_id) == [f"{run_id}:step_1:get_order"]
+    assert outcome.status == "done"
+    assert keys(fresh_database, run_id) == [f"{run_id}:step_1:get_order", f"{run_id}:step_2:issue_refund"]
+
+
+def lookups(dsn: str, run_id: str) -> list[str]:
+    return [key for key in keys(dsn, run_id) if key.endswith(":get_order")]
 
 
 def test_a_sender_at_the_limit_is_deferred_without_spending_an_attempt(fresh_database):
@@ -116,7 +120,7 @@ def test_another_sender_is_not_limited(fresh_database):
     with psycopg.connect(fresh_database) as connection:
         agent.work_next(connection, happy_graph())
 
-    assert keys(fresh_database, run_id) == [f"{run_id}:step_1:get_order"]
+    assert lookups(fresh_database, run_id) == [f"{run_id}:step_1:get_order"]
 
 
 def test_lookups_older_than_the_window_do_not_count(fresh_database):
@@ -127,7 +131,7 @@ def test_lookups_older_than_the_window_do_not_count(fresh_database):
     with psycopg.connect(fresh_database) as connection:
         agent.work_next(connection, happy_graph())
 
-    assert keys(fresh_database, run_id) == [f"{run_id}:step_1:get_order"]
+    assert lookups(fresh_database, run_id) == [f"{run_id}:step_1:get_order"]
 
 
 def test_handing_a_case_to_a_person_is_never_limited(fresh_database):
@@ -167,9 +171,9 @@ def test_two_workers_racing_for_the_last_slot_use_it_once(fresh_database):
         thread.join(timeout=60)
 
     assert errors == []
-    executed = len(keys(fresh_database, first)) + len(keys(fresh_database, second))
+    executed = len(lookups(fresh_database, first)) + len(lookups(fresh_database, second))
     assert executed == 1, "exactly one of the two runs got the last lookup"
-    assert sorted(outcome.status for outcome in outcomes) == ["queued", "waiting_approval"]
+    assert sorted(outcome.status for outcome in outcomes) == ["done", "queued"]
 
 
 # --- found in review: a deferral must not repeat work, or go on forever -------------

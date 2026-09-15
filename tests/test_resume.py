@@ -65,7 +65,11 @@ def test_a_worker_killed_mid_run_is_resumed_by_another(fresh_database):
 
     assert str(outcome.run_id) == run_id
     assert resumed.tasks() == ["plan"], "classify and extract were already on record"
-    assert (outcome.status, outcome.tool) == ("waiting_approval", "issue_refund")
-    assert keys(fresh_database, run_id) == [f"{run_id}:step_1:get_order"], "the lookup was not repeated"
-    assert count(fresh_database, "refunds") == 0
+    # Rs 3,600 is under the default guardrail, so from week 5 the rescuer pays it -- once.
+    assert (outcome.status, outcome.tool) == ("done", "issue_refund")
+    assert keys(fresh_database, run_id) == [
+        f"{run_id}:step_1:get_order",
+        f"{run_id}:step_2:issue_refund",
+    ], "the lookup was not repeated"
+    assert count(fresh_database, "refunds") == 1
     assert row(fresh_database, run_id)["attempt"] == 2
