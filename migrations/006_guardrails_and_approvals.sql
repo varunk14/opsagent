@@ -96,6 +96,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS approvals_one_pending_per_run
 CREATE UNIQUE INDEX IF NOT EXISTS approvals_one_unexecuted_per_run
     ON approvals (run_id) WHERE status = 'approved' AND executed_at IS NULL;
 
--- The approvals screen lists pending approvals oldest first.
+-- The approvals screen lists pending approvals oldest first, ties broken by id.
 CREATE INDEX IF NOT EXISTS approvals_pending_created_at_idx
-    ON approvals (created_at) WHERE status = 'pending';
+    ON approvals (created_at, id) WHERE status = 'pending';

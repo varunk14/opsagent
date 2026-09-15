@@ -56,6 +56,7 @@ from uuid import UUID
 import psycopg
 from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
+from pydantic import ValidationError
 
 from app.approvals import (
     ApprovedAction,
@@ -232,6 +233,10 @@ RELEASE = """
 
 class LostClaim(RuntimeError):
     """The run was taken by another worker before this one could act on it."""
+
+
+class ApprovalAlreadyExecuted(RuntimeError):
+    """The approval this worker read had been executed before it could act on it."""
 
 
 @dataclass(frozen=True)
@@ -571,12 +576,23 @@ def act_on_approval(connection: psycopg.Connection, claimed: ClaimedRun, approve
     """
     before = agent_of(connection, claimed.run_id)
     steps = list(before.get("steps", []))
+    tool = str(approved.action.get("tool", "unknown"))
     with connection.transaction():
         if connection.execute(HOLD_CLAIM, (claimed.run_id, claimed.worker)).fetchone() is None:
             raise LostClaim(f"run {claimed.run_id} was reclaimed before this worker could act on it")
+        # Stamped first, in the transaction that pays: a copy of an approval that has
+        # since been executed pays nothing and records nothing.
+        if not mark_executed(connection, approved.id):
+            raise ApprovalAlreadyExecuted(f"approval {approved.id} was already executed")
 
-        failure = pay(connection, claimed.run_id, steps, approved.action)
-        mark_executed(connection, approved.id)
+        failure: str | None
+        try:
+            action = ProposedAction.model_validate(approved.action)
+        except ValidationError as unreadable:
+            # It was valid when proposed, so only a schema change since can land here.
+            failure = f"act: the approved action could not be read ({unreadable.error_count()} validation errors)"
+        else:
+            failure = pay(connection, claimed.run_id, steps, action)
         stored = (Jsonb({"agent": {**before, "steps": steps, "failure": failure}}), Decimal(0), claimed.run_id, claimed.worker)
         if failure is None:
             status = "done"
@@ -588,7 +604,7 @@ def act_on_approval(connection: psycopg.Connection, claimed: ClaimedRun, approve
     return RunOutcome(
         run_id=claimed.run_id,
         status=status,
-        tool=approved.action.tool,
+        tool=tool,
         steps=len(steps),
         failure=failure,
         cost_usd=Decimal(0),

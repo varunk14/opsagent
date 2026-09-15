@@ -73,7 +73,11 @@ APPROVED_UNEXECUTED = """
      WHERE run_id = %s AND status = 'approved' AND executed_at IS NULL
 """
 
-MARK_EXECUTED = "UPDATE approvals SET executed_at = now() WHERE id = %s AND executed_at IS NULL RETURNING id"
+MARK_EXECUTED = """
+    UPDATE approvals SET executed_at = now()
+     WHERE id = %s AND status = 'approved' AND executed_at IS NULL
+    RETURNING id
+"""
 
 
 @dataclass(frozen=True)
@@ -91,8 +95,10 @@ class PendingApproval:
 
 @dataclass(frozen=True)
 class ApprovedAction:
+    """An approval a person granted, with the action exactly as stored -- validated by whoever executes it."""
+
     id: int
-    action: ProposedAction
+    action: dict[str, Any]
 
 
 def open_approval(
@@ -137,9 +143,9 @@ def approved_unexecuted(connection: psycopg.Connection, run_id: UUID) -> Approve
     row = connection.execute(APPROVED_UNEXECUTED, (run_id,)).fetchone()
     if row is None:
         return None
-    return ApprovedAction(id=row[0], action=ProposedAction.model_validate(row[1]))
+    return ApprovedAction(id=row[0], action=dict(row[1]))
 
 
 def mark_executed(connection: psycopg.Connection, approval_id: int) -> bool:
-    """Stamp an approved action as executed. False if it already was."""
+    """Stamp an approved action as executed. False if it already was, or was never approved."""
     return connection.execute(MARK_EXECUTED, (approval_id,)).fetchone() is not None

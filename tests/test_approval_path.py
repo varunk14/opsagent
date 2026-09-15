@@ -419,9 +419,8 @@ def test_an_approval_already_executed_is_not_paid_by_a_worker_holding_an_old_cop
     run_id = queue(fresh_database)
     work(fresh_database, refund_model(360_000, confidence="0.5"))
     decide_on(fresh_database, run_id, approved=True)
-    with psycopg.connect(fresh_database) as connection:
-        with connection.transaction():
-            old_copy = approved_unexecuted(connection, run_id)
+    with psycopg.connect(fresh_database) as connection, connection.transaction():
+        old_copy = approved_unexecuted(connection, run_id)
     assert work(fresh_database, MustNotBeAsked()).status == "done"
     with psycopg.connect(fresh_database) as connection:
         connection.execute("UPDATE runs SET status = 'queued' WHERE id = %s", (run_id,))
