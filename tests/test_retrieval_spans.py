@@ -16,7 +16,7 @@ import pytest
 from app.graph.build import build_graph, run_graph
 from app.llm import ModelUnavailable
 from app.retrieval import PolicyRetriever, PolicySearchUnavailable
-from app.tracing import SpanRow, rows_for, run_context, tracer
+from app.tracing import Attr, SpanRow, rows_for, run_context, tracer
 from tests.fakes import (
     CLASSIFIED_DUPLICATE,
     EXTRACTED_4821,
@@ -60,17 +60,17 @@ def test_the_embedding_says_its_tokens_are_not_counted(fresh_database, exported)
     embedding = named(rows, "embed_query")
     assert embedding.model == "axis-embed"
     assert (embedding.input_tokens, embedding.cost_usd) == (None, None)
-    assert embedding.attributes["opsagent.cost_counted"] is False
+    assert embedding.attributes[Attr.COST_COUNTED] is False
 
 
 def test_the_vector_search_records_what_came_back(fresh_database, exported):
     rows = search(exported, retriever(fresh_database, loaded(fresh_database), k=2, max_distance=2.0))
 
     found = named(rows, "vector_search").attributes
-    assert found["opsagent.k"] == 2
-    assert found["opsagent.passages"] == 2
-    assert found["opsagent.sources"][0] == "duplicate-payments#0"
-    assert 0 <= found["opsagent.top_distance"] < 1
+    assert found[Attr.K] == 2
+    assert found[Attr.PASSAGES] == 2
+    assert found[Attr.SOURCES][0] == "duplicate-payments#0"
+    assert 0 <= found[Attr.TOP_DISTANCE] < 1
 
 
 def test_a_search_that_found_nothing_near_enough_says_so(fresh_database, exported):
@@ -78,8 +78,8 @@ def test_a_search_that_found_nothing_near_enough_says_so(fresh_database, exporte
     rows = search(exported, retriever(fresh_database, loaded(fresh_database), max_distance=-1.0))
 
     found = named(rows, "vector_search").attributes
-    assert found["opsagent.passages"] == 0
-    assert "opsagent.top_distance" not in found
+    assert found[Attr.PASSAGES] == 0
+    assert Attr.TOP_DISTANCE not in found
 
 
 def test_the_question_never_goes_into_a_span(fresh_database, exported):

@@ -141,11 +141,11 @@ def test_what_each_step_decided_is_recorded(exported):
     rows = walk(exported, happy())
 
     classify = named(rows, "classify").attributes
-    assert (classify["opsagent.intent"], classify["opsagent.confidence"]) == ("duplicate_charge", "0.9")
-    assert named(rows, "extract").attributes["opsagent.order_id_found"] is True
-    assert named(rows, "retrieve").attributes["opsagent.passages"] == 1
+    assert (classify[Attr.INTENT], classify[Attr.CLASSIFICATION_CONFIDENCE]) == ("duplicate_charge", "0.9")
+    assert named(rows, "extract").attributes[Attr.ORDER_ID_FOUND] is True
+    assert named(rows, "retrieve").attributes[Attr.PASSAGES] == 1
     plan = named(rows, "plan").attributes
-    assert (plan["opsagent.tool"], plan["opsagent.confidence"]) == ("get_order", "0.8")
+    assert (plan[Attr.TOOL], plan[Attr.PROPOSAL_CONFIDENCE]) == ("get_order", "0.8")
 
 
 def test_no_customer_text_goes_into_any_span(exported):
@@ -165,8 +165,8 @@ def test_an_escalating_step_is_marked_but_is_not_an_error(exported):
     assert children(rows, "tick") == ["classify"]
     classify = named(rows, "classify")
     assert classify.status == "ok"
-    assert classify.attributes["opsagent.failure"] == "classify: model output unusable"
-    assert classify.attributes["opsagent.tool"] == "escalate_to_human"
+    assert classify.attributes[Attr.FAILURE] == "classify: model output unusable"
+    assert classify.attributes[Attr.TOOL] == "escalate_to_human"
 
 
 def test_a_model_that_never_answered_is_an_error_and_not_a_free_generation(exported):

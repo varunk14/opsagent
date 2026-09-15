@@ -708,3 +708,22 @@ def test_a_run_that_is_not_there_has_recorded_nothing(fresh_database):
 
     with psycopg.connect(fresh_database) as connection:
         assert agent_of(connection, uuid4()) == {}
+
+
+def test_outage_totals_are_folded_in_and_cleared_once_a_tick_records_its_own(fresh_database):
+    """Kept only until the run's own totals include them; left behind, they would read as current."""
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    with psycopg.connect(fresh_database) as connection, pytest.raises(ModelUnavailable):
+        work_next(connection, graph_of(ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=OUTAGE)))
+    assert row(fresh_database, run_id)["state"]["billing"] == {"prompt_tokens": 10, "completion_tokens": 5, "model_calls": 1}
+    with psycopg.connect(fresh_database) as connection:
+        connection.execute("UPDATE runs SET next_retry_at = now() WHERE id = %s", (run_id,))
+
+    with psycopg.connect(fresh_database) as connection:
+        work_next(connection, happy_graph())
+
+    state = row(fresh_database, run_id)["state"]
+    assert "billing" not in state
+    agent = state["agent"]
+    assert (agent["prompt_tokens"], agent["completion_tokens"], agent["model_calls"]) == (50, 25, 5)

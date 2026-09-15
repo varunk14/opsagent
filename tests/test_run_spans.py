@@ -108,8 +108,8 @@ def test_a_run_is_one_trace_of_ticks_each_holding_its_steps(fresh_database, expo
     assert names(children(spans, first)) == ["classify", "extract", "retrieve", "plan", "act"]
     assert names(children(spans, second)) == ["plan", "act"]
     assert {span["trace_id"] for span in spans} == {UUID(run_id)}
-    assert (first["attributes"]["opsagent.attempt"], first["attributes"]["opsagent.outcome"]) == (1, "running")
-    assert second["attributes"]["opsagent.outcome"] == "done"
+    assert (first["attributes"][tracing.Attr.ATTEMPT], first["attributes"][tracing.Attr.OUTCOME]) == (1, "running")
+    assert second["attributes"][tracing.Attr.OUTCOME] == "done"
 
 
 def test_each_act_says_which_tool_ran_and_what_came_of_it(fresh_database, exported):
@@ -119,12 +119,12 @@ def test_each_act_says_which_tool_ran_and_what_came_of_it(fresh_database, export
     work(fresh_database, happy_model())
 
     lookup, refund = [span for span in spans_of(fresh_database, run_id) if span["name"] == "act"]
-    assert (lookup["kind"], lookup["attributes"]["opsagent.tool"], lookup["attributes"]["opsagent.result"]) == (
+    assert (lookup["kind"], lookup["attributes"][tracing.Attr.TOOL], lookup["attributes"][tracing.Attr.RESULT]) == (
         "tool",
         "get_order",
         "looked up",
     )
-    assert (refund["attributes"]["opsagent.tool"], refund["attributes"]["opsagent.result"]) == ("issue_refund", "refunded")
+    assert (refund["attributes"][tracing.Attr.TOOL], refund["attributes"][tracing.Attr.RESULT]) == ("issue_refund", "refunded")
 
 
 def test_a_refund_act_records_the_guardrail_verdict_and_the_limits_in_force(fresh_database, exported):
@@ -138,7 +138,7 @@ def test_a_refund_act_records_the_guardrail_verdict_and_the_limits_in_force(fres
     (guardrail,) = children(spans, refund)
     assert guardrail["kind"] == "guardrail"
     found = guardrail["attributes"]
-    assert (found["opsagent.verdict"], found["opsagent.limit_paise"], found["opsagent.min_confidence"]) == (
+    assert (found[tracing.Attr.VERDICT], found[tracing.Attr.LIMIT_PAISE], found[tracing.Attr.MIN_CONFIDENCE]) == (
         "runs",
         500_000,
         "0.85",
@@ -155,14 +155,14 @@ def test_a_refund_over_the_limit_records_the_approval_it_opened(fresh_database, 
     refund = [span for span in spans if span["name"] == "act"][-1]
     with psycopg.connect(fresh_database) as connection:
         (approval_id,) = connection.execute("SELECT id FROM approvals WHERE run_id = %s", (run_id,)).fetchone()
-    assert (refund["attributes"]["opsagent.result"], refund["attributes"]["opsagent.approval_id"]) == (
+    assert (refund["attributes"][tracing.Attr.RESULT], refund["attributes"][tracing.Attr.APPROVAL_ID]) == (
         "approval opened",
         approval_id,
     )
     guardrail = only(children(spans, refund), "guardrail")["attributes"]
-    assert guardrail["opsagent.verdict"] == "needs a person"
-    assert guardrail["opsagent.reason"].startswith("Rs 7,200 is not under the Rs 5,000 limit")
-    assert ticks(spans)[-1]["attributes"]["opsagent.outcome"] == "waiting_approval"
+    assert guardrail[tracing.Attr.VERDICT] == "needs a person"
+    assert guardrail[tracing.Attr.REASON].startswith("Rs 7,200 is not under the Rs 5,000 limit")
+    assert ticks(spans)[-1]["attributes"][tracing.Attr.OUTCOME] == "waiting_approval"
 
 
 def test_paying_an_approved_refund_is_one_more_tick_in_the_same_trace(fresh_database, exported):
@@ -176,10 +176,10 @@ def test_paying_an_approved_refund_is_one_more_tick_in_the_same_trace(fresh_data
     spans = spans_of(fresh_database, run_id)
     payment = ticks(spans)[-1]
     assert len(ticks(spans)) == 3
-    assert payment["attributes"]["opsagent.approval_id"] > 0
-    assert payment["attributes"]["opsagent.outcome"] == "done"
+    assert payment["attributes"][tracing.Attr.APPROVAL_ID] > 0
+    assert payment["attributes"][tracing.Attr.OUTCOME] == "done"
     (act,) = children(spans, payment)
-    assert (act["attributes"]["opsagent.tool"], act["attributes"]["opsagent.result"]) == ("issue_refund", "refunded")
+    assert (act["attributes"][tracing.Attr.TOOL], act["attributes"][tracing.Attr.RESULT]) == ("issue_refund", "refunded")
 
 
 def test_a_run_handed_to_a_person_says_so_on_its_act(fresh_database, exported):
@@ -188,7 +188,7 @@ def test_a_run_handed_to_a_person_says_so_on_its_act(fresh_database, exported):
     work(fresh_database, ScriptedModel(classify=CLASSIFIED_STATUS, plan=PROPOSED_ESCALATE))
 
     act = only(spans_of(fresh_database, run_id), "act")["attributes"]
-    assert (act["opsagent.tool"], act["opsagent.result"]) == ("escalate_to_human", "handed to a person")
+    assert (act[tracing.Attr.TOOL], act[tracing.Attr.RESULT]) == ("escalate_to_human", "handed to a person")
 
 
 def test_every_generation_carries_the_version_of_its_prompt(fresh_database, exported):
@@ -230,7 +230,7 @@ def test_an_outage_writes_the_tick_that_failed_and_why(fresh_database, exported)
 
     spans = spans_of(fresh_database, run_id)
     (tick,) = ticks(spans)
-    assert (tick["status"], tick["status_message"], tick["attributes"]["opsagent.outcome"]) == (
+    assert (tick["status"], tick["status_message"], tick["attributes"][tracing.Attr.OUTCOME]) == (
         "error",
         "model_unavailable",
         "failed",
@@ -248,9 +248,9 @@ def test_a_deferred_tick_writes_its_spans_and_says_it_was_deferred(fresh_databas
 
     spans = spans_of(fresh_database, run_id)
     (tick,) = ticks(spans)
-    assert tick["attributes"]["opsagent.outcome"] == "queued"
+    assert tick["attributes"][tracing.Attr.OUTCOME] == "queued"
     act = only(children(spans, tick), "act")["attributes"]
-    assert (act["opsagent.tool"], act["opsagent.result"]) == ("get_order", "deferred by the rate limit")
+    assert (act[tracing.Attr.TOOL], act[tracing.Attr.RESULT]) == ("get_order", "deferred by the rate limit")
 
 
 def test_no_span_names_the_worker(fresh_database, exported):
@@ -371,7 +371,7 @@ def test_a_refund_the_ledger_refuses_is_named_for_the_refusal(fresh_database, ex
     work(fresh_database, refund_model(800_000))
 
     refund = [span for span in spans_of(fresh_database, run_id) if span["name"] == "act"][-1]["attributes"]
-    assert (refund["opsagent.tool"], refund["opsagent.result"]) == ("issue_refund", "refused by the ledger")
+    assert (refund[tracing.Attr.TOOL], refund[tracing.Attr.RESULT]) == ("issue_refund", "refused by the ledger")
 
 
 def test_an_approved_refund_the_ledger_refuses_is_named_for_the_refusal(fresh_database, exported):
@@ -385,8 +385,8 @@ def test_an_approved_refund_the_ledger_refuses_is_named_for_the_refusal(fresh_da
     spans = spans_of(fresh_database, run_id)
     payment = ticks(spans)[-1]
     (act,) = children(spans, payment)
-    assert act["attributes"]["opsagent.result"] == "refused by the ledger"
-    assert payment["attributes"]["opsagent.outcome"] == "waiting_approval"
+    assert act["attributes"][tracing.Attr.RESULT] == "refused by the ledger"
+    assert payment["attributes"][tracing.Attr.OUTCOME] == "waiting_approval"
 
 
 def test_a_run_deferred_too_often_names_the_hand_over_on_its_act(fresh_database, exported):
@@ -403,4 +403,4 @@ def test_a_run_deferred_too_often_names_the_hand_over_on_its_act(fresh_database,
             work_next(connection, graph_of(ScriptedModel(plan=PROPOSED_LOOKUP)))
 
     last = [span for span in spans_of(fresh_database, run_id) if span["name"] == "act"][-1]["attributes"]
-    assert (last["opsagent.tool"], last["opsagent.result"]) == ("escalate_to_human", "handed to a person")
+    assert (last[tracing.Attr.TOOL], last[tracing.Attr.RESULT]) == ("escalate_to_human", "handed to a person")
