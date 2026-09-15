@@ -11,7 +11,7 @@ THE MESSAGE, not the moment we happened to read it -- the same distinction that
 made scenarios B and C differ in experiments/prevent_duplicate_refunds.py.
 """
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -19,7 +19,7 @@ from pydantic import ValidationError
 
 from app.contracts import Channel, IncomingMessage, RunRecord, RunStatus
 
-RECEIVED_AT = datetime(2026, 9, 13, 9, 0, tzinfo=timezone.utc)
+RECEIVED_AT = datetime(2026, 9, 13, 9, 0, tzinfo=UTC)
 
 
 def a_message(**overrides) -> IncomingMessage:
@@ -49,7 +49,7 @@ def test_key_ignores_everything_except_the_message_identity():
     that makes it a new message, so none of it may change the key.
     """
     first = a_message()
-    second = a_message(subject="Re: charged twice", received_at=datetime.now(timezone.utc))
+    second = a_message(subject="Re: charged twice", received_at=datetime.now(UTC))
 
     assert first.idempotency_key == second.idempotency_key
 

@@ -13,7 +13,7 @@ file without translation.
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -54,7 +54,7 @@ def test_the_message_is_fully_typed(tmp_path):
     message = next(iter(read_messages(path)))
 
     assert message.channel is Channel.EMAIL
-    assert message.received_at == datetime(2026, 9, 13, 9, 0, tzinfo=timezone.utc)
+    assert message.received_at == datetime(2026, 9, 13, 9, 0, tzinfo=UTC)
     assert message.idempotency_key == "email_msg_9f2a"
 
 

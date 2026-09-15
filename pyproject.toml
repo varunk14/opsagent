@@ -12,3 +12,12 @@ markers = [
 # Network calls and interactive CLI drivers are marked `# pragma: no cover`.
 # Business logic is never excluded; it is tested instead.
 exclude_also = ["if __name__ == .__main__.:"]
+
+[tool.ruff]
+# Rules come from the pinned ruff version's defaults, so CI and local agree.
+target-version = "py313"
+
+[tool.mypy]
+python_version = "3.13"
+files = ["app"]
+ignore_missing_imports = true
