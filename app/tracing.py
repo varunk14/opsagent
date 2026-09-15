@@ -504,12 +504,23 @@ def generated_secrets() -> dict[str, str]:
 
 
 def env_settings(text: str) -> dict[str, str]:
-    """The NAME=value lines of an env file. Comments and anything else are skipped."""
+    """
+    The settings in an env file, as a shell sourcing it would read them.
+
+    `export NAME=value` sets NAME, and one pair of matching quotes around a value is taken
+    off, so a setting written either way counts as already there and keeps its real value.
+    A line whose name is not a name -- a comment, a blank -- sets nothing.
+    """
     found: dict[str, str] = {}
     for line in text.splitlines():
         name, separator, value = line.partition("=")
-        if separator and name.strip() and not name.lstrip().startswith("#"):
-            found[name.strip()] = value.strip()
+        name = name.strip().removeprefix("export ").strip()
+        if not separator or not name.isidentifier():
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        found[name] = value
     return found
 
 
@@ -537,23 +548,23 @@ def write_env(path: Path) -> list[str]:
         PROJECT_URL_VAR: f"{LANGFUSE_URL}/project/{LANGFUSE_PROJECT_ID}",
     }
     added = [name for name in wanted if name not in present]
-    if not added:
-        return []
+    # Opened even with nothing to add, so a file that holds the secrets is made private on every run.
     # O_NOFOLLOW as well as the check above: a link put in place between the two is refused too.
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, "a") as file:
         os.fchmod(file.fileno(), 0o600)
-        file.write(("\n" if text and not text.endswith("\n") else "") + "".join(f"{name}={wanted[name]}\n" for name in added))
+        if added:
+            file.write(("\n" if text and not text.endswith("\n") else "") + "".join(f"{name}={wanted[name]}\n" for name in added))
     return added
 
 
-def main(argv: Sequence[str]) -> int:
+def main(argv: list[str]) -> int:  # the command line, program name first, as sys.argv has it
     """`python -m app.tracing env [--path .env]`: the settings for Langfuse on this machine."""
     parser = argparse.ArgumentParser(prog="python -m app.tracing", description="Tracing settings for this machine.")
     commands = parser.add_subparsers(dest="command", required=True)
     env = commands.add_parser("env", help="add fresh Langfuse secrets and the worker's settings, changing nothing already there")
     env.add_argument("--path", type=Path, default=Path(".env"), help="the env file (default: .env)")
-    arguments = parser.parse_args(argv)
+    arguments = parser.parse_args(argv[1:])
 
     try:
         added = write_env(arguments.path)
@@ -571,4 +582,4 @@ def main(argv: Sequence[str]) -> int:
 
 
 if __name__ == "__main__":  # pragma: no cover
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main(sys.argv))
