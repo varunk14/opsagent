@@ -10,6 +10,9 @@ Small local models are poor judges: measured before this was written, two of the
 double refund appropriate. So the board says how often the judge agrees with layer 1 beside
 the judge's own score, and only that score falling, or more cases left unjudged, is a
 failure. Agreement measures the judge, not the agent.
+
+The smoke cases are judged on every pull request, from recorded verdicts; the board is kept
+in a baseline of its own, refused by name when it is not a real board.
 """
 
 import json
@@ -25,7 +28,7 @@ from app.graph.prompts import MAX_OBSERVATIONS, customer_message, load_template
 from app.llm import Model, ModelOutputInvalid, fence_safe, structured
 from evals.golden import GoldenCase, Outcome
 from evals.runner import CaseResult
-from evals.scoring import outcome_of, rate, score_case
+from evals.scoring import _count, _share, _shown, _text, outcome_of, rate, score_case
 
 TASK = "judge"
 PLACEHOLDERS = frozenset({"policy", "steps", "decision", "customer_message"})
@@ -99,6 +102,15 @@ def judge_case(model: Model, case: GoldenCase, result: CaseResult) -> Verdict | 
     return verdict
 
 
+def judge_cases(model: Model, cases: Sequence[GoldenCase], results: Sequence[CaseResult]) -> dict[str, Verdict | None]:
+    """The judge's verdict on every smoke case among `cases`, by case id."""
+    by_id = {result.case_id: result for result in results}
+    return {case.id: judge_case(model, case, by_id[case.id]) for case in cases if case.smoke}
+
+
+JUDGE_SHARES = ("grounded", "appropriate", "agreement")
+
+
 @dataclass(frozen=True)
 class JudgeBoard:
     judged: int
@@ -108,19 +120,45 @@ class JudgeBoard:
     # How often "appropriate" matches layer 1's "complete": a measure of the judge, published, not gated.
     agreement: Decimal | None
 
+    def to_json(self) -> str:
+        document = {
+            "judged": self.judged,
+            "unjudged": self.unjudged,
+            **{name: _text(getattr(self, name)) for name in JUDGE_SHARES},
+        }
+        return json.dumps(document, indent=2, sort_keys=True) + "\n"
+
+    @classmethod
+    def from_json(cls, text: str) -> "JudgeBoard":
+        """A committed judge baseline, refused by name if any part of it is not a real board."""
+        document = json.loads(text)
+        if not isinstance(document, dict):
+            raise ValueError("the judge baseline is not a board: expected a JSON object")  # noqa: TRY004
+        try:
+            return cls(
+                judged=_count("judged", document["judged"]),
+                unjudged=_count("unjudged", document["unjudged"]),
+                grounded=_share("grounded", document["grounded"]),
+                appropriate=_share("appropriate", document["appropriate"]),
+                agreement=_share("agreement", document["agreement"]),
+            )
+        except KeyError as missing:
+            raise ValueError(f"the judge baseline is missing {missing.args[0]}") from missing
+
 
 def judge_board_of(
     cases: Sequence[GoldenCase], results: Sequence[CaseResult], verdicts: Mapping[str, Verdict | None]
 ) -> JudgeBoard:
-    """The judge's verdicts on `cases`, and how often they agree with layer 1. A case with no entry is refused by id."""
-    missing = [case.id for case in cases if case.id not in verdicts]
+    """The judge's verdicts on the smoke cases among `cases`, and how often they agree with layer 1."""
+    smoke = [case for case in cases if case.smoke]
+    missing = [case.id for case in smoke if case.id not in verdicts]
     if missing:
         raise ValueError(f"no verdict for case(s) {', '.join(missing)}")
     by_id = {result.case_id: result for result in results}
-    judged = [(case, verdict) for case in cases if (verdict := verdicts[case.id]) is not None]
+    judged = [(case, verdict) for case in smoke if (verdict := verdicts[case.id]) is not None]
     return JudgeBoard(
         judged=len(judged),
-        unjudged=len(cases) - len(judged),
+        unjudged=len(smoke) - len(judged),
         grounded=rate(sum(verdict.grounded for _, verdict in judged), len(judged)),
         appropriate=rate(sum(verdict.appropriate for _, verdict in judged), len(judged)),
         agreement=rate(
@@ -137,5 +175,18 @@ def compare_judge(current: JudgeBoard, baseline: JudgeBoard) -> list[str]:
     for label, attribute in (("judged grounded", "grounded"), ("judged appropriate", "appropriate")):
         now, before = getattr(current, attribute), getattr(baseline, attribute)
         if before is not None and (now is None or now < before):
-            problems.append(f"{label} fell from {before} to {'undefined' if now is None else now}")
+            problems.append(f"{label} fell from {before} to {_shown(now)}")
     return problems
+
+
+def render_judge(board: JudgeBoard) -> str:
+    """The judge's section of the scoreboard, its agreement with layer 1 beside its score."""
+    rows = [
+        ("Cases judged", f"{board.judged} ({board.unjudged} unjudged)"),
+        ("Judged grounded", _shown(board.grounded)),
+        ("Judged appropriate", _shown(board.appropriate)),
+        ("Agreement with layer 1", _shown(board.agreement)),
+    ]
+    lines = ["", "## Judge (smoke cases)", "", "| Measure | Value |", "|---|---|"]
+    lines += [f"| {name} | {value} |" for name, value in rows]
+    return "\n".join(lines) + "\n"

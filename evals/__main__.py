@@ -8,16 +8,18 @@ The evaluation commands.
 
 `record` reuses whatever is already recorded, so a recording that stopped partway carries on
 where it was; `--fresh` starts again from nothing, which is what a changed prompt or model needs.
-Whatever was recorded is saved even when the run fails.
+Whatever was recorded is saved even when the run fails. Once the runs have rested, the same
+model judges each smoke case, and its verdicts are recorded with everything else.
 
 `gate` fails -- exit status 1, every reason printed -- when a measure is worse than the
-committed baseline, when anything is unsafe, when a prompt or case changed since recording,
-or when the committed scoreboard no longer says what the recordings score. There is no
-baseline until `accept` writes one, and changing it is a reviewed change to a committed file.
+committed baseline, when the judge thinks less of the decisions than its own baseline did,
+when anything is unsafe, when a prompt or case changed since recording, or when the committed
+scoreboard no longer says what the recordings score. There are no baselines until `accept`
+writes them, and changing one is a reviewed change to a committed file.
 
 `verify` is the check a replay cannot make. A recording is keyed by its prompt, not by what the
-model said, so a hand-edited reply would replay as real; recording again live, where replies
-are exact, finds it. It reads the committed recordings and never writes them.
+model said, so a hand-edited reply or verdict would replay as real; recording again live, where
+replies are exact, finds it. It reads the committed recordings and never writes them.
 
 Each command runs in a database of its own, created from an admin connection
 (OPSAGENT_EVAL_ADMIN_URL, by default the local development Postgres) and dropped afterwards,
@@ -40,6 +42,14 @@ from psycopg.conninfo import make_conninfo
 from app.embeddings import EMBEDDING_MODEL, Embedder, OllamaEmbedder
 from app.llm import DEFAULT_MODEL, Model, Ollama
 from evals.golden import EVALS_DIR, GoldenCase, load_cases
+from evals.judge import (
+    JudgeBoard,
+    Verdict,
+    compare_judge,
+    judge_board_of,
+    judge_cases,
+    render_judge,
+)
 from evals.recording import (
     RecordedEmbedder,
     RecordedModel,
@@ -53,6 +63,7 @@ from evals.scoring import Scoreboard, compare, render_markdown, scoreboard_of
 
 RECORDINGS = EVALS_DIR / "recordings.jsonl"
 BASELINE = EVALS_DIR / "baseline.json"
+JUDGE_BASELINE = EVALS_DIR / "judge_baseline.json"
 SCOREBOARD = EVALS_DIR / "scoreboard.md"
 
 ADMIN_URL_VAR = "OPSAGENT_EVAL_ADMIN_URL"
@@ -84,20 +95,18 @@ def record(
     fresh: bool = False,
 ) -> list[CaseResult]:
     """
-    Run `cases` with a live model and keep what it said, at `recordings_path`.
+    Run `cases` with a live model, judge the smoke cases among them, and keep what it said at `recordings_path`.
 
     What is already recorded is reused rather than asked again, unless `fresh`. What was
     recorded is saved even if the run stops partway, so a long recording can be run again.
     """
     recordings = Recordings() if fresh else Recordings.load(recordings_path)
+    recording = RecordingModel(model, recordings, model=model_name, reuse=not fresh)
     try:
         with scratch_database(admin_url) as dsn:
-            return run_cases(
-                dsn,
-                cases,
-                RecordingModel(model, recordings, model=model_name, reuse=not fresh),
-                RecordingEmbedder(embedder, recordings, reuse=not fresh),
-            )
+            results = run_cases(dsn, cases, recording, RecordingEmbedder(embedder, recordings, reuse=not fresh))
+        judge_cases(recording, cases, results)
+        return results
     finally:
         recordings.save(recordings_path)
 
@@ -148,6 +157,16 @@ def replay(
         )
 
 
+def recorded_verdicts(
+    cases: Sequence[GoldenCase],
+    results: Sequence[CaseResult],
+    recordings_path: Path = RECORDINGS,
+    model_name: str = DEFAULT_MODEL,
+) -> dict[str, Verdict | None]:
+    """The judge's recorded verdicts on the smoke cases. A verdict never recorded raises RecordingMissing."""
+    return judge_cases(RecordedModel(Recordings.load(recordings_path), model=model_name), cases, results)
+
+
 def gate(
     admin_url: str,
     cases: Sequence[GoldenCase],
@@ -156,18 +175,23 @@ def gate(
     scoreboard_path: Path = SCOREBOARD,
     model_name: str = DEFAULT_MODEL,
     embedding_model: str = EMBEDDING_MODEL,
+    judge_baseline_path: Path = JUDGE_BASELINE,
 ) -> list[str]:
     """Every reason the recordings do not pass. Empty means nothing is worse and nothing is unsafe."""
-    if not baseline_path.exists():
-        return [f"there is no baseline at {baseline_path}: run `python -m evals accept` once and commit what it writes"]
+    for path, what in ((baseline_path, "baseline"), (judge_baseline_path, "judge baseline")):
+        if not path.exists():
+            return [f"there is no {what} at {path}: run `python -m evals accept` once and commit what it writes"]
     try:
         results = replay(admin_url, cases, recordings_path, model_name, embedding_model)
+        verdicts = recorded_verdicts(cases, results, recordings_path, model_name)
     except RecordingMissing as missing:
         return [str(missing)]
 
     board = scoreboard_of(cases, results)
+    judged = judge_board_of(cases, results, verdicts)
     problems = compare(board, Scoreboard.from_json(baseline_path.read_text()))
-    if not scoreboard_path.exists() or scoreboard_path.read_text() != render_markdown(board):
+    problems += compare_judge(judged, JudgeBoard.from_json(judge_baseline_path.read_text()))
+    if not scoreboard_path.exists() or scoreboard_path.read_text() != render_markdown(board) + render_judge(judged):
         problems.append(
             f"the committed scoreboard {scoreboard_path.name} does not say what the recordings score: "
             "run `python -m evals accept` if the change is deliberate"
@@ -183,11 +207,15 @@ def accept(
     scoreboard_path: Path = SCOREBOARD,
     model_name: str = DEFAULT_MODEL,
     embedding_model: str = EMBEDDING_MODEL,
+    judge_baseline_path: Path = JUDGE_BASELINE,
 ) -> Scoreboard:
-    """Score the recordings and write that as the baseline and scoreboard, for a reviewed commit."""
-    board = scoreboard_of(cases, replay(admin_url, cases, recordings_path, model_name, embedding_model))
+    """Score the recordings and write that as the baselines and scoreboard, for a reviewed commit."""
+    results = replay(admin_url, cases, recordings_path, model_name, embedding_model)
+    board = scoreboard_of(cases, results)
+    judged = judge_board_of(cases, results, recorded_verdicts(cases, results, recordings_path, model_name))
     baseline_path.write_text(board.to_json())
-    scoreboard_path.write_text(render_markdown(board))
+    judge_baseline_path.write_text(judged.to_json())
+    scoreboard_path.write_text(render_markdown(board) + render_judge(judged))
     return board
 
 
@@ -219,6 +247,7 @@ def main(argv: list[str]) -> int:
         command.add_argument("--cases", help="comma-separated case ids (default: every case)")
         command.add_argument("--recordings", type=Path, default=RECORDINGS)
         command.add_argument("--baseline", type=Path, default=BASELINE)
+        command.add_argument("--judge-baseline", type=Path, default=JUDGE_BASELINE)
         command.add_argument("--scoreboard", type=Path, default=SCOREBOARD)
         if name == "record":
             command.add_argument("--fresh", action="store_true", help="discard what is recorded and ask the model again")
@@ -243,16 +272,16 @@ def main(argv: list[str]) -> int:
         problems = verify(arguments.admin_url, cases, Ollama(), OllamaEmbedder(), arguments.recordings)
         return report(problems, f"{len(cases)} case(s): the live recording matches the committed one")
     if arguments.command == "accept":
-        board = accept(
+        accept(
             arguments.admin_url, cases, arguments.recordings, arguments.baseline, arguments.scoreboard,
-            embedding_model=EMBEDDING_MODEL,
+            embedding_model=EMBEDDING_MODEL, judge_baseline_path=arguments.judge_baseline,
         )
-        print(render_markdown(board))
+        print(arguments.scoreboard.read_text())
         return 0
 
     problems = gate(
         arguments.admin_url, cases, arguments.recordings, arguments.baseline, arguments.scoreboard,
-        embedding_model=EMBEDDING_MODEL,
+        embedding_model=EMBEDDING_MODEL, judge_baseline_path=arguments.judge_baseline,
     )
     return report(problems, f"{len(cases)} case(s): no worse than the baseline, nothing unsafe")
 

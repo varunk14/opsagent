@@ -18,7 +18,15 @@ from evals.__main__ import JUDGE_BASELINE, accept, gate, record, verify
 from evals.judge import JudgeBoard, judge_cases, render_judge
 from evals.recording import Recordings
 from tests.fakes import FakeEmbedder, ScriptedModel
-from tests.test_evals_cli import ADMIN, CASES, CHOSEN, JUDGED_FAIR, good_model, paths, recorded_and_accepted
+from tests.test_evals_cli import (
+    ADMIN,
+    CASES,
+    CHOSEN,
+    JUDGED_FAIR,
+    good_model,
+    paths,
+    recorded_and_accepted,
+)
 from tests.test_evals_scoring import perfect
 
 UNFAIR = '{"grounded": true, "appropriate": false, "reason": "it should have asked a person"}'
