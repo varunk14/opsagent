@@ -20,9 +20,10 @@ too: approval is week 5, and the sender is only a From header. A proposal that
 repeats an earlier step, a run past its step budget, or a tool this worker does
 not run are all handed to a person instead of executed.
 
-A model or policy store that cannot be reached puts the run back in the queue,
-charged for the calls that completed and keeping every committed step, until
-its attempts run out and it is marked dead. A crash leaves the run marked
+A model or policy store that cannot be reached marks the run failed, charged for
+the calls that completed and keeping every committed step, and schedules it for
+another attempt after a backoff delay -- until its attempts run out and it is
+marked dead. A crash leaves the run marked
 running with its committed steps intact. Once its lock is older than
 LOCK_TIMEOUT another worker reclaims it, spending an attempt, and carries on
 from the last committed step; on its last attempt it is marked dead instead.
@@ -35,6 +36,7 @@ Run:  .venv/bin/python -m app.run_agent [how many runs, default 10]
 """
 
 import os
+import random
 import socket
 import sys
 from collections.abc import Callable, Mapping
@@ -64,6 +66,12 @@ MICRO_DOLLAR = Decimal("0.000001")  # matches runs.cost_usd numeric(10, 6)
 # Executed tools a run may use before a person takes over. Small models can wander.
 MAX_STEPS = 4
 
+# A failed run waits RETRY_BASE after its first failure, doubling each time, never
+# longer than RETRY_CAP. The exponent is capped too, so no attempt count overflows.
+RETRY_BASE = timedelta(seconds=30)
+RETRY_CAP = timedelta(hours=1)
+MAX_DOUBLINGS = 20
+
 # Every tool the model can propose is in exactly one of these, and a test holds it
 # there, so a new tool in app/tools.py cannot run -- or fail to run -- by default.
 RUNS_NOW = frozenset({"get_order", "escalate_to_human"})
@@ -89,12 +97,13 @@ CLAIM = """
      WHERE id = (
             SELECT id FROM runs
              WHERE status = 'queued'
+                OR (status = 'failed' AND next_retry_at <= now())
                 OR (status = 'running' AND locked_at < now() - %s AND attempt < max_attempts)
              ORDER BY created_at, id
                FOR UPDATE SKIP LOCKED
              LIMIT 1
            )
-    RETURNING id, state
+    RETURNING id, state, attempt
 """
 
 # Taken at the start of every act transaction. Holding the row until commit means
@@ -118,11 +127,12 @@ PARK = """
      WHERE id = %s AND locked_by = %s
 """
 
-# One statement decides requeue or dead, so nothing can change attempt in between.
+# One statement decides retry or dead, so nothing can change attempt in between.
 RELEASE = """
     UPDATE runs
-       SET status = CASE WHEN attempt >= max_attempts THEN 'dead' ELSE 'queued' END,
-           failure_class = CASE WHEN attempt >= max_attempts THEN %s ELSE failure_class END,
+       SET status = CASE WHEN attempt >= max_attempts THEN 'dead' ELSE 'failed' END,
+           failure_class = %s,
+           next_retry_at = CASE WHEN attempt >= max_attempts THEN NULL ELSE now() + %s END,
            current_node = 'intake', locked_by = NULL, locked_at = NULL,
            cost_usd = cost_usd + %s
      WHERE id = %s AND status = 'running' AND locked_by = %s
@@ -139,6 +149,7 @@ class ClaimedRun:
     subject: str | None
     body: str
     worker: str
+    attempt: int
 
 
 @dataclass(frozen=True)
@@ -176,11 +187,27 @@ def claim_next(
     if claimed is None:
         return None
 
-    run_id, state = claimed
+    run_id, state, attempt = claimed
     untrusted = state.get("untrusted", {})
     return ClaimedRun(
-        run_id=run_id, subject=untrusted.get("subject"), body=untrusted.get("body", ""), worker=worker
+        run_id=run_id,
+        subject=untrusted.get("subject"),
+        body=untrusted.get("body", ""),
+        worker=worker,
+        attempt=attempt,
     )
+
+
+def retry_delay(attempt: int, jitter: Callable[[], float] = random.random) -> timedelta:
+    """
+    How long a run that failed on `attempt` waits before it may be claimed again.
+
+    Thirty seconds after the first failure, twice as long after each one since,
+    never more than an hour. Jitter then places it between half and all of that,
+    so runs that failed together in one outage do not all return in the same second.
+    """
+    delay = min(RETRY_CAP, RETRY_BASE * 2 ** min(attempt - 1, MAX_DOUBLINGS))
+    return delay * (0.5 + jitter() / 2)
 
 
 def cost_of(replies: list[Reply]) -> Decimal:
@@ -286,10 +313,17 @@ def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_st
     try:
         state = run_graph(graph, claimed.subject, claimed.body, prior_from(before))
     except ServiceUnavailable as outage:
-        # Back to the queue, charged for the calls that did complete, steps kept.
+        # Failed, to be tried again later: charged for the calls that did complete, steps kept.
         with connection.transaction():
             connection.execute(
-                RELEASE, (outage.failure_class, cost_of(outage.replies), claimed.run_id, claimed.worker)
+                RELEASE,
+                (
+                    outage.failure_class,
+                    retry_delay(claimed.attempt),
+                    cost_of(outage.replies),
+                    claimed.run_id,
+                    claimed.worker,
+                ),
             )
         raise
 
