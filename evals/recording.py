@@ -7,9 +7,16 @@ case that changes, or a different model finds nothing to replay, and replay says
 RecordingMissing instead of guessing or calling a model. Vectors are kept as the exact
 64-bit floats they came back as, so retrieval ranks passages identically on replay.
 
-The file holds hashes, never prompts or texts: a customer's words stay in the golden
-set, where they are reviewed, and the recording diff shows only what the model said.
-It is saved sorted, so recording the same things in any order gives the same bytes.
+The file holds hashes of prompts and texts, never the prompts themselves. It does hold
+what the model said, and a reply can repeat a customer's words -- which is acceptable
+only because every golden case is fictional. It is saved sorted, so recording the same
+things in any order gives the same bytes.
+
+A recordings file is an input a pull request can change, so it is read with limits: a
+file, a reply or a vector larger than anything real is refused before it is decoded.
+And it is trusted, not verified: the key binds a reply to its prompt, not to what the
+model really said, so a hand-edited reply would replay as if it were real. The check
+for that is re-recording live on a machine with the model, where replies are exact.
 """
 
 import base64
@@ -20,9 +27,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.embeddings import EMBEDDING_MODEL, Embedder
-from app.llm import DEFAULT_MODEL, Model, Reply
+from app.llm import DEFAULT_MODEL, MAX_RESPONSE_BYTES, Model, Reply
 
 RECORD_COMMAND = "python -m evals record"
+
+# Far above 150 cases' worth of replies and vectors, far below what could hurt a CI runner.
+MAX_RECORDINGS_BYTES = 50_000_000
+# Real embeddings here have 768 dimensions; nothing legitimate comes near this.
+MAX_VECTOR_FLOATS = 8_192
+# No reply can be longer than the model client would have accepted.
+MAX_REPLY_CHARS = MAX_RESPONSE_BYTES
 
 
 def reply_key(model: str, prompt: str) -> str:
@@ -48,6 +62,16 @@ def unpack(packed: str) -> list[float]:
     return list(struct.unpack(f"<{len(raw) // 8}d", raw))
 
 
+def checked_vector(packed: str, where: str) -> str:
+    """`packed`, once it is known to be whole 64-bit floats and no longer than any real embedding."""
+    if len(packed) * 3 // 4 > MAX_VECTOR_FLOATS * 8 + 2:
+        raise ValueError(f"{where}: a vector longer than {MAX_VECTOR_FLOATS} floats is not an embedding")
+    raw = base64.b64decode(packed, validate=True)
+    if len(raw) % 8 or len(raw) // 8 > MAX_VECTOR_FLOATS:
+        raise ValueError(f"{where}: a vector must be whole 64-bit floats, at most {MAX_VECTOR_FLOATS} of them")
+    return packed
+
+
 class RecordingMissing(LookupError):
     """Replay was asked for something that was never recorded. Record again rather than guess."""
 
@@ -71,15 +95,21 @@ class Recordings:
 
     @classmethod
     def load(cls, path: Path) -> "Recordings":
-        """What `path` holds; a file that does not exist yet holds nothing."""
+        """What `path` holds; a file that does not exist yet holds nothing. Anything larger than real is refused."""
         recordings = cls()
         if not path.exists():
             return recordings
-        for line in path.read_text().splitlines():
+        size = path.stat().st_size
+        if size > MAX_RECORDINGS_BYTES:
+            raise ValueError(f"{path.name} is too large to be a recording: {size} bytes, at most {MAX_RECORDINGS_BYTES}")
+        for number, line in enumerate(path.read_text().splitlines(), start=1):
             if not line.strip():
                 continue
             entry = json.loads(line)
+            where = f"{path.name} line {number}"
             if entry["kind"] == "reply":
+                if len(entry["text"]) > MAX_REPLY_CHARS:
+                    raise ValueError(f"{where}: a reply longer than {MAX_REPLY_CHARS} characters was never a model's")
                 recordings.replies[entry["key"]] = RecordedReply(
                     model=entry["model"],
                     task=entry["task"],
@@ -89,7 +119,7 @@ class Recordings:
                     latency_ms=entry["latency_ms"],
                 )
             else:
-                recordings.vectors[entry["key"]] = (entry["model"], entry["vector"])
+                recordings.vectors[entry["key"]] = (entry["model"], checked_vector(entry["vector"], where))
         return recordings
 
     def save(self, path: Path) -> None:

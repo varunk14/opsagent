@@ -7,6 +7,9 @@ the model says comes from whichever Model is passed -- a live one while recordin
 RecordedModel on replay -- and nothing else is stood in for: the executor, the guardrail,
 ownership and the refund cap are the ones production uses.
 
+That database is migrated and written to -- refunds included -- so it must be a throwaway
+one. The application's own database is refused before any connection is made.
+
 A CaseResult is what the run left behind, read from the database: where it came to rest,
 what it understood, which tools it ran, what was paid and what was put to a person. It
 holds nothing that differs between two runs of the same recording, so replays compare equal.
@@ -20,8 +23,9 @@ from typing import Any
 from uuid import UUID
 
 import psycopg
+from psycopg.conninfo import conninfo_to_dict
 
-from app.db import apply_migrations, connect
+from app.db import apply_migrations, connect, database_url
 from app.embeddings import Embedder
 from app.graph.build import build_graph
 from app.intake import accept
@@ -60,10 +64,18 @@ class CaseResult:
     cost_usd: Decimal
 
 
+def refuse_the_application_database(dsn: str) -> None:
+    """Golden cases pay refunds into whatever database they are given; never let that be the real one."""
+    own = conninfo_to_dict(database_url()).get("dbname")
+    if conninfo_to_dict(dsn).get("dbname") == own:
+        raise ValueError(f"golden cases are never run against the application's own database ({own}); give a throwaway one")
+
+
 def run_cases(
     dsn: str, cases: Sequence[GoldenCase], model: Model, embedder: Embedder, ledger: Path = LEDGER
 ) -> list[CaseResult]:
     """Accept every case, work every run until it rests, and read back each case's result in order."""
+    refuse_the_application_database(dsn)
     with psycopg.connect(dsn) as connection:
         apply_migrations(connection)
     with psycopg.connect(dsn) as connection:
