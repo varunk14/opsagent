@@ -116,3 +116,63 @@ def test_an_overlong_question_is_cut_before_embedding(fresh_database):
     retriever(fresh_database, embedder).search("duplicate " + "x" * 50_000)
 
     assert len(embedder.calls[-1][0]) == len(QUERY_PREFIX) + MAX_QUERY_CHARS
+
+
+# --- review findings -------------------------------------------------------------------
+
+
+def test_the_nearest_passage_wins_even_when_it_was_stored_last(fresh_database):
+    """Found in review: with k equal to the corpus size, a missing ORDER BY passed every test."""
+    embedder = AxisEmbedder()
+    with psycopg.connect(fresh_database) as connection:
+        ingest(connection, embedder, dict(reversed(list(DOCS.items()))))
+
+    hits = retriever(fresh_database, embedder, k=1, max_distance=2.0).search("duplicate")
+
+    assert [hit.document for hit in hits] == ["duplicate-payments"]
+
+
+def test_a_database_outage_during_search_is_an_outage_not_a_crash():
+    """Found in review: psycopg's OperationalError escaped, crashing the worker mid-batch."""
+    from app.llm import ServiceUnavailable
+    from app.retrieval import PolicySearchUnavailable
+
+    def unreachable():
+        raise psycopg.OperationalError("connection refused")
+
+    with pytest.raises(PolicySearchUnavailable) as raised:
+        PolicyRetriever(unreachable, AxisEmbedder()).search("duplicate")
+
+    assert isinstance(raised.value, ServiceUnavailable)
+    assert raised.value.failure_class == "policy_search_unavailable"
+
+
+def test_current_model_passages_are_found_behind_many_from_an_older_model(fresh_database):
+    """
+    Found in review: the HNSW index filters by embedding model after its
+    approximate search. With the index in use and many closer rows from another
+    model, a search could come back short with no error.
+    """
+    other = "[" + ",".join(["1"] + ["0"] * 766 + ["0.1"]) + "]"
+    current = "[" + ",".join(["1", "0.2"] + ["0"] * 765 + ["0.1"]) + "]"
+    with psycopg.connect(fresh_database) as connection:
+        for n in range(60):
+            connection.execute(
+                "INSERT INTO policy_chunks (document, chunk_index, chunk, content_hash, embedding_model, embedding)"
+                " VALUES (%s, 0, 'older passage', 'h', 'old-embed', %s::vector)",
+                (f"old-{n}", other),
+            )
+        for n in range(3):
+            connection.execute(
+                "INSERT INTO policy_chunks (document, chunk_index, chunk, content_hash, embedding_model, embedding)"
+                " VALUES (%s, 0, 'current passage', 'h', 'axis-embed', %s::vector)",
+                (f"current-{n}", current),
+            )
+
+    def index_only():
+        return psycopg.connect(fresh_database, options="-c enable_seqscan=off")
+
+    hits = PolicyRetriever(index_only, AxisEmbedder()).search("duplicate")
+
+    assert len(hits) == 3
+    assert {hit.document for hit in hits} == {"current-0", "current-1", "current-2"}

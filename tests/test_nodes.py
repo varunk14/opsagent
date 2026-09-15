@@ -132,3 +132,13 @@ def test_a_step_without_a_classification_escalates_instead_of_crashing(step):
 
     assert update["proposal"].tool == "escalate_to_human"
     assert "classification" in update["failure"]
+
+
+def test_a_blank_question_asks_the_retriever_nothing():
+    retriever = FakeRetriever()
+    state = {**classified(Intent.OTHER), "subject": None, "body": "   "}
+
+    update = nodes.retrieve(state, retriever)
+
+    assert update["policy"] == [] and update["policy_sources"] == []
+    assert retriever.questions == []

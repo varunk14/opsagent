@@ -328,3 +328,41 @@ def test_an_outage_partway_through_still_charges_for_finished_steps(fresh_databa
     stored = row(fresh_database, run_id)
     assert stored["status"] == "queued"
     assert stored["cost_usd"] == token_cost(10, 5, REFERENCE_RATE).quantize(Decimal("0.000001"))
+
+
+class PolicyStoreDown:
+    def search(self, question: str):
+        from app.retrieval import PolicySearchUnavailable
+
+        raise PolicySearchUnavailable("policy search could not reach the database")
+
+
+def test_a_policy_store_outage_puts_the_run_back_in_the_queue(fresh_database):
+    """classify and extract were paid for; the database then dropped during retrieval."""
+    run_id = queue(fresh_database)
+    graph = build_graph(ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821), PolicyStoreDown())
+
+    with psycopg.connect(fresh_database) as connection:
+        with pytest.raises(Exception) as raised:
+            propose_next(connection, graph)
+
+    assert type(raised.value).__name__ == "PolicySearchUnavailable"
+    stored = row(fresh_database, run_id)
+    assert (stored["status"], stored["locked_by"]) == ("queued", None)
+    assert stored["cost_usd"] == token_cost(20, 10, REFERENCE_RATE).quantize(Decimal("0.000001"))
+
+
+def test_a_policy_store_outage_on_the_last_attempt_says_what_failed(fresh_database):
+    run_id = queue(fresh_database)
+    with psycopg.connect(fresh_database) as connection:
+        connection.execute("UPDATE runs SET attempt = max_attempts - 1 WHERE id = %s", (run_id,))
+    graph = build_graph(ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821), PolicyStoreDown())
+
+    with psycopg.connect(fresh_database) as connection, pytest.raises(Exception):
+        propose_next(connection, graph)
+
+    with psycopg.connect(fresh_database) as connection:
+        status, failure_class = connection.execute(
+            "SELECT status, failure_class FROM runs WHERE id = %s", (run_id,)
+        ).fetchone()
+    assert (status, failure_class) == ("dead", "policy_search_unavailable")
