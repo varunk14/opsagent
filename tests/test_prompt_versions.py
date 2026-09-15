@@ -205,3 +205,11 @@ def test_the_run_version_moves_with_any_prompt():
 
     assert run_prompt_version(changed) != run_prompt_version()
     assert run_prompt_version(PROMPT_VERSIONS) == run_prompt_version()
+
+
+def test_the_run_version_does_not_depend_on_the_order_of_tasks():
+    """The same three versions must give the same run version however they were collected."""
+    reversed_order = dict(reversed(list(PROMPT_VERSIONS.items())))
+
+    assert list(reversed_order) != list(PROMPT_VERSIONS)
+    assert run_prompt_version(reversed_order) == run_prompt_version()

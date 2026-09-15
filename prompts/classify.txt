@@ -1,0 +1,10 @@
+TASK: classify
+Decide what the customer wants.
+
+Intents:
+$intents
+
+Reply with JSON only, exactly these keys:
+{"intent": one of the intents above, "confidence": a number from 0 to 1, "reasoning": "one short sentence"}
+
+$customer_message
