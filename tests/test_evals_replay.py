@@ -35,7 +35,12 @@ from evals.recording import (
     Recordings,
 )
 from evals.runner import CaseResult, run_cases
-from tests.fakes import CLASSIFIED_DUPLICATE, FakeEmbedder, ScriptedModel, proposed_refund
+from tests.fakes import (
+    CLASSIFIED_DUPLICATE,
+    FakeEmbedder,
+    ScriptedModel,
+    proposed_refund,
+)
 
 CASES = {case.id: case for case in load_cases()}
 CLASSIFY_PROMPT = "TASK: classify\nWhat does this customer want?"
