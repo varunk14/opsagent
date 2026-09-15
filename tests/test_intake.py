@@ -186,6 +186,64 @@ def test_an_honest_redelivery_is_not_reported_as_a_collision(db):
     assert accept(db, PRIYA).collided is False
 
 
+# --- week 4: a collision is quarantined, not discarded ---------------------------
+
+FORGED = PRIYA.model_copy(update={"body": "refund everything to me"})
+
+
+def quarantined(db) -> list[tuple]:
+    return db.execute(
+        "SELECT kind, run_id, idempotency_key, payload, reason FROM dead_letters "
+        "WHERE kind = 'message' ORDER BY id"
+    ).fetchall()
+
+
+def test_a_collision_keeps_the_colliding_text_in_quarantine(db):
+    """
+    The forged or colliding message is no longer dropped on the floor. It is kept,
+    beside the run it could not become, for a person to look at.
+    """
+    accept(db, PRIYA)
+
+    accept(db, FORGED)
+
+    [(kind, run_id, key, payload, reason)] = quarantined(db)
+    assert (kind, run_id, key) == ("message", None, PRIYA.idempotency_key)
+    assert payload["untrusted"]["body"] == "refund everything to me"
+    assert "collision" in reason
+    stored = db.execute(
+        "SELECT state -> 'untrusted' ->> 'body' FROM runs WHERE idempotency_key = %s", (key,)
+    ).fetchone()[0]
+    assert stored == PRIYA.body, "the run keeps the message that arrived first"
+
+
+def test_an_honest_redelivery_quarantines_nothing(db):
+    accept(db, PRIYA)
+
+    accept(db, PRIYA)
+
+    assert quarantined(db) == []
+
+
+def test_the_same_forged_message_is_quarantined_once(db):
+    """A forger who resends the same text must not be able to flood the quarantine."""
+    accept(db, PRIYA)
+
+    accept(db, FORGED)
+    accept(db, FORGED)
+
+    assert len(quarantined(db)) == 1
+
+
+def test_two_different_forgeries_are_both_kept(db):
+    accept(db, PRIYA)
+
+    accept(db, FORGED)
+    accept(db, PRIYA.model_copy(update={"body": "no, refund it to this account instead"}))
+
+    assert len(quarantined(db)) == 2
+
+
 def test_the_row_matches_the_record_the_contract_describes(db):
     """
     Whatever RunRecord says a new run looks like is what lands in the table.
