@@ -12,6 +12,7 @@ These tests commit, so each one gets its own scratch database.
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
 from app.dead_letters import list_open, requeue
 from app.llm import ModelUnavailable
@@ -136,6 +137,24 @@ def test_a_requeued_run_that_dies_again_gets_a_new_letter(fresh_database):
     found = letters(fresh_database, run_id)
     assert len(found) == 2
     assert [requeued_at is None for (*_, requeued_at) in found] == [False, True]
+
+
+def test_requeue_gives_back_the_rate_limit_deferrals_too(fresh_database):
+    """
+    Found in milestone review. 'Fresh attempts' must include the deferral count,
+    or a run requeued after two deferrals is handed over after just one more.
+    """
+    run_id = queue(fresh_database)
+    with psycopg.connect(fresh_database) as connection:
+        connection.execute(
+            "UPDATE runs SET state = state || %s WHERE id = %s", (Jsonb({"agent": {"deferrals": 2}}), run_id)
+        )
+    exhaust(fresh_database, run_id)
+
+    with psycopg.connect(fresh_database) as connection:
+        requeue(connection, run_id)
+
+    assert row(fresh_database, run_id)["state"]["agent"]["deferrals"] == 0
 
 
 def test_only_a_dead_run_can_be_requeued(fresh_database):
