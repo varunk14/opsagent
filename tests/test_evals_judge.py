@@ -141,6 +141,36 @@ def test_a_run_that_left_no_evidence_is_still_judged_on_what_there_is():
     assert HANDED_OVER.message.body in prompt
 
 
+def test_what_the_database_numbered_a_refund_is_not_shown_to_the_judge():
+    """Found in review: a refund's id counts the refunds paid before it, so it moved whenever a case was added earlier."""
+    first, second = json.loads(evidence()), json.loads(evidence())
+    first["steps"][1]["result"]["refund_id"] = 11
+    second["steps"][1]["result"]["refund_id"] = 12
+
+    shown_first = judge_prompt(REFUNDED, replace(perfect(REFUNDED), evidence=json.dumps(first, sort_keys=True)))
+    shown_second = judge_prompt(REFUNDED, replace(perfect(REFUNDED), evidence=json.dumps(second, sort_keys=True)))
+
+    assert shown_first == shown_second
+    assert "refund_id" not in shown_first
+
+
+def test_the_customer_message_comes_before_what_the_run_did_and_the_instruction_to_reply_comes_last():
+    """Found in review: untrusted text placed after the instruction is the last thing a small model reads."""
+    prompt = judge_prompt(REFUNDED, seen())
+
+    assert prompt.index("<<<CUSTOMER_MESSAGE") < prompt.index("<<<POLICY") < prompt.index("Reply with JSON only")
+    assert prompt.index("DECISION>>>") < prompt.index("Reply with JSON only")
+
+
+def test_a_smoke_case_with_no_result_is_refused_by_id():
+    from evals.judge import judge_cases
+
+    with pytest.raises(ValueError, match="n-001"):
+        judge_cases(ScriptedModel(judge=FAIR), [REFUNDED], [])
+    with pytest.raises(ValueError, match="n-001"):
+        judge_board_of([REFUNDED], [], {REFUNDED.id: Verdict(grounded=True, appropriate=True, reason="r")})
+
+
 # --- judging ---------------------------------------------------------------------------------
 
 
