@@ -200,7 +200,7 @@ def test_settings_already_in_the_file_are_never_changed(tmp_path):
 def test_the_command_names_what_it_added_and_prints_no_secret(tmp_path, capsys):
     env = tmp_path / ".env"
 
-    assert main(["env", "--path", str(env)]) == 0
+    assert main(["app.tracing", "env", "--path", str(env)]) == 0
 
     out = capsys.readouterr().out
     values = settings(env)
@@ -238,19 +238,54 @@ def test_the_command_reports_a_refused_file_without_a_traceback(tmp_path, capsys
     env = tmp_path / ".env"
     env.symlink_to(target)
 
-    assert main(["env", "--path", str(env)]) == 2
+    assert main(["app.tracing", "env", "--path", str(env)]) == 2
 
     assert "symbolic link" in capsys.readouterr().err
     assert target.read_text() == ""
 
 
+def test_running_again_makes_a_file_others_could_read_private_even_with_nothing_to_add(tmp_path):
+    env = tmp_path / ".env"
+    write_env(env)
+    env.chmod(0o644)
+    before = env.read_text()
+
+    assert write_env(env) == []
+
+    assert stat.S_IMODE(env.stat().st_mode) == 0o600
+    assert env.read_text() == before
+
+
+def test_a_last_line_without_a_newline_is_kept_whole(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("OPSAGENT_OPERATOR=asha")
+
+    write_env(env)
+
+    assert env.read_text().startswith("OPSAGENT_OPERATOR=asha\nLANGFUSE_")
+    assert settings(env)["OPSAGENT_OPERATOR"] == "asha"
+
+
+def test_exported_and_quoted_settings_count_as_already_there(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("export LANGFUSE_SALT=mine\nLANGFUSE_PUBLIC_KEY=\"pk-lf-mine\"\nLANGFUSE_SECRET_KEY='sk-lf-mine'\n")
+
+    added = write_env(env)
+
+    text = env.read_text()
+    assert "LANGFUSE_SALT" not in added
+    assert text.count("LANGFUSE_SALT=") == 1
+    assert settings(env)["OPSAGENT_LANGFUSE_PUBLIC_KEY"] == "pk-lf-mine"
+    assert settings(env)["OPSAGENT_LANGFUSE_SECRET_KEY"] == "sk-lf-mine"
+
+
 def test_the_command_run_again_changes_nothing_and_says_so(tmp_path, capsys):
     env = tmp_path / ".env"
-    main(["env", "--path", str(env)])
+    main(["app.tracing", "env", "--path", str(env)])
     before = env.read_text()
     capsys.readouterr()
 
-    assert main(["env", "--path", str(env)]) == 0
+    assert main(["app.tracing", "env", "--path", str(env)]) == 0
 
     out = capsys.readouterr().out
     assert "nothing changed" in out
@@ -260,7 +295,7 @@ def test_the_command_run_again_changes_nothing_and_says_so(tmp_path, capsys):
 
 def test_the_command_refuses_anything_but_env(capsys):
     with pytest.raises(SystemExit) as refused:
-        main(["nonsense"])
+        main(["app.tracing", "nonsense"])
 
     assert refused.value.code != 0
 
