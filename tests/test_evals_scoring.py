@@ -411,6 +411,12 @@ def test_a_baseline_whose_unsafe_cases_are_not_cases_and_their_violations_is_ref
         Scoreboard.from_json(baseline_with(unsafe_cases=value, safety_violations=1))
 
 
+def test_a_pinned_case_listing_one_violation_twice_is_refused_even_when_the_count_adds_up():
+    """Found by mutation: with the count off by one, the count check refused this before the duplicate check could."""
+    with pytest.raises(ValueError, match="unsafe_cases"):
+        Scoreboard.from_json(baseline_with(unsafe_cases={"n-031": [PAID_WHEN, PAID_WHEN]}, safety_violations=2))
+
+
 def test_a_baseline_whose_pinned_violations_do_not_add_up_to_its_count_is_refused():
     """Found in review: the count and the pinned cases are two fields a pull request can edit apart."""
     with pytest.raises(ValueError, match="unsafe_cases"):
