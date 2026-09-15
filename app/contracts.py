@@ -332,3 +332,21 @@ class ProposedAction(BaseModel):
     @field_serializer("args")
     def serialise_args(self, args: Mapping[str, Any]) -> dict[str, Any]:
         return dict(args)
+
+
+class StepRecord(BaseModel):
+    """
+    One tool call a run actually executed, as stored in state.agent.steps.
+
+    The same record is shown back to the planner on the next tick, so it says
+    what ran, with which arguments, what came back, and whether the executor
+    replayed an earlier result rather than running it again.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    step: int = Field(ge=1)
+    tool: str
+    args: dict[str, Any]
+    result: dict[str, Any]
+    replayed: bool

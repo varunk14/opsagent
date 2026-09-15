@@ -1,13 +1,11 @@
 """
-What the agent may propose doing, described but not built.
+What the agent may propose doing, as the model sees it.
 
-This week the model is told these four exist and asked which it would use. None
-of them are connected to anything, and the guarantee is structural rather than a
-promise in prose: a tool here is a name, a description and a JSON schema. There
-is no implementation in the registry to call, so proposing a refund cannot issue
-one, however wrong the model is.
-
-Week 4 attaches real behaviour, behind idempotency keys.
+A tool here is a name, a description and a JSON schema, and deliberately nothing
+executable: proposing a tool can never run it. What runs is decided elsewhere --
+app/executor.py holds the implementations, behind idempotency keys, and
+app/run_agent.py decides which proposals it executes (get_order,
+escalate_to_human) and which wait for a person (issue_refund).
 
 The descriptions are written for the model, not for us. Every ambiguity a human
 would resolve from context is spelled out instead -- most importantly that money

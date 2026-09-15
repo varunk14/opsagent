@@ -1,18 +1,29 @@
 """
-Taking a queued run through the graph and recording what it proposes.
+Working a queued run one committed step at a time.
 
-Three transactions, deliberately separate. The claim is one statement --
-UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED) -- so two workers can
-never take the same run, and it commits at once. The graph then runs with no
-transaction open, because model calls take seconds and a lock held that long
-blocks everyone else. Finally the proposal is recorded in its own transaction.
+A run is claimed once, then worked in ticks. Each tick reads what the run already
+holds, walks the graph from there, and acts on the single proposal that comes
+back. The transactions are kept deliberately separate and short:
 
-Proposing only: the run ends waiting for a decision. A model that cannot be
-reached puts the run back in the queue, since an outage is not a verdict on the
-case -- until its attempts run out, when it is marked dead instead of sitting
-at the head of the queue for good. A crash between claim and record leaves the
-run marked running; week 4's lock expiry recovers that. Every write here checks
-the worker still holds the run, so a slow worker cannot overwrite a reclaim.
+  claim  UPDATE ... WHERE id = (SELECT ... FOR UPDATE SKIP LOCKED), committed at
+         once, so two workers can never take the same run.
+  graph  no transaction open, because model calls take seconds and a lock held
+         that long blocks everyone else.
+  act    one transaction: lock the run row and confirm this worker still holds
+         it, execute the tool through the keyed executor, append the step, add
+         the cost. A worker that lost its claim executes nothing.
+
+get_order runs and the run goes round again, its lock refreshed so a run making
+progress is never mistaken for a stuck one. escalate_to_human runs and the run
+waits for a person. issue_refund is recorded and the run waits for a person
+too: approval is week 5, and the sender is only a From header. A proposal that
+repeats an earlier step, a run past its step budget, or a tool this worker does
+not run are all handed to a person instead of executed.
+
+A model or policy store that cannot be reached puts the run back in the queue,
+charged for the calls that completed and keeping every committed step, until
+its attempts run out and it is marked dead. A crash leaves the run marked
+running with its committed steps intact, for lock expiry to recover.
 
 Run:  .venv/bin/python -m app.run_agent [how many runs, default 10]
 """
@@ -20,6 +31,7 @@ Run:  .venv/bin/python -m app.run_agent [how many runs, default 10]
 import os
 import socket
 import sys
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -30,14 +42,23 @@ from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
 
 from app.baseline import REFERENCE_RATE, token_cost
+from app.contracts import Classification, ExtractedRefund, ProposedAction, StepRecord
 from app.db import apply_migrations, connect
 from app.embeddings import OllamaEmbedder
+from app.executor import execute
 from app.graph.build import build_graph, run_graph
+from app.graph.nodes import escalation
 from app.graph.state import AgentState
 from app.llm import Ollama, Reply, ServiceUnavailable
 from app.retrieval import PolicyRetriever
 
 MICRO_DOLLAR = Decimal("0.000001")  # matches runs.cost_usd numeric(10, 6)
+
+# Executed tools a run may use before a person takes over. Small models can wander.
+MAX_STEPS = 4
+
+RUNS_NOW = frozenset({"get_order", "escalate_to_human"})
+WAITS_FOR_APPROVAL = frozenset({"issue_refund"})
 
 CLAIM = """
     UPDATE runs
@@ -53,11 +74,25 @@ CLAIM = """
     RETURNING id, state
 """
 
-RECORD = """
+# Taken at the start of every act transaction. Holding the row until commit means
+# nothing can reclaim the run between the check and the tool call.
+HOLD_CLAIM = """
+    SELECT 1 FROM runs
+     WHERE id = %s AND status = 'running' AND locked_by = %s
+       FOR UPDATE
+"""
+
+CONTINUE = """
+    UPDATE runs
+       SET current_node = 'act', state = state || %s, cost_usd = cost_usd + %s, locked_at = now()
+     WHERE id = %s AND locked_by = %s
+"""
+
+PARK = """
     UPDATE runs
        SET status = 'waiting_approval', current_node = %s, state = state || %s,
            cost_usd = cost_usd + %s, locked_by = NULL, locked_at = NULL
-     WHERE id = %s AND status = 'running' AND locked_by = %s
+     WHERE id = %s AND locked_by = %s
 """
 
 # One statement decides requeue or dead, so nothing can change attempt in between.
@@ -72,7 +107,7 @@ RELEASE = """
 
 
 class LostClaim(RuntimeError):
-    """The run was taken by another worker before this one could record its result."""
+    """The run was taken by another worker before this one could act on it."""
 
 
 @dataclass(frozen=True)
@@ -84,9 +119,13 @@ class ClaimedRun:
 
 
 @dataclass(frozen=True)
-class ProposalOutcome:
+class RunOutcome:
+    """Where one tick left the run. `running` means the worker goes round again."""
+
     run_id: UUID
+    status: str
     tool: str
+    steps: int
     failure: str | None
     cost_usd: Decimal
 
@@ -125,13 +164,72 @@ def cost_of(replies: list[Reply]) -> Decimal:
     return token_cost(prompt_tokens, completion_tokens, REFERENCE_RATE).quantize(MICRO_DOLLAR)
 
 
-def summarise_agent(state: AgentState) -> tuple[dict[str, Any], Decimal]:
-    """What gets stored on the run, and what the run cost."""
-    replies = state.get("replies", [])
-    prompt_tokens = sum(reply.prompt_tokens for reply in replies)
-    completion_tokens = sum(reply.completion_tokens for reply in replies)
-    cost = cost_of(replies)
+def prior_from(agent: Mapping[str, Any]) -> AgentState:
+    """What earlier ticks of this run found, rebuilt from its row. Empty before the first."""
+    prior: AgentState = {}
+    if agent.get("classification") is None:
+        return prior
+    extraction = agent.get("extraction")
+    prior["classification"] = Classification.model_validate(agent["classification"])
+    prior["extraction"] = ExtractedRefund.model_validate(extraction) if extraction is not None else None
+    prior["policy"] = list(agent.get("policy", []))
+    prior["policy_sources"] = list(agent.get("policy_sources", []))
+    prior["observations"] = [dict(step) for step in agent.get("steps", [])]
+    return prior
 
+
+def hand_over(why: str, reason: str) -> tuple[ProposedAction, str]:
+    """A driver-made escalation, shaped exactly like one a graph step makes."""
+    escalated = escalation("plan", reason, why, [])
+    return escalated["proposal"], escalated["failure"]
+
+
+def decide(state: AgentState, steps: list[dict[str, Any]], max_steps: int) -> tuple[ProposedAction, str | None]:
+    """The action this tick takes: the proposal, or a hand-over to a person in its place."""
+    proposal = state["proposal"]
+    failure = state.get("failure")
+    if failure is not None or proposal.tool == "escalate_to_human":
+        return proposal, failure
+
+    if proposal.tool not in RUNS_NOW | WAITS_FOR_APPROVAL:
+        return hand_over(
+            f"{proposal.tool} is not a tool this worker runs",
+            f"The planner asked for {proposal.tool}, which does not run here.",
+        )
+    if any(step["tool"] == proposal.tool and step["args"] == dict(proposal.args) for step in steps):
+        return hand_over("repeated an earlier step", f"The planner asked for {proposal.tool} again with the same arguments.")
+    if proposal.tool in RUNS_NOW and len(steps) >= max_steps:
+        return hand_over(f"step budget of {max_steps} used", f"The run used all {max_steps} of its steps without deciding.")
+    return proposal, None
+
+
+def charge(before: Mapping[str, Any], replies: list[Reply]) -> tuple[Decimal, int, int]:
+    """
+    What this tick adds to the run's cost, and the run's token totals after it.
+
+    Charged as the difference between the rounded totals, so the stored cost is
+    always the whole run's tokens priced once, however many ticks it took.
+    """
+    prompt_before = before.get("prompt_tokens", 0)
+    completion_before = before.get("completion_tokens", 0)
+    prompt_after = prompt_before + sum(reply.prompt_tokens for reply in replies)
+    completion_after = completion_before + sum(reply.completion_tokens for reply in replies)
+    delta = token_cost(prompt_after, completion_after, REFERENCE_RATE).quantize(MICRO_DOLLAR) - token_cost(
+        prompt_before, completion_before, REFERENCE_RATE
+    ).quantize(MICRO_DOLLAR)
+    return delta, prompt_after, completion_after
+
+
+def summarise_agent(
+    state: AgentState,
+    before: Mapping[str, Any],
+    proposal: ProposedAction,
+    failure: str | None,
+    steps: list[dict[str, Any]],
+) -> tuple[dict[str, Any], Decimal]:
+    """What gets stored on the run after this tick, and what the tick cost."""
+    replies = state.get("replies", [])
+    cost, prompt_tokens, completion_tokens = charge(before, replies)
     classification = state.get("classification")
     extraction = state.get("extraction")
     agent = {
@@ -139,9 +237,10 @@ def summarise_agent(state: AgentState) -> tuple[dict[str, Any], Decimal]:
         "extraction": extraction.model_dump(mode="json") if extraction else None,
         "policy": state.get("policy", []),
         "policy_sources": state.get("policy_sources", []),
-        "proposal": state["proposal"].model_dump(mode="json"),
-        "failure": state.get("failure"),
-        "model_calls": len(replies),
+        "proposal": proposal.model_dump(mode="json"),
+        "failure": failure,
+        "steps": steps,
+        "model_calls": before.get("model_calls", 0) + len(replies),
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "rate": REFERENCE_RATE.name,
@@ -149,38 +248,77 @@ def summarise_agent(state: AgentState) -> tuple[dict[str, Any], Decimal]:
     return agent, cost
 
 
-def propose_next(
-    connection: psycopg.Connection, graph: Any, worker: str | None = None
-) -> ProposalOutcome | None:
-    """Claim one run, walk it through the graph, record the proposal."""
-    claimed = claim_next(connection, worker or default_worker())
-    if claimed is None:
-        return None
+def agent_of(connection: psycopg.Connection, run_id: UUID) -> dict[str, Any]:
+    with connection.transaction():
+        row = connection.execute("SELECT state -> 'agent' FROM runs WHERE id = %s", (run_id,)).fetchone()
+    return dict(row[0]) if row and row[0] else {}
 
+
+def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_steps: int) -> RunOutcome:
+    """Walk the graph from what the run holds, then act on one proposal in one transaction."""
+    before = agent_of(connection, claimed.run_id)
     try:
-        state = run_graph(graph, claimed.subject, claimed.body)
+        state = run_graph(graph, claimed.subject, claimed.body, prior_from(before))
     except ServiceUnavailable as outage:
-        # Back to the queue, but charged for the calls that did complete.
+        # Back to the queue, charged for the calls that did complete, steps kept.
         with connection.transaction():
             connection.execute(
                 RELEASE, (outage.failure_class, cost_of(outage.replies), claimed.run_id, claimed.worker)
             )
         raise
 
-    agent, cost = summarise_agent(state)
-    failure = state.get("failure")
-    # A run that escalated early stopped at the step that failed.
-    node = failure.split(":", 1)[0] if failure else "plan"
+    steps = list(before.get("steps", []))
+    proposal, failure = decide(state, steps, max_steps)
     with connection.transaction():
-        recorded = connection.execute(
-            RECORD, (node, Jsonb({"agent": agent}), cost, claimed.run_id, claimed.worker)
-        )
-        if recorded.rowcount == 0:
-            raise LostClaim(f"run {claimed.run_id} was reclaimed before its proposal was recorded")
+        if connection.execute(HOLD_CLAIM, (claimed.run_id, claimed.worker)).fetchone() is None:
+            raise LostClaim(f"run {claimed.run_id} was reclaimed before this worker could act on it")
 
-    return ProposalOutcome(
-        run_id=claimed.run_id, tool=state["proposal"].tool, failure=failure, cost_usd=cost
+        if proposal.tool in RUNS_NOW:
+            number = len(steps) + 1
+            done = execute(connection, claimed.run_id, number, proposal)
+            record = StepRecord(
+                step=number, tool=proposal.tool, args=dict(proposal.args), result=done.result, replayed=done.replayed
+            )
+            steps.append(record.model_dump(mode="json"))
+
+        agent, cost = summarise_agent(state, before, proposal, failure, steps)
+        if proposal.tool == "get_order":
+            status = "running"
+            connection.execute(CONTINUE, (Jsonb({"agent": agent}), cost, claimed.run_id, claimed.worker))
+        else:
+            status = "waiting_approval"
+            # A run that escalated early stopped at the step that failed.
+            node = failure.split(":", 1)[0] if failure else "plan"
+            connection.execute(PARK, (node, Jsonb({"agent": agent}), cost, claimed.run_id, claimed.worker))
+
+    return RunOutcome(
+        run_id=claimed.run_id, status=status, tool=proposal.tool, steps=len(steps), failure=failure, cost_usd=cost
     )
+
+
+def work_next(
+    connection: psycopg.Connection,
+    graph: Any,
+    worker: str | None = None,
+    max_steps: int = MAX_STEPS,
+    after_step: Callable[[UUID, int], None] | None = None,
+) -> RunOutcome | None:
+    """
+    Claim one run and work it until it waits for a person.
+
+    `after_step` is called once each continuing step has been committed, with the
+    run id and how many steps it now has -- the moment a dying worker loses nothing.
+    """
+    claimed = claim_next(connection, worker or default_worker())
+    if claimed is None:
+        return None
+
+    while True:
+        outcome = tick(connection, graph, claimed, max_steps)
+        if outcome.status != "running":
+            return outcome
+        if after_step is not None:
+            after_step(claimed.run_id, outcome.steps)
 
 
 def prepare_database(connection: psycopg.Connection) -> int:
@@ -206,7 +344,7 @@ def main(argv: list[str]) -> int:  # pragma: no cover - the interactive driver
             print("  warning: no policy passages loaded; run `python -m app.policies` first")
         for _ in range(limit):
             try:
-                outcome = propose_next(connection, graph)
+                outcome = work_next(connection, graph)
             except ServiceUnavailable as exc:
                 print(f"  {exc.failure_class}, run returned to the queue: {exc}")
                 return 1
@@ -214,7 +352,10 @@ def main(argv: list[str]) -> int:  # pragma: no cover - the interactive driver
                 print("  queue empty")
                 break
             note = f"  ESCALATED ({outcome.failure})" if outcome.failure else ""
-            print(f"  {outcome.run_id}  proposes {outcome.tool:<18} ${outcome.cost_usd}{note}")
+            print(
+                f"  {outcome.run_id}  {outcome.steps} step(s), now {outcome.status}, "
+                f"proposes {outcome.tool:<18}{note}"
+            )
     return 0
 
 
