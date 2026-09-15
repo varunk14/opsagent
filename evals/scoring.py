@@ -150,8 +150,8 @@ class Scoreboard:
     def to_json(self) -> str:
         document = {
             **{name: getattr(self, name) for name in COUNTS},
-            **{name: _text(getattr(self, name)) for name in RATES},
-            "by_category": {category: _text(value) for category, value in sorted(self.by_category.items())},
+            **{name: as_text(getattr(self, name)) for name in RATES},
+            "by_category": {category: as_text(value) for category, value in sorted(self.by_category.items())},
             "cost_usd": str(self.cost_usd),
             "golden_sha256": self.golden_sha256,
         }
@@ -175,30 +175,30 @@ class Scoreboard:
             if not isinstance(golden, str) or not re.fullmatch(r"[0-9a-f]{64}", golden):
                 raise ValueError("the baseline's golden_sha256 must be a sha256 hex digest")
             return cls(
-                cases=_count("cases", document["cases"]),
-                completed=_count("completed", document["completed"]),
-                task_completion=_share("task_completion", document["task_completion"]),
-                intent_accuracy=_share("intent_accuracy", document["intent_accuracy"]),
-                extraction_accuracy=_share("extraction_accuracy", document["extraction_accuracy"]),
-                escalation_precision=_share("escalation_precision", document["escalation_precision"]),
-                escalation_recall=_share("escalation_recall", document["escalation_recall"]),
-                false_positive_rate=_share("false_positive_rate", document["false_positive_rate"]),
-                safety_violations=_count("safety_violations", document["safety_violations"]),
-                by_category={category: _share(f"completion in {category}", value) for category, value in by_category.items()},
-                model_calls=_count("model_calls", document["model_calls"]),
+                cases=checked_count("cases", document["cases"]),
+                completed=checked_count("completed", document["completed"]),
+                task_completion=checked_share("task_completion", document["task_completion"]),
+                intent_accuracy=checked_share("intent_accuracy", document["intent_accuracy"]),
+                extraction_accuracy=checked_share("extraction_accuracy", document["extraction_accuracy"]),
+                escalation_precision=checked_share("escalation_precision", document["escalation_precision"]),
+                escalation_recall=checked_share("escalation_recall", document["escalation_recall"]),
+                false_positive_rate=checked_share("false_positive_rate", document["false_positive_rate"]),
+                safety_violations=checked_count("safety_violations", document["safety_violations"]),
+                by_category={category: checked_share(f"completion in {category}", value) for category, value in by_category.items()},
+                model_calls=checked_count("model_calls", document["model_calls"]),
                 cost_usd=_money(document["cost_usd"]),
-                unresolved=_count("unresolved", document["unresolved"]),
+                unresolved=checked_count("unresolved", document["unresolved"]),
                 golden_sha256=golden,
             )
         except KeyError as missing:
             raise ValueError(f"the baseline is missing {missing.args[0]}") from missing
 
 
-def _text(value: Decimal | None) -> str | None:
+def as_text(value: Decimal | None) -> str | None:
     return None if value is None else str(value)
 
 
-def _count(name: str, value: Any) -> int:
+def checked_count(name: str, value: Any) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise ValueError(f"the baseline's {name} must be a whole number of at least 0, not {value!r}")
     return value
@@ -214,7 +214,7 @@ def _decimal(name: str, value: Any) -> Decimal:
     return number
 
 
-def _share(name: str, value: Any) -> Decimal | None:
+def checked_share(name: str, value: Any) -> Decimal | None:
     if value is None:
         return None
     number = _decimal(name, value)
@@ -284,21 +284,21 @@ def compare(current: Scoreboard, baseline: Scoreboard) -> list[str]:
     for label, attribute in HIGHER_IS_BETTER:
         now, before = getattr(current, attribute), getattr(baseline, attribute)
         if before is not None and (now is None or now < before):
-            problems.append(f"{label} fell from {before} to {_shown(now)}")
+            problems.append(f"{label} fell from {before} to {shown(now)}")
     now, before = current.false_positive_rate, baseline.false_positive_rate
     if before is not None and (now is None or now > before):
-        problems.append(f"false-positive rate rose from {before} to {_shown(now)}")
+        problems.append(f"false-positive rate rose from {before} to {shown(now)}")
     for category, earlier in sorted(baseline.by_category.items()):
         if category not in current.by_category:
             problems.append(f"category {category} is missing from the scoreboard")
             continue
         later = current.by_category[category]
         if earlier is not None and (later is None or later < earlier):
-            problems.append(f"completion in {category} fell from {earlier} to {_shown(later)}")
+            problems.append(f"completion in {category} fell from {earlier} to {shown(later)}")
     return problems
 
 
-def _shown(value: Decimal | None) -> str:
+def shown(value: Decimal | None) -> str:
     return "undefined" if value is None else str(value)
 
 
@@ -306,12 +306,12 @@ def render_markdown(board: Scoreboard) -> str:
     """The scoreboard as a person reads it. The same board always gives the same text."""
     rows = [
         ("Cases", str(board.cases)),
-        ("Task completion", f"{_shown(board.task_completion)} ({board.completed} of {board.cases})"),
-        ("Intent accuracy", _shown(board.intent_accuracy)),
-        ("Extraction accuracy", _shown(board.extraction_accuracy)),
-        ("Escalation precision", _shown(board.escalation_precision)),
-        ("Escalation recall", _shown(board.escalation_recall)),
-        ("False-positive rate", _shown(board.false_positive_rate)),
+        ("Task completion", f"{shown(board.task_completion)} ({board.completed} of {board.cases})"),
+        ("Intent accuracy", shown(board.intent_accuracy)),
+        ("Extraction accuracy", shown(board.extraction_accuracy)),
+        ("Escalation precision", shown(board.escalation_precision)),
+        ("Escalation recall", shown(board.escalation_recall)),
+        ("False-positive rate", shown(board.false_positive_rate)),
         ("Safety violations", str(board.safety_violations)),
         ("Unresolved runs", str(board.unresolved)),
         ("Model calls", str(board.model_calls)),
@@ -321,5 +321,5 @@ def render_markdown(board: Scoreboard) -> str:
     lines = ["# Scoreboard", "", "| Measure | Value |", "|---|---|"]
     lines += [f"| {name} | {value} |" for name, value in rows]
     lines += ["", "## Completion by category", "", "| Category | Completion |", "|---|---|"]
-    lines += [f"| {category} | {_shown(value)} |" for category, value in sorted(board.by_category.items())]
+    lines += [f"| {category} | {shown(value)} |" for category, value in sorted(board.by_category.items())]
     return "\n".join(lines) + "\n"

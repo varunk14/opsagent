@@ -4,7 +4,9 @@ Layer 2: a local model judges what each run did.
 Layer 1 checks each run against a label. The judge answers what a label cannot: given what
 the run saw -- the customer's message, the policy passages, what its tool calls returned --
 is its decision grounded in that, and appropriate? It is shown what the run saw and where it
-came to rest, never the label, and every part of that is fenced as data.
+came to rest, never the label, and every part of that is fenced as data. The customer's
+message comes first and the instruction to reply comes last, so untrusted text is never the
+last thing the model reads.
 
 Small local models are poor judges: measured before this was written, two of them called a
 double refund appropriate. So the board says how often the judge agrees with layer 1 beside
@@ -28,13 +30,25 @@ from app.graph.prompts import MAX_OBSERVATIONS, customer_message, load_template
 from app.llm import Model, ModelOutputInvalid, fence_safe, structured
 from evals.golden import GoldenCase, Outcome
 from evals.runner import CaseResult
-from evals.scoring import _count, _share, _shown, _text, outcome_of, rate, score_case
+from evals.scoring import (
+    as_text,
+    checked_count,
+    checked_share,
+    outcome_of,
+    rate,
+    score_case,
+    shown,
+)
 
 TASK = "judge"
 PLACEHOLDERS = frozenset({"policy", "steps", "decision", "customer_message"})
 # Six short policy documents, a handful of passages from them at most.
 MAX_POLICY = 12_000
 MAX_DECISION = 4_000
+# Numbered by the database in the order rows were written, so a refund's id depends on how many
+# cases paid before it. Shown to the judge, it would change the prompt -- and so its recording --
+# of every later case whenever a case was added or reordered. It says nothing about the decision.
+NOT_SHOWN_TO_THE_JUDGE = frozenset({"refund_id"})
 
 
 class Verdict(BaseModel):
@@ -69,12 +83,23 @@ def where_it_rested(result: CaseResult) -> str:
     return "it never came to rest"
 
 
+def shown_result(result: Any) -> Any:
+    """A tool result as the judge sees it: without the fields the database numbered."""
+    if isinstance(result, dict):
+        return {key: value for key, value in result.items() if key not in NOT_SHOWN_TO_THE_JUDGE}
+    return result
+
+
 def judge_prompt(case: GoldenCase, result: CaseResult) -> str:
     """What the judge is shown about one run: what the run saw and did, never the case's label."""
     seen: dict[str, Any] = json.loads(result.evidence) if result.evidence else {}
     policy = "\n".join(f"- {passage}" for passage in seen.get("policy") or []) or "none"
     steps = "\n".join(
-        json.dumps({"tool": step.get("tool"), "args": step.get("args"), "result": step.get("result")}, sort_keys=True, ensure_ascii=False)
+        json.dumps(
+            {"tool": step.get("tool"), "args": step.get("args"), "result": shown_result(step.get("result"))},
+            sort_keys=True,
+            ensure_ascii=False,
+        )
         for step in seen.get("steps") or []
     ) or "none"
     proposal = seen.get("proposal")
@@ -102,9 +127,18 @@ def judge_case(model: Model, case: GoldenCase, result: CaseResult) -> Verdict | 
     return verdict
 
 
+def results_by_id(cases: Sequence[GoldenCase], results: Sequence[CaseResult]) -> dict[str, CaseResult]:
+    """Each result by its case id. A smoke case with no result is refused by id."""
+    by_id = {result.case_id: result for result in results}
+    missing = [case.id for case in cases if case.smoke and case.id not in by_id]
+    if missing:
+        raise ValueError(f"no result for case(s) {', '.join(missing)}")
+    return by_id
+
+
 def judge_cases(model: Model, cases: Sequence[GoldenCase], results: Sequence[CaseResult]) -> dict[str, Verdict | None]:
     """The judge's verdict on every smoke case among `cases`, by case id."""
-    by_id = {result.case_id: result for result in results}
+    by_id = results_by_id(cases, results)
     return {case.id: judge_case(model, case, by_id[case.id]) for case in cases if case.smoke}
 
 
@@ -124,7 +158,7 @@ class JudgeBoard:
         document = {
             "judged": self.judged,
             "unjudged": self.unjudged,
-            **{name: _text(getattr(self, name)) for name in JUDGE_SHARES},
+            **{name: as_text(getattr(self, name)) for name in JUDGE_SHARES},
         }
         return json.dumps(document, indent=2, sort_keys=True) + "\n"
 
@@ -136,11 +170,11 @@ class JudgeBoard:
             raise ValueError("the judge baseline is not a board: expected a JSON object")  # noqa: TRY004
         try:
             return cls(
-                judged=_count("judged", document["judged"]),
-                unjudged=_count("unjudged", document["unjudged"]),
-                grounded=_share("grounded", document["grounded"]),
-                appropriate=_share("appropriate", document["appropriate"]),
-                agreement=_share("agreement", document["agreement"]),
+                judged=checked_count("judged", document["judged"]),
+                unjudged=checked_count("unjudged", document["unjudged"]),
+                grounded=checked_share("grounded", document["grounded"]),
+                appropriate=checked_share("appropriate", document["appropriate"]),
+                agreement=checked_share("agreement", document["agreement"]),
             )
         except KeyError as missing:
             raise ValueError(f"the judge baseline is missing {missing.args[0]}") from missing
@@ -154,7 +188,7 @@ def judge_board_of(
     missing = [case.id for case in smoke if case.id not in verdicts]
     if missing:
         raise ValueError(f"no verdict for case(s) {', '.join(missing)}")
-    by_id = {result.case_id: result for result in results}
+    by_id = results_by_id(cases, results)
     judged = [(case, verdict) for case in smoke if (verdict := verdicts[case.id]) is not None]
     return JudgeBoard(
         judged=len(judged),
@@ -175,7 +209,7 @@ def compare_judge(current: JudgeBoard, baseline: JudgeBoard) -> list[str]:
     for label, attribute in (("judged grounded", "grounded"), ("judged appropriate", "appropriate")):
         now, before = getattr(current, attribute), getattr(baseline, attribute)
         if before is not None and (now is None or now < before):
-            problems.append(f"{label} fell from {before} to {_shown(now)}")
+            problems.append(f"{label} fell from {before} to {shown(now)}")
     return problems
 
 
@@ -183,9 +217,9 @@ def render_judge(board: JudgeBoard) -> str:
     """The judge's section of the scoreboard, its agreement with layer 1 beside its score."""
     rows = [
         ("Cases judged", f"{board.judged} ({board.unjudged} unjudged)"),
-        ("Judged grounded", _shown(board.grounded)),
-        ("Judged appropriate", _shown(board.appropriate)),
-        ("Agreement with layer 1", _shown(board.agreement)),
+        ("Judged grounded", shown(board.grounded)),
+        ("Judged appropriate", shown(board.appropriate)),
+        ("Agreement with layer 1", shown(board.agreement)),
     ]
     lines = ["", "## Judge (smoke cases)", "", "| Measure | Value |", "|---|---|"]
     lines += [f"| {name} | {value} |" for name, value in rows]
