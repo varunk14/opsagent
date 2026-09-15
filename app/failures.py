@@ -23,16 +23,23 @@ category, and neither does one that died of infrastructure -- an outage, an expi
 which failure_class and the dead-letter list already name.
 
 The worker writes the category in the same transaction as the step that rests the run, so it
-is as durable as the run's state; `python -m app.failures backfill` classifies runs that
-rested before the column existed, once.
+is as durable as the run's state -- and inside a savepoint, so a bug in naming a failure can
+never undo the refund or the decision that transaction holds. `python -m app.failures
+backfill` classifies runs that rested before the column existed, once.
+
+Known limit: the hallucination rule trusts every number in the customer's message as a
+possible source, so a message padded with numbers can hide an invented amount from it. The
+category is a diagnostic; the evaluation suite still scores the wrong outcome.
 """
 
 import argparse
 import json
+import logging
 import re
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date
 from enum import StrEnum
 from typing import Any
 from uuid import UUID
@@ -41,6 +48,8 @@ import psycopg
 
 from app.db import connect
 from app.graph.prompts import MAX_CUSTOMER_TEXT
+
+log = logging.getLogger(__name__)
 
 
 class FailureCategory(StrEnum):
@@ -51,6 +60,34 @@ class FailureCategory(StrEnum):
     WRONG_ESCALATION = "wrong_escalation"
     DRIFT = "drift"
 
+
+# What we would fix for each kind, specific to this system. Shown beside the chart.
+FIXES: tuple[tuple[FailureCategory, str], ...] = (
+    (
+        FailureCategory.HALLUCINATED_FIELD,
+        "Tighten extraction: an order id or amount must be quoted from the message or a lookup; refuse the proposal otherwise.",
+    ),
+    (
+        FailureCategory.TOOL_MISUSE,
+        "Check arguments before proposing: a refund must equal one of the order's ledger charges; the ledger already refuses more.",
+    ),
+    (
+        FailureCategory.LOOP,
+        "Give the planner a way to decide: when it repeats a lookup whose result is shown, ask once more with that result marked, then hand over.",
+    ),
+    (
+        FailureCategory.CONTEXT_OVERFLOW,
+        "Chunk or summarise a long message before the prompt; today anything over the cap is cut.",
+    ),
+    (
+        FailureCategory.WRONG_ESCALATION,
+        "Decide from policy conditions in code, not from confidence: a duplicate needs two ledger charges; change-of-mind and damaged items go to a person.",
+    ),
+    (
+        FailureCategory.DRIFT,
+        "Pin the model version and the prompt hashes; record again and compare each case against the last accepted baseline.",
+    ),
+)
 
 # The stop reasons the driver and the graph write (app/run_agent.py hand_over, app/graph/nodes.py escalation).
 LOOP_REASONS = ("repeated an earlier step", "step budget of", "by the rate limit")
@@ -103,6 +140,8 @@ class RunRest:
     approval_paise: int | None
     approval_status: str | None
     message_text: str
+    # The policy passages the run was planned with: a source of amounts like the message and the tools.
+    policy: Sequence[str] = ()
 
 
 def numbers_in(text: str) -> set[str]:
@@ -177,10 +216,21 @@ def rest_of(connection: psycopg.Connection, run_id: UUID) -> RunRest:
 
 
 def record_category(connection: psycopg.Connection, run_id: UUID) -> FailureCategory | None:
-    """Classify a run that has just rested and write its category, in the caller's transaction."""
-    category = classify(rest_of(connection, run_id))
-    connection.execute(SET_CATEGORY, (category.value if category else None, run_id))
-    return category
+    """
+    Classify a run that has just rested and write its category, in the caller's transaction.
+
+    Inside a savepoint: naming a failure is a diagnostic, and a bug in it must never undo the
+    refund or the decision the caller's transaction holds. What goes wrong is logged and the
+    category is left empty.
+    """
+    try:
+        with connection.transaction():
+            category = classify(rest_of(connection, run_id))
+            connection.execute(SET_CATEGORY, (category.value if category else None, run_id))
+            return category
+    except Exception:  # noqa: BLE001 - whatever it was, the run's own transaction must survive it
+        log.warning("run %s could not be classified; its category is left empty", run_id, exc_info=True)
+        return None
 
 
 def backfill(connection: psycopg.Connection) -> int:
@@ -191,9 +241,18 @@ def backfill(connection: psycopg.Connection) -> int:
     return written
 
 
-def mix_by_week(connection: psycopg.Connection) -> list[tuple[Any, str, int]]:
+def mix_by_week(connection: psycopg.Connection) -> list[tuple[date, str, int]]:
     """How many runs rested in each category, per week they were created."""
     return connection.execute(MIX_BY_WEEK).fetchall()
+
+
+def failure_chart(rows: Sequence[tuple[date, str, int]]) -> list[tuple[date, list[tuple[str, int, int]]]]:
+    """The mix per week as bars: each category's count and its width as a share of the largest count anywhere."""
+    largest = max((count for _, _, count in rows), default=0)
+    weeks: dict[date, list[tuple[str, int, int]]] = {}
+    for week, category, count in rows:
+        weeks.setdefault(week, []).append((category, count, round(100 * count / largest)))
+    return list(weeks.items())
 
 
 def main(argv: list[str]) -> int:  # pragma: no cover - the operator's command line

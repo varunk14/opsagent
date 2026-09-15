@@ -14,7 +14,7 @@ ALTER TABLE runs
             'hallucinated_field', 'tool_misuse', 'loop', 'context_overflow', 'wrong_escalation', 'drift'
         ));
 
--- The failure chart groups rested runs by week and category.
+-- The failure chart groups rested runs by week, then category; only failed runs are on it.
 CREATE INDEX IF NOT EXISTS runs_failure_category_created_at_idx
-    ON runs (failure_category, created_at)
+    ON runs (created_at, failure_category)
     WHERE failure_category IS NOT NULL;

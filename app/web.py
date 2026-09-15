@@ -45,6 +45,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.approvals import PendingApproval, decide, list_handed_over, list_pending
 from app.db import connect
+from app.failures import FIXES, failure_chart, mix_by_week
 from app.guardrails import load, rupees
 from app.traces import TraceSpan, list_runs, trace_of
 from app.tracing import LOOPBACK_HOSTS, Attr
@@ -259,6 +260,16 @@ def create_app(dsn: str | None = None, operator: str | None = None, langfuse_pro
             request,
             "guardrails.html",
             {"limit": rupees(limits.auto_refund_limit_paise), "min_confidence": str(limits.min_confidence)},
+        )
+
+    @app.get("/failures", response_class=HTMLResponse)
+    def failures(request: Request) -> Response:
+        with connect(dsn) as connection:
+            rows = mix_by_week(connection)
+        return page(
+            request,
+            "failures.html",
+            {"weeks": failure_chart(rows), "total": sum(count for _, _, count in rows), "fixes": FIXES},
         )
 
     @app.get("/runs", response_class=HTMLResponse)
