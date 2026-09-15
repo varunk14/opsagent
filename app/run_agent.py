@@ -9,8 +9,10 @@ blocks everyone else. Finally the proposal is recorded in its own transaction.
 
 Proposing only: the run ends waiting for a decision. A model that cannot be
 reached puts the run back in the queue, since an outage is not a verdict on the
-case. A crash between claim and record leaves the run marked running; week 4's
-lock expiry is what recovers that.
+case -- until its attempts run out, when it is marked dead instead of sitting
+at the head of the queue for good. A crash between claim and record leaves the
+run marked running; week 4's lock expiry recovers that. Every write here checks
+the worker still holds the run, so a slow worker cannot overwrite a reclaim.
 
 Run:  .venv/bin/python -m app.run_agent [how many runs, default 10]
 """
@@ -53,14 +55,22 @@ RECORD = """
     UPDATE runs
        SET status = 'waiting_approval', current_node = %s, state = state || %s,
            cost_usd = cost_usd + %s, locked_by = NULL, locked_at = NULL
-     WHERE id = %s
+     WHERE id = %s AND status = 'running' AND locked_by = %s
 """
 
+# One statement decides requeue or dead, so nothing can change attempt in between.
 RELEASE = """
     UPDATE runs
-       SET status = 'queued', current_node = 'intake', locked_by = NULL, locked_at = NULL
-     WHERE id = %s
+       SET status = CASE WHEN attempt >= max_attempts THEN 'dead' ELSE 'queued' END,
+           failure_class = CASE WHEN attempt >= max_attempts
+                                THEN 'model_unavailable' ELSE failure_class END,
+           current_node = 'intake', locked_by = NULL, locked_at = NULL
+     WHERE id = %s AND status = 'running' AND locked_by = %s
 """
+
+
+class LostClaim(RuntimeError):
+    """The run was taken by another worker before this one could record its result."""
 
 
 @dataclass(frozen=True)
@@ -68,6 +78,7 @@ class ClaimedRun:
     run_id: UUID
     subject: str | None
     body: str
+    worker: str
 
 
 @dataclass(frozen=True)
@@ -100,7 +111,9 @@ def claim_next(connection: psycopg.Connection, worker: str) -> ClaimedRun | None
 
     run_id, state = claimed
     untrusted = state.get("untrusted", {})
-    return ClaimedRun(run_id=run_id, subject=untrusted.get("subject"), body=untrusted.get("body", ""))
+    return ClaimedRun(
+        run_id=run_id, subject=untrusted.get("subject"), body=untrusted.get("body", ""), worker=worker
+    )
 
 
 def summarise_agent(state: AgentState) -> tuple[dict[str, Any], Decimal]:
@@ -138,7 +151,7 @@ def propose_next(
         state = run_graph(graph, claimed.subject, claimed.body)
     except ModelUnavailable:
         with connection.transaction():
-            connection.execute(RELEASE, (claimed.run_id,))
+            connection.execute(RELEASE, (claimed.run_id, claimed.worker))
         raise
 
     agent, cost = summarise_agent(state)
@@ -146,7 +159,11 @@ def propose_next(
     # A run that escalated early stopped at the step that failed.
     node = failure.split(":", 1)[0] if failure else "plan"
     with connection.transaction():
-        connection.execute(RECORD, (node, Jsonb({"agent": agent}), cost, claimed.run_id))
+        recorded = connection.execute(
+            RECORD, (node, Jsonb({"agent": agent}), cost, claimed.run_id, claimed.worker)
+        )
+        if recorded.rowcount == 0:
+            raise LostClaim(f"run {claimed.run_id} was reclaimed before its proposal was recorded")
 
     return ProposalOutcome(
         run_id=claimed.run_id, tool=state["proposal"].tool, failure=failure, cost_usd=cost
