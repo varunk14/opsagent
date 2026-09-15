@@ -363,3 +363,33 @@ def test_a_policy_store_outage_on_the_last_attempt_says_what_failed(fresh_databa
             "SELECT status, failure_class FROM runs WHERE id = %s", (run_id,)
         ).fetchone()
     assert (status, failure_class) == ("dead", "policy_search_unavailable")
+
+
+def test_the_driver_brings_an_unmigrated_database_up_to_date(empty_database):
+    """app.db promises migrations are safe on every start-up; the driver now relies on it."""
+    from app.run_agent import prepare_database
+
+    with psycopg.connect(empty_database) as connection:
+        passages = prepare_database(connection)
+        columns = {
+            row[0]
+            for row in connection.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'policy_chunks'"
+            ).fetchall()
+        }
+
+    assert passages == 0
+    assert "embedding_model" in columns
+
+
+def test_the_driver_reports_how_many_policy_passages_are_loaded(fresh_database):
+    """Zero means app.policies was never run, which the driver warns about."""
+    from app.policies import ingest
+    from app.run_agent import prepare_database
+    from tests.fakes import FakeEmbedder
+
+    with psycopg.connect(fresh_database) as connection:
+        ingest(connection, FakeEmbedder(), {"d": "# D\n\n## One\n\nfirst\n\n## Two\n\nsecond"})
+
+    with psycopg.connect(fresh_database) as connection:
+        assert prepare_database(connection) == 2

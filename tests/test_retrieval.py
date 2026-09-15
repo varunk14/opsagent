@@ -145,3 +145,23 @@ def test_a_database_outage_during_search_is_an_outage_not_a_crash():
 
     assert isinstance(raised.value, ServiceUnavailable)
     assert raised.value.failure_class == "policy_search_unavailable"
+
+
+@pytest.mark.parametrize("schema", ["no tables at all", "before migration 002"])
+def test_a_policy_store_without_its_schema_is_an_outage_not_a_crash(empty_database, schema):
+    """
+    Found in milestone review: UndefinedTable and UndefinedColumn are
+    ProgrammingErrors, not OperationalErrors, so they escaped, crashed the
+    worker, and left the run marked running with no route to dead.
+    """
+    from pathlib import Path
+
+    from app.retrieval import PolicySearchUnavailable
+
+    if schema == "before migration 002":
+        first = Path(__file__).resolve().parent.parent / "migrations" / "001_schema.sql"
+        with psycopg.connect(empty_database) as connection:
+            connection.execute(first.read_text())
+
+    with pytest.raises(PolicySearchUnavailable):
+        PolicyRetriever(lambda: psycopg.connect(empty_database), AxisEmbedder()).search("duplicate")
