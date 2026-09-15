@@ -41,7 +41,7 @@ to fail first, because the failure is the part worth seeing.
 | `app/run_agent.py` | Claims a queued run with `FOR UPDATE SKIP LOCKED`, walks the graph, records the proposal, its policy sources and its exact cost. |
 | `app/baseline.py` | What a run costs before any optimisation, so week 9 has something to compare against. |
 
-Seven tables' worth of schema live in `migrations/`; `policies/` holds six short fictional store policies.
+The six tables are defined in `migrations/`; `policies/` holds six short fictional store policies.
 
 ### Running it
 
@@ -72,8 +72,8 @@ a decision with the proposal `get_order(4821)`. Nothing executes: that is week 4
 
 Over 300 tests with the run failing below 80% coverage. Tests that need Postgres are marked `db`
 and **fail rather than skip** when it is absent, because a skipped test that reads as green is the
-failure this project is about. Every push runs the same checks in CI, and `main` only accepts a
-pull request once they pass.
+failure this project is about. CI runs the same checks on every push to `main` and every pull
+request, and a pull request cannot merge into `main` until they pass.
 
 Tests against the real local models are opt-in, since CI has no Ollama:
 
