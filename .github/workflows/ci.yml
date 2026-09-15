@@ -74,7 +74,8 @@ jobs:
 
   evals:
     # Replays the committed recordings through the real driver against its own Postgres, scores
-    # them, and fails on anything worse than evals/baseline.json or unsafe. No model runs here:
+    # them, replays the judge's recorded verdicts on the smoke cases, and fails on anything worse
+    # than evals/baseline.json or evals/judge_baseline.json, or unsafe. No model runs here:
     # recording happens on a machine with one (python -m evals record).
     runs-on: ubuntu-latest
     timeout-minutes: 20
