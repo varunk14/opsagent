@@ -64,6 +64,16 @@ def test_an_embedding_that_changed_is_found(tmp_path):
     assert any("embedding" in problem for problem in problems)
 
 
+def test_prompts_and_texts_the_committed_recordings_never_held_are_found(tmp_path):
+    path = paths(tmp_path)["recordings_path"]
+    record(ADMIN, CHOSEN[:1], good_model(), FakeEmbedder(), path)
+
+    problems = verify(ADMIN, CHOSEN, good_model(), FakeEmbedder(), path)
+
+    assert any("prompt" in problem and "not in the committed recordings" in problem for problem in problems)
+    assert any("embedding" in problem and "not in the committed recordings" in problem for problem in problems)
+
+
 def test_verifying_never_changes_the_committed_recordings(tmp_path):
     path = recorded(tmp_path)
     before = path.read_bytes()
