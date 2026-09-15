@@ -90,6 +90,14 @@ def test_a_malformed_line_is_refused_naming_its_line(tmp_path):
         load_cases(broken)
 
 
+def test_blank_lines_between_cases_are_skipped(tmp_path):
+    first, second = GOLDEN.read_text().splitlines()[:2]
+    spaced = tmp_path / "golden.jsonl"
+    spaced.write_text(f"{first}\n\n   \n{second}\n")
+
+    assert [case.id for case in load_cases(spaced)] == [CASES[0].id, CASES[1].id]
+
+
 def test_a_label_the_contract_does_not_know_is_refused(tmp_path):
     case = json.loads(GOLDEN.read_text().splitlines()[0])
     case["expect"]["surprise"] = True
