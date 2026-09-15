@@ -24,7 +24,13 @@ def test_migrating_an_empty_database_applies_every_migration(empty_database):
     with psycopg.connect(empty_database) as connection:
         applied = apply_migrations(connection)
 
-    assert applied == ["001_schema.sql"]
+    from app.db import CONTAINER_BOOTSTRAP, MIGRATIONS_DIR
+
+    every_migration = [
+        path.name for path in sorted(MIGRATIONS_DIR.glob("*.sql")) if path.name != CONTAINER_BOOTSTRAP
+    ]
+    assert applied == every_migration
+    assert applied[0] == "001_schema.sql"
 
 
 def test_the_schema_survives_the_connection_that_created_it(empty_database):
