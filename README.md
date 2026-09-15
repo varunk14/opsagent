@@ -96,7 +96,7 @@ modes.
 ## Running the experiments
 
     uv venv --python 3.13 .venv
-    uv pip install --python .venv/bin/python pydantic httpx "psycopg[binary]"
+    uv pip install --python .venv/bin/python -r requirements-dev.txt
     ollama serve &
     .venv/bin/python experiments/extract_refund_details.py 5
 

@@ -1,0 +1,2 @@
+pydantic==2.13.5
+psycopg[binary]==3.3.5
