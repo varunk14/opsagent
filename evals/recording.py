@@ -7,6 +7,10 @@ case that changes, or a different model finds nothing to replay, and replay says
 RecordingMissing instead of guessing or calling a model. Vectors are kept as the exact
 64-bit floats they came back as, so retrieval ranks passages identically on replay.
 
+What a reply said and what it cost in tokens is kept; how long it took is not. Latency
+belongs to the machine that recorded it, would rewrite every line of the file on every
+recording, and says nothing true on replay -- so a replayed reply reports none.
+
 The file holds hashes of prompts and texts, never the prompts themselves. It does hold
 what the model said, and a reply can repeat a customer's words -- which is acceptable
 only because every golden case is fictional. It is saved sorted, so recording the same
@@ -83,7 +87,6 @@ class RecordedReply:
     text: str
     prompt_tokens: int
     completion_tokens: int
-    latency_ms: int
 
 
 class Recordings:
@@ -116,7 +119,6 @@ class Recordings:
                     text=entry["text"],
                     prompt_tokens=entry["prompt_tokens"],
                     completion_tokens=entry["completion_tokens"],
-                    latency_ms=entry["latency_ms"],
                 )
             else:
                 recordings.vectors[entry["key"]] = (entry["model"], checked_vector(entry["vector"], where))
@@ -138,7 +140,6 @@ class Recordings:
                     "text": reply.text,
                     "prompt_tokens": reply.prompt_tokens,
                     "completion_tokens": reply.completion_tokens,
-                    "latency_ms": reply.latency_ms,
                 },
             )
             for key, reply in self.replies.items()
@@ -166,7 +167,7 @@ class RecordedModel:
             text=found.text,
             prompt_tokens=found.prompt_tokens,
             completion_tokens=found.completion_tokens,
-            latency_ms=found.latency_ms,
+            latency_ms=0,
         )
 
 
@@ -186,7 +187,6 @@ class RecordingModel:
             text=reply.text,
             prompt_tokens=reply.prompt_tokens,
             completion_tokens=reply.completion_tokens,
-            latency_ms=reply.latency_ms,
         )
         return reply
 

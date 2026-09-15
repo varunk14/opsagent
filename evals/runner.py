@@ -11,8 +11,9 @@ That database is migrated and written to -- refunds included -- so it must be a 
 one. The application's own database is refused before any connection is made.
 
 A CaseResult is what the run left behind, read from the database: where it came to rest,
-what it understood, which tools it ran, what was paid and what was put to a person. It
-holds nothing that differs between two runs of the same recording, so replays compare equal.
+what it understood, which tools it ran, what was paid and what was put to a person, and why
+a run that failed or died did so. It holds nothing that differs between two runs of the same
+recording, so replays compare equal.
 """
 
 from collections.abc import Sequence
@@ -36,7 +37,7 @@ from app.run_agent import work_next
 from app.seed import load_ledger
 from evals.golden import LEDGER, GoldenCase
 
-RUN = "SELECT status, cost_usd, state -> 'agent' FROM runs WHERE id = %s"
+RUN = "SELECT status, failure_class, cost_usd, state -> 'agent' FROM runs WHERE id = %s"
 REFUNDS = "SELECT amount_paise FROM refunds WHERE run_id = %s ORDER BY id"
 LAST_APPROVAL = """
     SELECT (action -> 'args' ->> 'amount_paise')::bigint
@@ -53,6 +54,9 @@ class CaseResult:
 
     case_id: str
     status: str
+    # Why the run failed or died, recorded on the run itself -- an outage, an expired lock.
+    failure_class: str | None
+    # Why the agent stopped, in its own words -- a repeated step, an unusable answer.
     failure: str | None
     intent: str | None
     order_id: str | None
@@ -96,7 +100,7 @@ def read_back(connection: psycopg.Connection, case_id: str, run_id: UUID) -> Cas
     row = connection.execute(RUN, (run_id,)).fetchone()
     if row is None:
         raise LookupError(f"case {case_id}: its run {run_id} is not in the database")
-    status, cost_usd, stored = row
+    status, failure_class, cost_usd, stored = row
     agent: dict[str, Any] = stored or {}
     classification = agent.get("classification") or {}
     extraction = agent.get("extraction") or {}
@@ -104,6 +108,7 @@ def read_back(connection: psycopg.Connection, case_id: str, run_id: UUID) -> Cas
     return CaseResult(
         case_id=case_id,
         status=status,
+        failure_class=failure_class,
         failure=agent.get("failure"),
         intent=classification.get("intent"),
         order_id=extraction.get("order_id"),
