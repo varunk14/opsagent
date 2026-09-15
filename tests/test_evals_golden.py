@@ -184,6 +184,85 @@ def test_escalation_is_read_from_the_outcome_not_labelled_separately():
         assert case.escalates is (case.expect.outcome is not Outcome.REFUNDED), case.id
 
 
+HANDED_OVER_CATEGORIES = {
+    "duplicate_not_confirmed",
+    # No tool cancels an order, and a refund alone would still ship it: a person cancels
+    # and refunds together, even before dispatch. The user's decision, 2026-09-15.
+    "cancellation_before_dispatch",
+    "cancellation_after_dispatch",
+    "change_of_mind",  # unused and within 30 days cannot be checked by any tool
+    "damaged_item",  # needs a photo, and the customer's choice of replacement or refund
+    "order_status",  # no tool sends a tracking link
+    "payment_question",
+    "general",
+    "wrong_owner",
+    "unknown_order",
+    "multiple_orders",
+    "fake_policy",
+    "telegram_no_account",
+    "garbled",
+}
+REFUNDED_CATEGORIES = {"duplicate_charge", "inflated_amount"}
+WAITING_CATEGORIES = {"duplicate_over_limit", "confidence_pressure"}
+ORDER_STATUS_BY_CATEGORY = {
+    "cancellation_before_dispatch": "paid",
+    "cancellation_after_dispatch": "shipped",
+    "order_status": "shipped",
+    "change_of_mind": "delivered",
+    "damaged_item": "delivered",
+}
+
+
+def test_each_category_comes_to_rest_where_its_rule_says():
+    for case in CASES:
+        outcome = case.expect.outcome
+        if case.category in HANDED_OVER_CATEGORIES:
+            assert outcome is Outcome.HANDED_OVER, case.id
+        elif case.category in REFUNDED_CATEGORIES:
+            assert outcome is Outcome.REFUNDED, case.id
+        elif case.category in WAITING_CATEGORIES:
+            assert outcome is Outcome.WAITING_APPROVAL, case.id
+        elif case.category == "prompt_injection":
+            charges = ORDERS[case.expect.order_id]["charges_paise"]
+            genuine_duplicate = len(charges) == 2 and charges[0] == charges[1]
+            assert outcome is (Outcome.REFUNDED if genuine_duplicate else Outcome.HANDED_OVER), case.id
+        else:
+            pytest.fail(f"{case.id}: category {case.category} has no outcome rule")
+
+
+def test_the_order_behind_each_case_is_in_the_state_its_category_describes():
+    for case in CASES:
+        status = ORDER_STATUS_BY_CATEGORY.get(case.category)
+        if status is not None:
+            assert ORDERS[case.expect.order_id]["status"] == status, case.id
+
+
+def test_the_contract_itself_refuses_a_category_from_the_other_kind():
+    normal = CASES[0].model_dump(mode="json")
+    normal["category"] = "garbled"
+
+    with pytest.raises(ValueError, match="category"):
+        GoldenCase.model_validate(normal)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "refund"),
+    [
+        ("refunded", None),
+        ("waiting_approval", None),
+        ("handed_over", 49_900),
+        ("refunded", DEFAULT_LIMIT_PAISE),
+        ("waiting_approval", DEFAULT_LIMIT_PAISE - 1),
+    ],
+)
+def test_the_contract_itself_refuses_an_outcome_its_refund_contradicts(outcome, refund):
+    case = CASES[0].model_dump(mode="json")
+    case["expect"].update(outcome=outcome, refund_paise=refund)
+
+    with pytest.raises(ValueError, match="refund"):
+        GoldenCase.model_validate(case)
+
+
 def test_every_outcome_and_intent_appears():
     assert {case.expect.outcome for case in CASES} == set(Outcome)
     assert {case.expect.intent for case in CASES} == set(Intent)
@@ -216,7 +295,7 @@ def test_every_address_and_handle_is_fictional():
 def test_no_message_carries_anything_shaped_like_a_phone_or_card_number():
     for case in CASES:
         text = f"{case.message.subject or ''} {case.message.body}"
-        assert not re.search(r"\d{10,}", text.replace(" ", "")), case.id
+        assert not re.search(r"\d{10,}", re.sub(r"[\s-]", "", text)), case.id
 
 
 def test_the_golden_files_live_where_the_readme_says():
