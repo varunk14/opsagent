@@ -88,3 +88,19 @@ def test_planning_shows_what_earlier_steps_found():
 
 def test_planning_keeps_the_customer_text_fenced():
     assert BODY in fenced(plan())
+
+
+def prior_steps(prompt: str) -> str:
+    return prompt[prompt.index("<<<PRIOR_STEPS") : prompt.index("PRIOR_STEPS>>>")]
+
+
+def test_what_earlier_steps_found_is_fenced_as_data():
+    """These values came from a model the email could steer, so they are data too."""
+    found = prior_steps(plan())
+
+    assert "duplicate_charge" in found
+    assert "- order id: 4821\n" in found
+
+
+def test_the_order_id_is_shown_without_quote_marks():
+    assert "'4821'" not in plan()

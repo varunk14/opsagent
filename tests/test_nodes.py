@@ -94,3 +94,15 @@ def test_an_unreachable_model_is_not_treated_as_a_bad_answer():
 
     with pytest.raises(ModelUnavailable):
         nodes.classify(MESSAGE, Down())
+
+
+@pytest.mark.parametrize("step", ["extract", "retrieve", "plan"])
+def test_a_step_without_a_classification_escalates_instead_of_crashing(step):
+    """The graph never does this; a future direct caller might, and should not get a KeyError."""
+    state = {**MESSAGE, "extraction": None, "policy": ["p"]}
+    call = getattr(nodes, step)
+
+    update = call(state) if step == "retrieve" else call(state, ScriptedModel())
+
+    assert update["proposal"].tool == "escalate_to_human"
+    assert "classification" in update["failure"]
