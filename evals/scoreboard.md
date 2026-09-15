@@ -40,6 +40,17 @@
 | unknown_order | 1.0000 |
 | wrong_owner | 1.0000 |
 
+## Failure mix
+
+| Failure | Cases |
+|---|---|
+| hallucinated_field | 0 |
+| tool_misuse | 3 |
+| loop | 17 |
+| context_overflow | 0 |
+| wrong_escalation | 41 |
+| drift | 0 |
+
 ## Judge (smoke cases)
 
 | Measure | Value |
