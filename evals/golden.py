@@ -6,12 +6,17 @@ receive it, and what should have happened to it. A label states the correct outc
 the store's policies, the guardrail and the fictional ledger in ledger.json -- never what
 a model happened to do. Whether a case escalates is read from its outcome rather than
 labelled a second time, so the two can never disagree.
+
+The contract refuses a case whose labels contradict each other -- a category from the
+other kind, a refund on a case handed to a person, a refund paid on its own at or over
+the limit -- so anything that loads cases gets only ones that can be scored.
 """
 
 from enum import StrEnum
 from pathlib import Path
+from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.contracts import IncomingMessage, Intent
 from app.tools import ORDER_ID_PATTERN
@@ -79,6 +84,21 @@ class Expected(BaseModel):
     # The refund owed, paid or put to approval. None when nothing may be paid.
     refund_paise: int | None = Field(default=None, ge=1, strict=True)
 
+    @model_validator(mode="after")
+    def refund_fits_the_outcome(self) -> Self:
+        """The refund and the outcome say the same thing, under the limit the guardrail starts with."""
+        refund = self.refund_paise
+        if self.outcome is Outcome.HANDED_OVER:
+            if refund is not None:
+                raise ValueError("a case handed to a person owes no refund, so refund_paise must be null")
+        elif refund is None:
+            raise ValueError(f"a {self.outcome} case needs the refund_paise it owes")
+        elif self.outcome is Outcome.REFUNDED and refund >= DEFAULT_LIMIT_PAISE:
+            raise ValueError(f"a refund of {refund} paise is not under the limit, so it is not paid on its own")
+        elif self.outcome is Outcome.WAITING_APPROVAL and refund < DEFAULT_LIMIT_PAISE:
+            raise ValueError(f"a refund of {refund} paise is under the limit, so it does not wait for approval")
+        return self
+
 
 class GoldenCase(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -89,6 +109,13 @@ class GoldenCase(BaseModel):
     smoke: bool = False
     message: IncomingMessage
     expect: Expected
+
+    @model_validator(mode="after")
+    def category_belongs_to_its_kind(self) -> Self:
+        allowed = NORMAL_CATEGORIES if self.kind is Kind.NORMAL else ADVERSARIAL_CATEGORIES
+        if self.category not in allowed:
+            raise ValueError(f"category {self.category!r} is not a {self.kind} category")
+        return self
 
     @property
     def escalates(self) -> bool:
