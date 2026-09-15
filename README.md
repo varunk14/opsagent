@@ -31,7 +31,7 @@ to fail first, because the failure is the part worth seeing.
 |---|---|
 | `app/contracts.py` | The typed boundary. Untrusted input and every model answer become one validated shape, or are refused. |
 | `app/db.py` | Connecting, and a migration runner that is safe to run on every start-up. |
-| `app/intake.py`, `app/poll.py` | A message becomes a run exactly once; a bounded pass owns its transaction. |
+| `app/intake.py`, `app/poll.py` | A message becomes a run exactly once; a bounded pass owns its transaction. A message that reuses another's key with different text is quarantined, not lost. |
 | `app/adapters/fixture.py` | The first intake adapter. Reads JSONL; Gmail will be the second. |
 | `app/llm.py` | Asks a local model for JSON that fits a schema, retries with the error fenced as data, counts every attempt's tokens. |
 | `app/tools.py` | What the agent may propose, as the model sees it: names, descriptions and argument limits, and nothing executable. |
@@ -39,7 +39,8 @@ to fail first, because the failure is the part worth seeing.
 | `app/embeddings.py`, `app/policies.py` | Policy documents chunked, embedded locally with `nomic-embed-text`, stored in pgvector. Reloading unchanged documents embeds nothing. |
 | `app/retrieval.py` | Search by meaning: nearest passages within a distance cutoff, same embedding model only. |
 | `app/executor.py` | Runs a tool for real, exactly once per operation: every call is keyed `run:step:tool`, and a repeat replays the stored result. An order is reachable only by the customer who placed it. |
-| `app/run_agent.py` | Claims a run with `FOR UPDATE SKIP LOCKED` and works it one committed step at a time. A lookup runs and the agent plans again with the result; a refund is recorded and waits for a person. A run whose worker died is reclaimed once its lock expires and continues from its last committed step. |
+| `app/run_agent.py` | Claims a run with `FOR UPDATE SKIP LOCKED` and works it one committed step at a time. A lookup runs and the agent plans again with the result; a refund is recorded and waits for a person. A run whose worker died is reclaimed once its lock expires and continues from its last committed step. An outage is retried with backoff; one sender's lookups are rate limited; worker sessions carry timeouts so a hung connection cannot hold a run. |
+| `app/dead_letters.py` | Runs that ran out of attempts, and quarantined messages, each with the reason. `python -m app.dead_letters` lists them and requeues a run. |
 | `app/seed.py` | Loads a small fictional ledger: customers, orders, and the charges behind them. |
 | `app/baseline.py` | What a run costs before any optimisation, so week 9 has something to compare against. |
 
@@ -118,11 +119,13 @@ failure modes are the interesting part, and each one is pinned by a test.
 * Calling refund twice with one key produces one refund, including two workers racing on the key.
 * A worker killed with SIGKILL mid-run is resumed by another from its last committed step.
 * A worker that lost its claim executes nothing.
+* An outage waits 30 seconds, then twice as long each time up to an hour; a run out of attempts is
+  dead-lettered with its reason in the same statement that marks it dead.
+* Two workers racing for a sender's last allowed lookup use it once.
 
 ## Planned
 
-Retries with backoff, rate limiting and a dead-letter table (the rest of week 4), a human approval
-queue and policy limits in code (week 5), tracing and a live deployment (week 6), an evaluation
+A human approval queue and policy limits in code (week 5), tracing and a live deployment (week 6), an evaluation
 suite gating every pull request (week 7), a failure taxonomy (week 8), and cost routing measured
 against `BASELINE.md` (week 9).
 
