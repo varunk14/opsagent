@@ -57,10 +57,25 @@ def recorded(text: str = '{"ok": true}', model: str = "llama3.1:8b") -> Recordin
 # --- replies --------------------------------------------------------------------------------
 
 
-def test_a_recorded_reply_is_given_back_with_its_token_counts():
+def test_a_recorded_reply_is_given_back_with_its_token_counts_and_no_latency():
+    """Latency is the recording machine's, not the reply's: replay reports none rather than a stale one."""
     reply = RecordedModel(recorded('{"intent": "other"}'), model="llama3.1:8b").generate(CLASSIFY_PROMPT)
 
-    assert reply == Reply(text='{"intent": "other"}', prompt_tokens=10, completion_tokens=5, latency_ms=1)
+    assert reply == Reply(text='{"intent": "other"}', prompt_tokens=10, completion_tokens=5, latency_ms=0)
+
+
+def test_recording_again_does_not_rewrite_lines_for_latency_alone(tmp_path):
+    first, second = Recordings(), Recordings()
+    RecordingModel(ScriptedModel(classify="{}"), first, model="m").generate(CLASSIFY_PROMPT)
+    slower = ScriptedModel(classify="{}")
+    slower.generate = lambda prompt: Reply(text="{}", prompt_tokens=10, completion_tokens=5, latency_ms=9_999)  # type: ignore[method-assign]
+    RecordingModel(slower, second, model="m").generate(CLASSIFY_PROMPT)
+
+    first.save(tmp_path / "first.jsonl")
+    second.save(tmp_path / "second.jsonl")
+
+    assert (tmp_path / "first.jsonl").read_bytes() == (tmp_path / "second.jsonl").read_bytes()
+    assert "latency" not in (tmp_path / "first.jsonl").read_text()
 
 
 def test_a_prompt_never_recorded_is_refused_naming_its_task_and_how_to_record_it():
@@ -268,6 +283,19 @@ def test_a_handed_over_case_reads_back_why_and_the_amount_the_customer_stated(fr
     assert result.failure is not None and "repeated an earlier step" in result.failure
     assert result.stated_amount_paise == case.expect.stated_amount_paise
     assert (result.refunds_paise, result.approval_paise) == ((), None)
+
+
+@pytest.mark.db
+def test_why_a_run_failed_is_read_back_for_a_run_that_died(fresh_database):
+    """A run buried after its lock expired says why on the run itself, not in what the agent last wrote."""
+    case = CASES["n-001"]
+    run_cases(fresh_database, [case], script_for(case.expect.order_id, case.expect.refund_paise), FakeEmbedder())
+    with psycopg.connect(fresh_database) as connection:
+        (run_id,) = connection.execute("SELECT id FROM runs").fetchone()
+        connection.execute("UPDATE runs SET status = 'dead', failure_class = 'lock_expired' WHERE id = %s", (run_id,))
+        result = read_back(connection, case.id, run_id)
+
+    assert (result.status, result.failure_class) == ("dead", "lock_expired")
 
 
 # --- a recordings file is an input, and a pull request can change it --------------------------

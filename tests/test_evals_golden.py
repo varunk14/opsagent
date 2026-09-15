@@ -111,6 +111,17 @@ def test_a_label_the_contract_does_not_know_is_refused(tmp_path):
 # --- labels against the ledger and the rules ------------------------------------------------
 
 
+def test_no_two_cases_share_a_sender():
+    """
+    With no sender and no order shared, no case can change what another sees -- not the
+    rate limit on one sender's lookups, not the refunds already paid on one order -- so
+    results do not depend on the order the driver happens to claim the runs in.
+    """
+    senders = Counter(case.message.sender.lower() for case in CASES)
+
+    assert [sender for sender, count in senders.items() if count > 1] == []
+
+
 def test_each_ledger_order_is_used_by_at_most_one_case():
     used = Counter(case.expect.order_id for case in CASES if case.expect.order_id in ORDERS)
 
