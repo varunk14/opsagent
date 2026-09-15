@@ -16,6 +16,7 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+from uuid import UUID
 
 import psycopg
 import pytest
@@ -42,7 +43,17 @@ def run_doomed_worker(dsn: str) -> subprocess.CompletedProcess:
     )
 
 
-def test_a_worker_killed_mid_run_is_resumed_by_another(fresh_database):
+def root_spans(dsn: str, run_id: str) -> list[tuple]:
+    """Each tick recorded for the run: its trace, and what the tick ended as."""
+    with psycopg.connect(dsn) as connection:
+        return connection.execute(
+            "SELECT trace_id, attributes ->> 'opsagent.outcome' FROM spans "
+            "WHERE trace_id = %s AND parent_span_id IS NULL ORDER BY started_at",
+            (run_id,),
+        ).fetchall()
+
+
+def test_a_worker_killed_mid_run_is_resumed_by_another(fresh_database, exported):
     ledger(fresh_database)
     run_id = queue(fresh_database)
 
@@ -53,6 +64,8 @@ def test_a_worker_killed_mid_run_is_resumed_by_another(fresh_database):
     assert (stored["status"], stored["locked_by"]) == ("running", WORKER)
     assert len(stored["state"]["agent"]["steps"]) == 1
     assert keys(fresh_database, run_id) == [f"{run_id}:step_1:get_order"]
+    # The lookup's tick committed with its spans; nothing of the killed process's next tick exists.
+    assert root_spans(fresh_database, run_id) == [(UUID(run_id), "running")]
 
     with psycopg.connect(fresh_database) as connection:
         connection.execute(
@@ -73,3 +86,5 @@ def test_a_worker_killed_mid_run_is_resumed_by_another(fresh_database):
     ], "the lookup was not repeated"
     assert count(fresh_database, "refunds") == 1
     assert row(fresh_database, run_id)["attempt"] == 2
+    # One trace across both processes: the killed worker's tick, then the rescuer's.
+    assert root_spans(fresh_database, run_id) == [(UUID(run_id), "running"), (UUID(run_id), "done")]
