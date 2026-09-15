@@ -15,6 +15,7 @@ is in paise, because rupees and paise differ by a factor of a hundred and the
 model has no way to guess which we meant.
 """
 
+from collections.abc import Collection
 from dataclasses import dataclass
 
 # Rs 10,00,000. A sanity ceiling on what could ever be one refund, not a
@@ -128,9 +129,10 @@ TOOLS: tuple[ToolDescription, ...] = (
 )
 
 
-def describe_tools() -> str:
-    """The tool list as it appears in a prompt."""
+def describe_tools(exclude: Collection[str] = ()) -> str:
+    """The tool list as it appears in a prompt, leaving out tools that would be redundant."""
     return "\n\n".join(
         f"- {tool.name}: {tool.description}\n  arguments: {tool.parameters}"
         for tool in TOOLS
+        if tool.name not in exclude
     )
