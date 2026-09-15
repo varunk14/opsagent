@@ -18,7 +18,10 @@ progress is never mistaken for a stuck one. escalate_to_human runs and the run
 waits for a person. issue_refund is recorded and the run waits for a person
 too: approval is week 5, and the sender is only a From header. A proposal that
 repeats an earlier step, a run past its step budget, or a tool this worker does
-not run are all handed to a person instead of executed.
+not run are all handed to a person instead of executed. A sender who has caused
+RATE_LIMIT lookups within RATE_WINDOW has further lookups deferred: the run goes
+back to the queue until the window frees, executing nothing and spending no
+attempt.
 
 A model or policy store that cannot be reached marks the run failed, charged for
 the calls that completed and keeping every committed step, and schedules it for
@@ -29,8 +32,8 @@ LOCK_TIMEOUT another worker reclaims it, spending an attempt, and carries on
 from the last committed step; on its last attempt it is marked dead instead.
 The timeout covers a worker that has gone quiet between steps. One whose
 connection hangs inside the act transaction keeps its row lock, and SKIP LOCKED
-will not take the run until Postgres ends that session -- session timeouts to
-bound that are planned.
+will not take the run until Postgres ends that session -- which, with the
+session timeouts every worker sets, it does after IDLE_IN_TRANSACTION_TIMEOUT.
 
 Run:  .venv/bin/python -m app.run_agent [how many runs, default 10]
 """
@@ -72,6 +75,18 @@ RETRY_BASE = timedelta(seconds=30)
 RETRY_CAP = timedelta(hours=1)
 MAX_DOUBLINGS = 20
 
+# Order lookups one sender may cause in any RATE_WINDOW. Past that their run waits
+# for the window to free, spending no attempt. Handing a case to a person is never
+# limited: it is the one action that must always be possible.
+RATE_LIMIT = 10
+RATE_WINDOW = timedelta(hours=1)
+RATE_LIMITED = frozenset({"get_order"})
+
+# Postgres ends a worker session that sits inside a transaction this long, and the
+# run's row lock goes with it; no single statement may run longer than the other.
+IDLE_IN_TRANSACTION_TIMEOUT = timedelta(seconds=60)
+STATEMENT_TIMEOUT = timedelta(seconds=30)
+
 # Every tool the model can propose is in exactly one of these, and a test holds it
 # there, so a new tool in app/tools.py cannot run -- or fail to run -- by default.
 RUNS_NOW = frozenset({"get_order", "escalate_to_human"})
@@ -100,10 +115,10 @@ BURY_EXPIRED = """
 CLAIM = """
     UPDATE runs
        SET status = 'running', current_node = 'classify', attempt = attempt + 1,
-           locked_by = %s, locked_at = now()
+           locked_by = %s, locked_at = now(), next_retry_at = NULL
      WHERE id = (
             SELECT id FROM runs
-             WHERE status = 'queued'
+             WHERE (status = 'queued' AND (next_retry_at IS NULL OR next_retry_at <= now()))
                 OR (status = 'failed' AND next_retry_at <= now())
                 OR (status = 'running' AND locked_at < now() - %s AND attempt < max_attempts)
              ORDER BY created_at, id
@@ -119,6 +134,33 @@ HOLD_CLAIM = """
     SELECT 1 FROM runs
      WHERE id = %s AND status = 'running' AND locked_by = %s
        FOR UPDATE
+"""
+
+# Taken inside the act transaction before a rate-limited tool runs. Every worker
+# counting for the same sender queues behind this lock until the one before it
+# commits, so two cannot both see the last free slot.
+LOCK_SENDER = """
+    SELECT pg_advisory_xact_lock(hashtext(lower(coalesce(state -> 'untrusted' ->> 'sender', ''))))
+      FROM runs
+     WHERE id = %s
+"""
+
+RECENT_LOOKUPS = """
+    SELECT count(*), min(tool_calls.created_at)
+      FROM tool_calls
+      JOIN runs ON runs.id = tool_calls.run_id
+     WHERE tool_calls.tool = 'get_order'
+       AND tool_calls.created_at > now() - %s
+       AND lower(runs.state -> 'untrusted' ->> 'sender') =
+           (SELECT lower(state -> 'untrusted' ->> 'sender') FROM runs WHERE id = %s)
+"""
+
+# Busy is not a failure: the attempt the claim spent is given back.
+DEFER = """
+    UPDATE runs
+       SET status = 'queued', attempt = attempt - 1, next_retry_at = %s + %s,
+           current_node = 'act', cost_usd = cost_usd + %s, locked_by = NULL, locked_at = NULL
+     WHERE id = %s AND locked_by = %s
 """
 
 CONTINUE = """
@@ -189,6 +231,32 @@ def require_idle(connection: psycopg.Connection) -> None:
             "the driver commits, so it needs its own transaction: call it on a "
             "connection with no work already open"
         )
+
+
+def milliseconds(duration: timedelta) -> str:
+    return str(duration // timedelta(milliseconds=1))
+
+
+def configure_session(
+    connection: psycopg.Connection,
+    idle_in_transaction: timedelta = IDLE_IN_TRANSACTION_TIMEOUT,
+    statement: timedelta = STATEMENT_TIMEOUT,
+) -> None:
+    """
+    Bound how long this worker's session may sit on locks without making progress.
+
+    LOCK_TIMEOUT only helps once a run's row lock is free. A connection hung inside
+    the act transaction would keep that lock for as long as its session lived, and
+    SKIP LOCKED would pass the run over indefinitely. With these set, Postgres ends
+    such a session itself. Set for the session, and committed, so they outlast this call.
+    """
+    require_idle(connection)
+    with connection.transaction():
+        connection.execute(
+            "SELECT set_config('idle_in_transaction_session_timeout', %s, false)",
+            (milliseconds(idle_in_transaction),),
+        )
+        connection.execute("SELECT set_config('statement_timeout', %s, false)", (milliseconds(statement),))
 
 
 def claim_next(
@@ -348,6 +416,22 @@ def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_st
         if connection.execute(HOLD_CLAIM, (claimed.run_id, claimed.worker)).fetchone() is None:
             raise LostClaim(f"run {claimed.run_id} was reclaimed before this worker could act on it")
 
+        if proposal.tool in RATE_LIMITED:
+            connection.execute(LOCK_SENDER, (claimed.run_id,))
+            recent = connection.execute(RECENT_LOOKUPS, (RATE_WINDOW, claimed.run_id)).fetchone()
+            if recent is not None and recent[0] >= RATE_LIMIT:
+                # Charged for the model calls already made; nothing is executed.
+                cost = cost_of(state.get("replies", []))
+                connection.execute(DEFER, (recent[1], RATE_WINDOW, cost, claimed.run_id, claimed.worker))
+                return RunOutcome(
+                    run_id=claimed.run_id,
+                    status="queued",
+                    tool=proposal.tool,
+                    steps=len(steps),
+                    failure=None,
+                    cost_usd=cost,
+                )
+
         if proposal.tool in RUNS_NOW:
             number = len(steps) + 1
             done = execute(connection, claimed.run_id, number, proposal)
@@ -385,6 +469,7 @@ def work_next(
     `after_step` is called once each continuing step has been committed, with the
     run id and how many steps it now has -- the moment a dying worker loses nothing.
     """
+    configure_session(connection)
     claimed = claim_next(connection, worker or default_worker(), lock_timeout)
     if claimed is None:
         return None
