@@ -26,6 +26,10 @@ its attempts run out and it is marked dead. A crash leaves the run marked
 running with its committed steps intact. Once its lock is older than
 LOCK_TIMEOUT another worker reclaims it, spending an attempt, and carries on
 from the last committed step; on its last attempt it is marked dead instead.
+The timeout covers a worker that has gone quiet between steps. One whose
+connection hangs inside the act transaction keeps its row lock, and SKIP LOCKED
+will not take the run until Postgres ends that session -- session timeouts to
+bound that are planned.
 
 Run:  .venv/bin/python -m app.run_agent [how many runs, default 10]
 """
@@ -60,8 +64,12 @@ MICRO_DOLLAR = Decimal("0.000001")  # matches runs.cost_usd numeric(10, 6)
 # Executed tools a run may use before a person takes over. Small models can wander.
 MAX_STEPS = 4
 
+# Every tool the model can propose is in exactly one of these, and a test holds it
+# there, so a new tool in app/tools.py cannot run -- or fail to run -- by default.
 RUNS_NOW = frozenset({"get_order", "escalate_to_human"})
 WAITS_FOR_APPROVAL = frozenset({"issue_refund"})
+# Retrieval already ran in the graph; a planner asking to search again is handed over.
+NOT_RUN_HERE = frozenset({"search_policy"})
 
 # How long a lock may go without a committed step before the run is taken back.
 # Every committed step refreshes it, so only a worker that has gone quiet loses it.
