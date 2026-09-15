@@ -29,24 +29,31 @@ to fail first, because the failure is the part worth seeing.
 
 | Module | What it does |
 |---|---|
-| `app/contracts.py` | The typed boundary. Untrusted input becomes one validated shape, or is refused. |
+| `app/contracts.py` | The typed boundary. Untrusted input and every model answer become one validated shape, or are refused. |
 | `app/db.py` | Connecting, and a migration runner that is safe to run on every start-up. |
-| `app/intake.py` | A message becomes a run, exactly once, with the database arbitrating. |
+| `app/intake.py`, `app/poll.py` | A message becomes a run exactly once; a bounded pass owns its transaction. |
 | `app/adapters/fixture.py` | The first intake adapter. Reads JSONL; Gmail will be the second. |
-| `app/poll.py` | One pass over an inbox. Owns its transaction, bounded, all or nothing. |
-| `app/baseline.py` | What a run costs before any optimisation, recorded so week 9 has something to compare against. |
+| `app/llm.py` | Asks a local model for JSON that fits a schema, retries with the error fenced as data, counts every attempt's tokens. |
+| `app/tools.py` | What the agent may propose, with argument limits. No implementations: nothing can execute yet. |
+| `app/graph/` | The LangGraph agent: classify → extract → retrieve → plan. Proposes one checked action; never touches the database. |
+| `app/embeddings.py`, `app/policies.py` | Policy documents chunked, embedded locally with `nomic-embed-text`, stored in pgvector. Reloading unchanged documents embeds nothing. |
+| `app/retrieval.py` | Search by meaning: nearest passages within a distance cutoff, same embedding model only. |
+| `app/run_agent.py` | Claims a queued run with `FOR UPDATE SKIP LOCKED`, walks the graph, records the proposal, its policy sources and its exact cost. |
+| `app/baseline.py` | What a run costs before any optimisation, so week 9 has something to compare against. |
 
-Six tables in `migrations/001_schema.sql`: `runs` is the durable spine, one row
-per request; then `customers`, `orders`, `approvals`, `tool_calls` and
-`policy_chunks`.
+Seven tables' worth of schema live in `migrations/`; `policies/` holds six short fictional store policies.
 
 ### Running it
 
-    docker compose up -d db
-    .venv/bin/python -c "from app.db import connect, apply_migrations; apply_migrations(connect())"
-    .venv/bin/python -m app.poll fixtures/inbox.jsonl
+    docker compose up -d
+    ollama pull llama3.1:8b && ollama pull nomic-embed-text
+    .venv/bin/python -m app.policies                      # migrate, then load policies
+    .venv/bin/python -m app.poll fixtures/inbox.jsonl     # messages become runs
+    .venv/bin/python -m app.run_agent                     # each run gets one proposal
 
-Four rows appear. Run it again and none do — the point of the whole module.
+Priya's email ("charged twice for order #4821") is classified `duplicate_charge`, retrieves the
+duplicate-payment policy -- which never uses the words "charged" or "twice" -- and ends waiting for
+a decision with the proposal `get_order(4821)`. Nothing executes: that is week 4.
 
 ### The experiments
 
@@ -63,21 +70,23 @@ Four rows appear. Run it again and none do — the point of the whole module.
     docker compose up -d db
     .venv/bin/python -m pytest
 
-139 tests, 99% statement coverage, with the run failing below 80%. Tests that
-need Postgres are marked `db` and **fail rather than skip** when it is absent,
-because a skipped test that reads as green is the failure this project is about.
+Over 300 tests with the run failing below 80% coverage. Tests that need Postgres are marked `db`
+and **fail rather than skip** when it is absent, because a skipped test that reads as green is the
+failure this project is about. Every push runs the same checks in CI, and `main` only accepts a
+pull request once they pass.
+
+Tests against the real local models are opt-in, since CI has no Ollama:
+
+    OPSAGENT_REAL_MODEL=1 .venv/bin/python -m pytest tests/test_policy_search_real.py --no-cov
+
 To run only what needs no database:
 
     .venv/bin/python -m pytest -m "not db" --no-cov
 
-The tests worth reading first are `tests/test_intake.py` and
-`tests/test_refund_idempotency.py`. Several assert that *broken* versions are
-still broken, because a fix only means something while the bug it fixes remains
-demonstrable.
-
-Two of them record findings that contradict a reasonable assumption: a `bigint`
-column does not reject a fractional paisa, it silently rounds it; and a migration
-runner that does not commit reports success against an empty database.
+Several tests record findings that contradict a reasonable assumption: a `bigint` column rounds a
+fractional paisa instead of refusing it; a migration runner that does not commit reports success
+against an empty database; an outage partway through a run used to lose the cost of the steps that
+had finished.
 
 ## Cost
 
@@ -88,10 +97,10 @@ what survives.
 
 ## Planned
 
-A durable worker that survives a restart, policy retrieval with pgvector, a human
-approval queue for refunds above a threshold, per-step cost and latency tracing,
-an evaluation suite gating every pull request, and a named taxonomy of failure
-modes.
+Real tools behind idempotency keys with retries and a dead-letter queue (week 4), a human approval
+queue and policy limits in code (week 5), tracing and a live deployment (week 6), an evaluation
+suite gating every pull request (week 7), a failure taxonomy (week 8), and cost routing measured
+against `BASELINE.md` (week 9).
 
 ## Running the experiments
 
