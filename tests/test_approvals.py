@@ -19,9 +19,13 @@ from decimal import Decimal
 import psycopg
 import pytest
 
+from psycopg.types.json import Jsonb
+
 from app.approvals import (
+    HandedOver,
     PendingApproval,
     decide,
+    list_handed_over,
     list_pending,
     mark_executed,
     open_approval,
@@ -234,6 +238,55 @@ def test_a_pending_approval_carries_what_the_screen_shows(db):
     assert pending.confidence == Decimal("0.90")
     assert pending.reason == OVER_THE_LIMIT
     assert pending.created_at is not None
+
+
+def handed_over_run(db, *, key: str, status: str = "waiting_approval", agent: dict) -> uuid.UUID:
+    run_id = uuid.uuid4()
+    db.execute(
+        "INSERT INTO runs (id, channel, status, current_node, state, idempotency_key, locked_by) "
+        "VALUES (%s, 'email', %s, 'act', %s, %s, 'build-host-4242')",
+        (run_id, status, Jsonb({"untrusted": {"sender": "priya@example.com", "subject": "Refund", "body": "Hi"}, "agent": agent}), key),
+    )
+    return run_id
+
+
+def test_a_run_handed_to_a_person_without_an_approval_is_listed_with_why(db):
+    """Security review of Unit B: otherwise a refused refund waits where no screen shows it."""
+    run_id = handed_over_run(db, key="email_msg_refused", agent={"failure": "act: the ledger refused the refund: over"})
+
+    (handed,) = [item for item in list_handed_over(db) if item.run_id == run_id]
+
+    assert handed.why == "act: the ledger refused the refund: over"
+    assert (handed.sender, handed.subject, handed.body) == ("priya@example.com", "Refund", "Hi")
+
+
+def test_an_escalation_the_planner_chose_is_listed_with_its_reason(db):
+    agent = {"failure": None, "proposal": {"tool": "escalate_to_human", "args": {"reason": "asks about delivery"}}}
+    run_id = handed_over_run(db, key="email_msg_escalated", agent=agent)
+
+    (handed,) = [item for item in list_handed_over(db) if item.run_id == run_id]
+
+    assert handed.why == "asks about delivery"
+
+
+def test_a_run_with_a_pending_approval_is_not_listed_as_handed_over(db):
+    run_id = waiting_run(db)
+    ask(db, run_id)
+
+    assert run_id not in {item.run_id for item in list_handed_over(db)}
+
+
+def test_a_run_no_longer_waiting_is_not_listed_as_handed_over(db):
+    run_id = handed_over_run(db, key="email_msg_finished", status="done", agent={"failure": "old"})
+
+    assert run_id not in {item.run_id for item in list_handed_over(db)}
+
+
+def test_the_handed_over_list_never_carries_the_worker_either(db):
+    handed_over_run(db, key="email_msg_locked", agent={"failure": "act: refused"})
+
+    assert "locked_by" not in {field.name for field in fields(HandedOver)}
+    assert "build-host-4242" not in repr(list_handed_over(db))
 
 
 def test_the_list_never_carries_the_worker_that_held_the_run(db):
