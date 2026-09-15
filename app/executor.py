@@ -58,6 +58,10 @@ OWNED_ORDER = """
        AND lower(o.customer_email) = lower(r.state -> 'untrusted' ->> 'sender')
 """
 
+# The constraint name the cap trigger raises with (migrations/004). Only this
+# violation is a refusal; any other CHECK on refunds is a bug and propagates.
+REFUND_CAP = "refunds_within_charges"
+
 INSERT_REFUND = """
     INSERT INTO refunds (order_id, amount_paise, reason, run_id, idempotency_key)
     VALUES (%s, %s, %s, %s, %s)
@@ -123,6 +127,8 @@ def issue_refund(connection: psycopg.Connection, run_id: UUID, key: str, args: J
                 INSERT_REFUND, (order_id, amount_paise, args["reason"], run_id, key)
             ).fetchone()
     except psycopg.errors.CheckViolation as refused:
+        if refused.diag.constraint_name != REFUND_CAP:
+            raise
         return {"refunded": False, "error": refused.diag.message_primary or str(refused)}
 
     if inserted is None:  # pragma: no cover - INSERT ... RETURNING always yields the row
