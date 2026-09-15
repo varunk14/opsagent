@@ -210,6 +210,54 @@ def test_the_command_names_what_it_added_and_prints_no_secret(tmp_path, capsys):
         assert values[name] not in out, name
 
 
+def test_an_existing_file_others_could_read_is_made_private_before_secrets_go_in(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("OPSAGENT_OPERATOR=asha\n")
+    env.chmod(0o644)
+
+    write_env(env)
+
+    assert stat.S_IMODE(env.stat().st_mode) == 0o600
+
+
+def test_a_symbolic_link_in_place_of_the_file_is_refused_and_its_target_untouched(tmp_path):
+    target = tmp_path / "somewhere-else"
+    target.write_text("kept as it was\n")
+    env = tmp_path / ".env"
+    env.symlink_to(target)
+
+    with pytest.raises(ValueError, match="symbolic link"):
+        write_env(env)
+
+    assert target.read_text() == "kept as it was\n"
+
+
+def test_the_command_reports_a_refused_file_without_a_traceback(tmp_path, capsys):
+    target = tmp_path / "somewhere-else"
+    target.write_text("")
+    env = tmp_path / ".env"
+    env.symlink_to(target)
+
+    assert main(["env", "--path", str(env)]) == 2
+
+    assert "symbolic link" in capsys.readouterr().err
+    assert target.read_text() == ""
+
+
+def test_the_command_run_again_changes_nothing_and_says_so(tmp_path, capsys):
+    env = tmp_path / ".env"
+    main(["env", "--path", str(env)])
+    before = env.read_text()
+    capsys.readouterr()
+
+    assert main(["env", "--path", str(env)]) == 0
+
+    out = capsys.readouterr().out
+    assert "nothing changed" in out
+    assert settings(env)["LANGFUSE_PUBLIC_KEY"] in out
+    assert env.read_text() == before
+
+
 def test_the_command_refuses_anything_but_env(capsys):
     with pytest.raises(SystemExit) as refused:
         main(["nonsense"])
