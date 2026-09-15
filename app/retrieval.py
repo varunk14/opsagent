@@ -11,15 +11,23 @@ presented as relevant is worse than being told nothing applies.
 
 Each search opens its own short connection. The driver runs the graph with no
 transaction open, and retrieval must not change that.
+
+Both halves of a search are spans. The embedding records its model and says its
+tokens are not counted -- embedding cost is not in the run's cost yet, and a span
+showing nothing would claim it was free. The vector search records how many
+passages came back, how near the nearest was and which policies they came from,
+and never the question, which is the customer's own words.
 """
 
 from collections.abc import Callable
 
 import psycopg
+from opentelemetry.trace import StatusCode
 
 from app.embeddings import Embedder, embed_query
 from app.graph.state import PolicyPassage
 from app.llm import ServiceUnavailable
+from app.tracing import Attr, tracer
 
 DEFAULT_K = 3
 # Tuned on these policies with nomic-embed-text: relevant passages sat at
@@ -65,17 +73,33 @@ class PolicyRetriever:
         self.max_distance = max_distance
 
     def search(self, question: str) -> list[PolicyPassage]:
-        vector = as_pgvector(embed_query(self.embedder, question[:MAX_QUERY_CHARS]))
-        try:
-            with self.connect() as connection:
-                rows = connection.execute(SEARCH, (vector, self.embedder.model, vector, self.k)).fetchall()
-        except (psycopg.OperationalError, psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn) as exc:
-            # A dropped connection, or a policy store whose schema is not in place yet,
-            # is an outage: the run is requeued and, if it persists, ends dead with a
-            # visible failure_class -- never a crashed worker and a run stuck running.
-            raise PolicySearchUnavailable(f"policy search could not use the database: {exc}") from exc
-        return [
-            PolicyPassage(document=document, chunk_index=index, text=text, distance=float(distance))
-            for document, index, text, distance in rows
-            if distance <= self.max_distance
-        ]
+        with tracer().start_as_current_span("embed_query", record_exception=False, set_status_on_exception=False) as span:
+            span.set_attributes({Attr.TYPE: "embedding", Attr.MODEL: self.embedder.model, "opsagent.cost_counted": False})
+            try:
+                vector = as_pgvector(embed_query(self.embedder, question[:MAX_QUERY_CHARS]))
+            except ServiceUnavailable as outage:
+                span.set_status(StatusCode.ERROR, outage.failure_class)
+                raise
+
+        with tracer().start_as_current_span("vector_search", record_exception=False, set_status_on_exception=False) as span:
+            span.set_attributes({Attr.TYPE: "retriever", "opsagent.k": self.k, "opsagent.max_distance": self.max_distance})
+            try:
+                with self.connect() as connection:
+                    rows = connection.execute(SEARCH, (vector, self.embedder.model, vector, self.k)).fetchall()
+            except (psycopg.OperationalError, psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn) as exc:
+                # A dropped connection, or a policy store whose schema is not in place yet,
+                # is an outage: the run is requeued and, if it persists, ends dead with a
+                # visible failure_class -- never a crashed worker and a run stuck running.
+                span.set_status(StatusCode.ERROR, PolicySearchUnavailable.failure_class)
+                raise PolicySearchUnavailable(f"policy search could not use the database: {exc}") from exc
+            passages = [
+                PolicyPassage(document=document, chunk_index=index, text=text, distance=float(distance))
+                for document, index, text, distance in rows
+                if distance <= self.max_distance
+            ]
+            span.set_attribute("opsagent.passages", len(passages))
+            if passages:
+                span.set_attributes(
+                    {"opsagent.top_distance": passages[0].distance, "opsagent.sources": [p.source for p in passages]}
+                )
+        return passages

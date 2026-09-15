@@ -69,12 +69,13 @@ def test_the_vector_search_records_what_came_back(fresh_database, exported):
     found = named(rows, "vector_search").attributes
     assert found["opsagent.k"] == 2
     assert found["opsagent.passages"] == 2
-    assert found["opsagent.sources"][0] == "duplicate-payments#1"
+    assert found["opsagent.sources"][0] == "duplicate-payments#0"
     assert 0 <= found["opsagent.top_distance"] < 1
 
 
 def test_a_search_that_found_nothing_near_enough_says_so(fresh_database, exported):
-    rows = search(exported, retriever(fresh_database, loaded(fresh_database), max_distance=0.0))
+    # Nothing can be nearer than a negative distance; the duplicate passage itself sits at exactly 0.
+    rows = search(exported, retriever(fresh_database, loaded(fresh_database), max_distance=-1.0))
 
     found = named(rows, "vector_search").attributes
     assert found["opsagent.passages"] == 0
