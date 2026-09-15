@@ -81,6 +81,20 @@ REFERENCE_RATE = ReferenceRate(
 )
 
 
+
+def token_cost(prompt_tokens: int, completion_tokens: int, rate: ReferenceRate) -> Decimal:
+    """
+    The one place tokens become dollars.
+
+    The baseline and every run are priced by this function, so week 9's
+    before-and-after comparison is the same arithmetic on both sides.
+    """
+    million = Decimal(1_000_000)
+    return (
+        Decimal(prompt_tokens) / million * rate.input_per_million
+        + Decimal(completion_tokens) / million * rate.output_per_million
+    )
+
 @dataclass(frozen=True)
 class StepMeasurement:
     model: str
@@ -145,11 +159,7 @@ class Baseline:
 
     @property
     def cost_usd(self) -> Decimal:
-        million = Decimal(1_000_000)
-        return (
-            Decimal(self.prompt_tokens) / million * self.rate.input_per_million
-            + Decimal(self.completion_tokens) / million * self.rate.output_per_million
-        )
+        return token_cost(self.prompt_tokens, self.completion_tokens, self.rate)
 
     @property
     def cost_per_100_runs(self) -> Decimal:
