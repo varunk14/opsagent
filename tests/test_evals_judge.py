@@ -154,6 +154,15 @@ def test_what_the_database_numbered_a_refund_is_not_shown_to_the_judge():
     assert "refund_id" not in shown_first
 
 
+def test_a_tool_result_that_is_not_an_object_is_shown_as_it_is():
+    steps = json.loads(evidence())
+    steps["steps"][0]["result"] = "the ledger did not answer"
+
+    prompt = judge_prompt(REFUNDED, replace(perfect(REFUNDED), evidence=json.dumps(steps, sort_keys=True)))
+
+    assert '"result": "the ledger did not answer"' in prompt
+
+
 def test_the_customer_message_comes_before_what_the_run_did_and_the_instruction_to_reply_comes_last():
     """Found in review: untrusted text placed after the instruction is the last thing a small model reads."""
     prompt = judge_prompt(REFUNDED, seen())
