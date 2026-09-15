@@ -200,6 +200,18 @@ def test_the_command_exits_zero_when_the_gate_passes(tmp_path, capsys, monkeypat
     assert "no worse" in capsys.readouterr().out
 
 
+def test_the_accept_command_writes_the_baseline_and_prints_the_scoreboard(tmp_path, capsys, monkeypatch):
+    files = paths(tmp_path)
+    record(ADMIN, CHOSEN, good_model(), FakeEmbedder(), files["recordings_path"])
+    monkeypatch.setattr("evals.__main__.EMBEDDING_MODEL", FakeEmbedder.model)
+    command = gate_command(files)
+    command[1] = "accept"
+
+    assert main(command) == 0
+    assert files["baseline_path"].exists()
+    assert "Task completion | 1.0000 (2 of 2)" in capsys.readouterr().out
+
+
 def test_an_unknown_case_id_is_refused():
     with pytest.raises(SystemExit):
         main(["python -m evals", "gate", "--admin-url", ADMIN, "--cases", "n-999"])
