@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from app.contracts import IncomingMessage, RunRecord
 
@@ -80,7 +81,7 @@ def accept(connection: psycopg.Connection, message: IncomingMessage) -> IntakeRe
             run.channel,
             run.status,
             run.current_node,
-            psycopg.types.json.Jsonb(run.state),
+            Jsonb(run.state),
             run.attempt,
             run.max_attempts,
             run.next_retry_at,
