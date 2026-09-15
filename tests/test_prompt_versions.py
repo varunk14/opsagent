@@ -14,16 +14,32 @@ To take the snapshots again after a deliberate prompt change:
 and then review the diff like any other code change.
 """
 
+import re
 from collections.abc import Callable
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
+from app import tools
 from app.contracts import Classification, ExtractedRefund, Intent
-from app.graph.prompts import classify_prompt, extract_prompt, plan_prompt
+from app.graph import prompts as prompt_module
+from app.graph.prompts import (
+    PROMPT_VERSIONS,
+    PROMPTS_DIR,
+    TEMPLATES,
+    classify_prompt,
+    compute_versions,
+    extract_prompt,
+    load_template,
+    plan_prompt,
+    prompt_version,
+    run_prompt_version,
+)
 
 SNAPSHOTS = Path(__file__).resolve().parent / "snapshots" / "prompts"
+HEX12 = re.compile(r"^[0-9a-f]{12}$")
 
 SUBJECT = "Charged twice for order #4821"
 BODY = "Hi, I think I was charged twice for order #4821 last Tuesday.\n\nThanks,\nPriya"
@@ -99,3 +115,93 @@ def test_every_snapshot_belongs_to_a_scenario():
     stored = {path.stem for path in SNAPSHOTS.glob("*.txt")}
 
     assert stored == set(SCENARIOS)
+
+
+# --- versions -------------------------------------------------------------------
+
+
+def test_every_task_has_a_version():
+    """One version per TASK line, each twelve hex characters of a sha256."""
+    assert set(PROMPT_VERSIONS) == {"classify", "extract", "plan"}
+    for version in PROMPT_VERSIONS.values():
+        assert HEX12.match(version)
+
+
+def test_a_version_is_the_same_on_every_load():
+    assert compute_versions(TEMPLATES) == PROMPT_VERSIONS
+
+
+def test_the_templates_are_the_files_on_disk():
+    for task in PROMPT_VERSIONS:
+        assert (PROMPTS_DIR / f"{task}.txt").is_file()
+        assert TEMPLATES[task] == load_template(task)
+
+
+def test_each_template_opens_with_its_task_line():
+    """tests/fakes.py and the generation spans both key on this first line."""
+    for task, template in TEMPLATES.items():
+        assert template.startswith(f"TASK: {task}\n")
+
+
+def test_rendering_reads_the_template_on_disk(monkeypatch):
+    """A prompt rendered from anything but its template would carry the wrong version."""
+    monkeypatch.setitem(prompt_module.TEMPLATES, "classify", "TASK: classify\nMARKER $intents\n$customer_message")
+
+    assert "MARKER" in classify_prompt(SUBJECT, BODY)
+
+
+def test_changing_a_template_changes_only_that_version():
+    changed = compute_versions({**TEMPLATES, "plan": TEMPLATES["plan"] + "\nBe brief."})
+
+    assert changed["plan"] != PROMPT_VERSIONS["plan"]
+    assert changed["classify"] == PROMPT_VERSIONS["classify"]
+    assert changed["extract"] == PROMPT_VERSIONS["extract"]
+
+
+def test_a_tool_description_is_part_of_the_plan_version(monkeypatch):
+    """The model reads the tool descriptions too; a reworded one is a different prompt."""
+    reworded = tuple(
+        replace(tool, description=tool.description + " Really.") if tool.name == "get_order" else tool
+        for tool in tools.TOOLS
+    )
+    monkeypatch.setattr(tools, "TOOLS", reworded)
+
+    changed = compute_versions(TEMPLATES)
+
+    assert changed["plan"] != PROMPT_VERSIONS["plan"]
+    assert changed["classify"] == PROMPT_VERSIONS["classify"]
+    assert changed["extract"] == PROMPT_VERSIONS["extract"]
+
+
+def test_an_intent_definition_is_part_of_the_classify_version(monkeypatch):
+    monkeypatch.setattr(
+        prompt_module, "INTENT_DEFINITIONS", {**prompt_module.INTENT_DEFINITIONS, Intent.OTHER: "anything at all"}
+    )
+
+    changed = compute_versions(TEMPLATES)
+
+    assert changed["classify"] != PROMPT_VERSIONS["classify"]
+    assert changed["extract"] == PROMPT_VERSIONS["extract"]
+    assert changed["plan"] == PROMPT_VERSIONS["plan"]
+
+
+def test_a_missing_template_names_its_path():
+    with pytest.raises(FileNotFoundError) as refused:
+        load_template("no_such_task")
+
+    assert str(PROMPTS_DIR / "no_such_task.txt") in str(refused.value)
+
+
+def test_a_version_for_an_unknown_task_is_refused():
+    with pytest.raises(KeyError):
+        prompt_version("no_such_task")
+
+
+def test_the_run_version_moves_with_any_prompt():
+    """What the run records: one hash over all three, so any prompt change is visible on the run."""
+    assert HEX12.match(run_prompt_version())
+
+    changed = compute_versions({**TEMPLATES, "extract": TEMPLATES["extract"] + " "})
+
+    assert run_prompt_version(changed) != run_prompt_version()
+    assert run_prompt_version(PROMPT_VERSIONS) == run_prompt_version()
