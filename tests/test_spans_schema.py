@@ -11,6 +11,7 @@ savepoint: without one the first refusal would abort the transaction and every
 later statement would fail for that reason instead of its own.
 """
 
+import re
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -18,11 +19,12 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
+from app.tracing import KINDS
+
 pytestmark = pytest.mark.db
 
 STARTED = datetime(2026, 9, 15, 12, 0, tzinfo=UTC)
 ENDED = STARTED + timedelta(milliseconds=412)
-KINDS = ("span", "chain", "generation", "retriever", "embedding", "tool", "guardrail")
 COSTED = {"model": "llama3.1:8b", "input_tokens": 310, "output_tokens": 40, "cost_usd": "0.0000705"}
 
 
@@ -99,9 +101,18 @@ def test_only_known_kinds_and_statuses(db):
 
     refused(db, run_id, "spans_kind", kind="llm")
     refused(db, run_id, "spans_status", status="failed")
-    for number, kind in enumerate(KINDS, start=1):
+    for number, kind in enumerate(sorted(KINDS), start=1):
         costs = COSTED if kind == "generation" else {}
         insert(db, run_id, span_id=f"{number:016x}", kind=kind, **costs)
+
+
+def test_the_kinds_the_table_accepts_are_the_kinds_the_code_writes(db):
+    """Listed once in Python and once in SQL; this keeps the two the same list."""
+    (definition,) = db.execute(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'spans_kind'"
+    ).fetchone()
+
+    assert set(re.findall(r"'([a-z_]+)'", definition)) == KINDS
 
 
 def test_a_generation_is_always_costed(db):
