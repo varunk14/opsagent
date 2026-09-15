@@ -29,7 +29,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -222,7 +222,7 @@ def report(baseline: Baseline, inbox: Path, messages: int) -> str:
     rank = math.ceil(0.95 * baseline.runs)
     return f"""# Baseline — before any optimisation
 
-**Recorded:** {datetime.now(timezone.utc).date().isoformat()}
+**Recorded:** {datetime.now(UTC).date().isoformat()}
 **Model:** `{baseline.model}`, run locally through Ollama
 **Sample:** {baseline.runs} runs — {PASSES} passes over the {messages} messages in `{inbox}`
 **Settings:** one model for everything. No routing, no caching, no prompt
