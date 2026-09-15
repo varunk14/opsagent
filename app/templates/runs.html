@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Runs — OpsAgent{% endblock %}
+{% block content %}
+<h1>Runs</h1>
+{% if runs %}
+<table class="runs">
+  <thead>
+    <tr><th>Received</th><th>From</th><th>Subject</th><th>Status</th><th>Steps</th><th>Reference cost</th><th>Prompts</th></tr>
+  </thead>
+  <tbody>
+  {% for run in runs %}
+    <tr>
+      <td>{{ run.received_at.strftime("%Y-%m-%d %H:%M") }}</td>
+      <td>{{ run.sender }}</td>
+      <td><a href="/runs/{{ run.id }}">{{ run.subject or "(no subject)" }}</a></td>
+      <td>{{ run.status }}{% if run.failure_class %} ({{ run.failure_class }}){% endif %}</td>
+      <td>{{ run.steps }}</td>
+      <td>{{ run.cost_usd | money }}</td>
+      <td>{{ run.prompt_version or "" }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p>No runs yet.</p>
+{% endif %}
+{% endblock %}

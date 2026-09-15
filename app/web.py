@@ -1,10 +1,15 @@
 """
-The approvals screen: where a person approves or rejects what the guardrail would not.
+The local screen: approve or reject what the guardrail would not, and read what runs did.
 
 Local, and deliberately thin. It lists what app.approvals returns and records a
 decision with approvals.decide. It never loads the executor or the worker: an
 approved refund is paid by the next worker to claim the run, through the same
 keyed executor and ledger cap as everything else, never by this process.
+
+/runs lists the newest runs, and /runs/{id} shows one run's trace -- every tick,
+step and model call with its cost -- read from the spans table through
+app.traces, never from Langfuse. When OPSAGENT_LANGFUSE_PROJECT_URL names a
+Langfuse project on this machine, a run's page links to the same trace there.
 
 Everything shown came from a customer's email or a model's reading of one, so
 Jinja escapes all of it and no template turns that off. A decision is a POST
@@ -17,7 +22,7 @@ The person deciding is named by OPSAGENT_OPERATOR. Without it the screen still
 shows what is waiting, but refuses to decide.
 
 Run:  OPSAGENT_OPERATOR=asha .venv/bin/python -m app.web
-      then open http://127.0.0.1:8055/approvals
+      then open http://127.0.0.1:8055/approvals or http://127.0.0.1:8055/runs
 """
 
 import hmac
@@ -25,8 +30,11 @@ import os
 import secrets
 import sys
 from collections.abc import Awaitable, Callable
+from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import urlsplit
+from uuid import UUID
 
 import jinja2
 import uvicorn
@@ -38,11 +46,14 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from app.approvals import PendingApproval, decide, list_handed_over, list_pending
 from app.db import connect
 from app.guardrails import load, rupees
+from app.traces import TraceSpan, list_runs, trace_of
+from app.tracing import LOOPBACK_HOSTS, Attr
 
 HOST = "127.0.0.1"
 PORT = 8055
 ALLOWED_HOSTS = [HOST, "localhost"]
 CSRF_COOKIE = "opsagent_csrf"
+LANGFUSE_VAR = "OPSAGENT_LANGFUSE_PROJECT_URL"
 
 # Escaping is switched on for every template whatever its name, not left to the file extension.
 # A detail that was never recorded reads as that, not as Python's "None".
@@ -53,6 +64,16 @@ TEMPLATES = Jinja2Templates(
         finalize=lambda value: "not recorded" if value is None else value,
     )
 )
+
+
+def money(amount: Decimal | None) -> str:
+    """A reference cost exactly as recorded -- $0.0000045, not a rounded $0.00."""
+    if amount is None:
+        return ""
+    return "$" + format(amount.normalize(), "f")
+
+
+TEMPLATES.env.filters["money"] = money
 
 # Shown for any unhandled error. Fixed text: nothing about the cause reaches the page.
 FAILED_PAGE = (
@@ -75,6 +96,25 @@ SECURITY_HEADERS = {
 }
 
 DECISIONS = {"approve": True, "reject": False}
+
+# What a span did, in the order a person reads it, each with the label shown before it.
+# Only values the agent chose from its own lists -- never text a customer wrote.
+SHOWN = (
+    (Attr.OUTCOME, "ended"),
+    (Attr.ATTEMPT, "attempt"),
+    (Attr.INTENT, "intent"),
+    (Attr.CLASSIFICATION_CONFIDENCE, "confidence"),
+    (Attr.ORDER_ID_FOUND, "order id found"),
+    (Attr.AMOUNT_FOUND, "amount found"),
+    (Attr.PASSAGES, "passages"),
+    (Attr.TOOL, "tool"),
+    (Attr.PROPOSAL_CONFIDENCE, "confidence"),
+    (Attr.RESULT, "result"),
+    (Attr.APPROVAL_ID, "approval"),
+    (Attr.VERDICT, "guardrail"),
+    (Attr.REASON, "why"),
+    (Attr.FAILURE, "stopped"),
+)
 
 
 def approval_view(pending: PendingApproval) -> dict[str, Any]:
@@ -101,11 +141,61 @@ def approval_view(pending: PendingApproval) -> dict[str, Any]:
     }
 
 
-def create_app(dsn: str | None = None, operator: str | None = None) -> FastAPI:
+def span_view(node: TraceSpan, depth: int) -> dict[str, Any]:
+    """One trace row as the run page shows it. Plain values; the template escapes them."""
+    if node.kind == "generation":
+        cost = money(node.own_cost)
+    elif node.kind == "embedding":
+        cost = "not counted"  # embedding tokens are not in the run's cost yet; blank would read as free
+    else:
+        cost = ""
+    counted = node.input_tokens is not None and node.output_tokens is not None
+    did = [f"{label}: {node.attributes[key]}" for key, label in SHOWN if key in node.attributes]
+    if node.status == "error":
+        did.insert(0, f"failed: {node.status_message or 'no reason recorded'}")
+    return {
+        "depth": depth,
+        "name": node.name,
+        "error": node.status == "error",
+        "duration_ms": node.duration_ms,
+        "model": node.model or "",
+        "prompt_version": node.prompt_version or "",
+        "tokens": f"{node.input_tokens} in, {node.output_tokens} out" if counted else "",
+        "cost": cost,
+        "did": did,
+    }
+
+
+def trace_rows(roots: list[TraceSpan]) -> list[dict[str, Any]]:
+    """The trace as table rows, each parent before its children, each at its depth."""
+    rows: list[dict[str, Any]] = []
+    stack = [(0, node) for node in reversed(roots)]
+    while stack:
+        depth, node = stack.pop()
+        rows.append(span_view(node, depth))
+        stack.extend((depth + 1, child) for child in reversed(node.children))
+    return rows
+
+
+def langfuse_link_base(url: str | None) -> str | None:
+    """Where a run's trace can also be opened in Langfuse, or None. Only a Langfuse on this machine is linked."""
+    if url is None or not url.strip():
+        return None
+    parts = urlsplit(url.strip())
+    if parts.scheme != "http" or parts.hostname not in LOOPBACK_HOSTS:
+        raise ValueError(
+            "a Langfuse link must point at this machine (http://127.0.0.1 or http://localhost), "
+            f"not {parts.scheme}://{parts.hostname}"
+        )
+    return url.strip().rstrip("/")
+
+
+def create_app(dsn: str | None = None, operator: str | None = None, langfuse_project_url: str | None = None) -> FastAPI:
     """The screen, with a token of its own. `dsn` defaults to OPSAGENT_DATABASE_URL."""
+    langfuse = langfuse_link_base(langfuse_project_url)
     token = secrets.token_urlsafe(32)
     name = (operator or "").strip() or None
-    app = FastAPI(title="OpsAgent approvals", docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title="OpsAgent", docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
 
     @app.middleware("http")
@@ -173,6 +263,33 @@ def create_app(dsn: str | None = None, operator: str | None = None) -> FastAPI:
             {"limit": rupees(limits.auto_refund_limit_paise), "min_confidence": str(limits.min_confidence)},
         )
 
+    @app.get("/runs", response_class=HTMLResponse)
+    def runs(request: Request) -> Response:
+        with connect(dsn) as connection:
+            recent = list_runs(connection)
+        return page(request, "runs.html", {"runs": recent})
+
+    @app.get("/runs/{run_id}", response_class=HTMLResponse)
+    def run(request: Request, run_id: str) -> Response:
+        # Parsed before any connection is opened: an id that is not a run's never reaches the database.
+        try:
+            parsed = UUID(run_id)
+        except ValueError:
+            return message(request, "No such run.", 404)
+        with connect(dsn) as connection:
+            trace = trace_of(connection, parsed)
+        if trace is None:
+            return message(request, "No such run.", 404)
+        return page(
+            request,
+            "run.html",
+            {
+                "trace": trace,
+                "rows": trace_rows(trace.roots),
+                "langfuse_url": f"{langfuse}/traces/{parsed.hex}" if langfuse else None,
+            },
+        )
+
     return app
 
 
@@ -180,8 +297,9 @@ def main() -> int:  # pragma: no cover - serves until stopped
     operator = os.environ.get("OPSAGENT_OPERATOR", "").strip() or None
     if operator is None:
         print("  OPSAGENT_OPERATOR is not set: the screen shows what is waiting but will not record decisions")
-    print(f"  approvals screen on http://{HOST}:{PORT}/approvals")
-    uvicorn.run(create_app(operator=operator), host=HOST, port=PORT, log_level="warning")
+    print(f"  approvals on http://{HOST}:{PORT}/approvals, runs on http://{HOST}:{PORT}/runs")
+    app = create_app(operator=operator, langfuse_project_url=os.environ.get(LANGFUSE_VAR))
+    uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
     return 0
 
 

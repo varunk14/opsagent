@@ -20,10 +20,20 @@
   form { margin-top: .75rem; }
   textarea { width: 100%; box-sizing: border-box; }
   .warning { background: #fff4e5; border: 1px solid #f0b36b; padding: .75rem; border-radius: 4px; }
+  table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+  th, td { text-align: left; padding: .3rem .5rem; border-bottom: 1px solid #eee; vertical-align: top; }
+  th { color: #555; font-weight: 600; }
+  .note { color: #555; font-size: .9rem; }
+  tr[data-depth="0"] { background: #f3f3f3; font-weight: 600; }
+  tr[data-depth="1"] td.name { padding-left: 1.5rem; }
+  tr[data-depth="2"] td.name { padding-left: 3rem; }
+  tr[data-depth="3"] td.name { padding-left: 4.5rem; }
+  tr.error td { color: #9b1c1c; }
+  td.cost, td.ms, td.tokens { white-space: nowrap; }
 </style>
 </head>
 <body>
-<nav><a href="/approvals">Approvals</a><a href="/guardrails">Guardrails</a></nav>
+<nav><a href="/approvals">Approvals</a><a href="/guardrails">Guardrails</a><a href="/runs">Runs</a></nav>
 {% block content %}{% endblock %}
 </body>
 </html>
