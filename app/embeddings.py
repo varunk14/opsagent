@@ -39,8 +39,8 @@ def parse_embeddings(body: bytes, expected: int) -> list[list[float]]:
     """An Ollama /api/embed body as vectors, or a refusal saying what was wrong."""
     try:
         payload = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise ModelUnavailable(f"the embedding response was not JSON: {exc}") from exc
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as exc:
+        raise ModelUnavailable(f"the embedding response could not be read as JSON: {exc}") from exc
 
     vectors = payload.get("embeddings") if isinstance(payload, dict) else None
     if not isinstance(vectors, list):
