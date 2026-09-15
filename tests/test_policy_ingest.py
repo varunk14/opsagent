@@ -8,8 +8,8 @@ document replaces its own passages and leaves the others alone.
 
 import psycopg
 import pytest
-from app.policies import ingest, load_policies
 
+from app.policies import ingest, load_policies
 from tests.fakes import FakeEmbedder
 
 pytestmark = pytest.mark.db

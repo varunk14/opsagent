@@ -9,6 +9,7 @@ at the boundary, the same way model replies are.
 import json
 
 import pytest
+
 from app.embeddings import (
     DOCUMENT_PREFIX,
     EMBEDDING_DIMENSIONS,
@@ -19,7 +20,6 @@ from app.embeddings import (
     embed_query,
     parse_embeddings,
 )
-
 from app.llm import ModelUnavailable
 from tests.fakes import FakeEmbedder
 

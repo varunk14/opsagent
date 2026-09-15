@@ -16,6 +16,7 @@ from tests.fakes import (
     CLASSIFIED_DUPLICATE,
     EXTRACTED_4821,
     PROPOSED_LOOKUP,
+    FakeRetriever,
     ScriptedModel,
 )
 
@@ -57,11 +58,36 @@ def test_extract_does_not_ask_the_model_when_no_refund_is_in_question(intent):
     assert model.prompts == []
 
 
-def test_retrieve_returns_policy_without_a_model():
-    update = nodes.retrieve(classified(Intent.DUPLICATE_CHARGE))
+def test_retrieve_searches_with_the_customers_own_words():
+    retriever = FakeRetriever()
 
-    assert update["policy"]
-    assert all(isinstance(passage, str) for passage in update["policy"])
+    nodes.retrieve(classified(Intent.DUPLICATE_CHARGE), retriever)
+
+    assert "Charged twice for order #4821" in retriever.questions[0]
+    assert "I was charged twice." in retriever.questions[0]
+
+
+def test_retrieve_keeps_the_passages_and_where_they_came_from():
+    update = nodes.retrieve(classified(Intent.DUPLICATE_CHARGE), FakeRetriever())
+
+    assert update["policy"] == ["Duplicate payments — What we do\n\nThe duplicate amount is returned in full."]
+    assert update["policy_sources"] == ["duplicate-payments#1"]
+
+
+def test_retrieve_with_nothing_relevant_says_so():
+    update = nodes.retrieve(classified(Intent.OTHER), FakeRetriever(passages=[]))
+
+    assert update["policy"] == []
+    assert update["policy_sources"] == []
+
+
+def test_an_unreachable_embedding_model_is_an_outage_not_an_answer():
+    class Down:
+        def search(self, question: str):
+            raise ModelUnavailable("embedding model down")
+
+    with pytest.raises(ModelUnavailable):
+        nodes.retrieve(classified(Intent.DUPLICATE_CHARGE), Down())
 
 
 def test_plan_returns_a_checked_proposal():
@@ -102,7 +128,7 @@ def test_a_step_without_a_classification_escalates_instead_of_crashing(step):
     state = {**MESSAGE, "extraction": None, "policy": ["p"]}
     call = getattr(nodes, step)
 
-    update = call(state) if step == "retrieve" else call(state, ScriptedModel())
+    update = call(state, FakeRetriever()) if step == "retrieve" else call(state, ScriptedModel())
 
     assert update["proposal"].tool == "escalate_to_human"
     assert "classification" in update["failure"]

@@ -75,3 +75,28 @@ def vector_for(text: str, dimensions: int = 768) -> list[float]:
         values.extend((byte - 127.5) / 127.5 for byte in digest)
         counter += 1
     return values[:dimensions]
+
+
+class FakeRetriever:
+    """Returns fixed policy passages and remembers every question it was asked."""
+
+    def __init__(self, passages=None):
+        from app.graph.state import PolicyPassage
+
+        self.passages = (
+            passages
+            if passages is not None
+            else [
+                PolicyPassage(
+                    document="duplicate-payments",
+                    chunk_index=1,
+                    text="Duplicate payments — What we do\n\nThe duplicate amount is returned in full.",
+                    distance=0.33,
+                )
+            ]
+        )
+        self.questions: list[str] = []
+
+    def search(self, question: str):
+        self.questions.append(question)
+        return list(self.passages)
