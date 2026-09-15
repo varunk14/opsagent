@@ -31,8 +31,11 @@ tick or holds it up. The resource names the service and nothing else: a worker's
 name and pid are what `locked_by` holds, and they stay in the database.
 """
 
+import argparse
 import base64
+import os
 import re
+import secrets
 import sys
 import threading
 from collections.abc import Iterator, Mapping, Sequence
@@ -41,9 +44,10 @@ from contextvars import ContextVar
 from dataclasses import dataclass, fields
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import psycopg
 import requests
@@ -463,3 +467,98 @@ def discard(run_id: UUID) -> None:
     """Drop what a tick that will never commit was holding, so its next tick does not write it."""
     if _installed is not None:
         _installed.recorder.take_with_dropped(run_id)
+
+
+# --- Langfuse on this machine ------------------------------------------------------------
+
+PROJECT_URL_VAR = "OPSAGENT_LANGFUSE_PROJECT_URL"
+LANGFUSE_URL = "http://127.0.0.1:3000"  # where compose.tracing.yml publishes the UI
+LANGFUSE_PROJECT_ID = "opsagent-local"  # the project compose.tracing.yml creates
+# Every secret compose.tracing.yml requires. Each is generated when the env file lacks it.
+LANGFUSE_SECRETS = (
+    "LANGFUSE_POSTGRES_PASSWORD",
+    "LANGFUSE_CLICKHOUSE_PASSWORD",
+    "LANGFUSE_MINIO_PASSWORD",
+    "LANGFUSE_REDIS_PASSWORD",
+    "LANGFUSE_NEXTAUTH_SECRET",
+    "LANGFUSE_SALT",
+    "LANGFUSE_ENCRYPTION_KEY",
+    "LANGFUSE_PUBLIC_KEY",
+    "LANGFUSE_SECRET_KEY",
+)
+
+
+def generated_secrets() -> dict[str, str]:
+    """Fresh values for every Langfuse secret: hex and UUIDs only, so the file is safe to source from a shell."""
+    return {
+        "LANGFUSE_POSTGRES_PASSWORD": secrets.token_hex(24),
+        "LANGFUSE_CLICKHOUSE_PASSWORD": secrets.token_hex(24),
+        "LANGFUSE_MINIO_PASSWORD": secrets.token_hex(24),
+        "LANGFUSE_REDIS_PASSWORD": secrets.token_hex(24),
+        "LANGFUSE_NEXTAUTH_SECRET": secrets.token_hex(32),
+        "LANGFUSE_SALT": secrets.token_hex(32),
+        "LANGFUSE_ENCRYPTION_KEY": secrets.token_hex(32),  # Langfuse requires exactly 256 bits, as hex
+        "LANGFUSE_PUBLIC_KEY": f"pk-lf-{uuid4()}",
+        "LANGFUSE_SECRET_KEY": f"sk-lf-{uuid4()}",
+    }
+
+
+def env_settings(text: str) -> dict[str, str]:
+    """The NAME=value lines of an env file. Comments and anything else are skipped."""
+    found: dict[str, str] = {}
+    for line in text.splitlines():
+        name, separator, value = line.partition("=")
+        if separator and name.strip() and not name.lstrip().startswith("#"):
+            found[name.strip()] = value.strip()
+    return found
+
+
+def write_env(path: Path) -> list[str]:
+    """
+    Add what Langfuse on this machine needs to the env file at `path`; return the names added.
+
+    That is every secret compose.tracing.yml requires, generated fresh, and the settings a
+    worker and the screen use to reach it. A name the file already has is left exactly as
+    it is, and the worker's keys are taken from the Langfuse keys it already has: nothing
+    is rewritten, only appended. A file this creates is readable by its owner only.
+    """
+    text = path.read_text() if path.exists() else ""
+    present = env_settings(text)
+    values = {**generated_secrets(), **present}
+    wanted = {
+        **{name: values[name] for name in LANGFUSE_SECRETS},
+        ENDPOINT_VAR: f"{LANGFUSE_URL}/api/public/otel",
+        PUBLIC_KEY_VAR: values["LANGFUSE_PUBLIC_KEY"],
+        SECRET_KEY_VAR: values["LANGFUSE_SECRET_KEY"],
+        PROJECT_URL_VAR: f"{LANGFUSE_URL}/project/{LANGFUSE_PROJECT_ID}",
+    }
+    added = [name for name in wanted if name not in present]
+    if not added:
+        return []
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(descriptor, "a") as file:
+        file.write(("\n" if text and not text.endswith("\n") else "") + "".join(f"{name}={wanted[name]}\n" for name in added))
+    return added
+
+
+def main(argv: Sequence[str]) -> int:
+    """`python -m app.tracing env [--path .env]`: the settings for Langfuse on this machine."""
+    parser = argparse.ArgumentParser(prog="python -m app.tracing", description="Tracing settings for this machine.")
+    commands = parser.add_subparsers(dest="command", required=True)
+    env = commands.add_parser("env", help="add fresh Langfuse secrets and the worker's settings, changing nothing already there")
+    env.add_argument("--path", type=Path, default=Path(".env"), help="the env file (default: .env)")
+    arguments = parser.parse_args(argv)
+
+    added = write_env(arguments.path)
+    # Names, never values: every value here but the public key is a secret.
+    if added:
+        print(f"  added to {arguments.path}: {', '.join(added)}")
+    else:
+        print(f"  {arguments.path} already has every setting; nothing changed")
+    print(f"  Langfuse public key: {env_settings(arguments.path.read_text())[PUBLIC_KEY_VAR]}")
+    print(f"  start Langfuse with `docker compose -f compose.tracing.yml up -d`, then open {LANGFUSE_URL}")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(main(sys.argv[1:]))
