@@ -11,6 +11,10 @@ What a reply said and what it cost in tokens is kept; how long it took is not. L
 belongs to the machine that recorded it, would rewrite every line of the file on every
 recording, and says nothing true on replay -- so a replayed reply reports none.
 
+Recording can reuse what is already recorded instead of asking again. That is safe
+because, at temperature 0 with a fixed seed, the model gives the same reply to the same
+prompt byte for byte; it is what lets a long recording that stopped partway carry on.
+
 The file holds hashes of prompts and texts, never the prompts themselves. It does hold
 what the model said, and a reply can repeat a customer's words -- which is acceptable
 only because every golden case is fictional. It is saved sorted, so recording the same
@@ -89,6 +93,10 @@ class RecordedReply:
     completion_tokens: int
 
 
+def replayed(found: RecordedReply) -> Reply:
+    return Reply(text=found.text, prompt_tokens=found.prompt_tokens, completion_tokens=found.completion_tokens, latency_ms=0)
+
+
 class Recordings:
     """Every recorded reply and vector, in memory, with the file they are kept in."""
 
@@ -163,25 +171,25 @@ class RecordedModel:
                 f"no recorded {self.model} reply for a {task_of(prompt)} prompt ({key[:12]}): a prompt or a case "
                 f"changed since it was recorded; run `{RECORD_COMMAND}` on a machine with the model"
             )
-        return Reply(
-            text=found.text,
-            prompt_tokens=found.prompt_tokens,
-            completion_tokens=found.completion_tokens,
-            latency_ms=0,
-        )
+        return replayed(found)
 
 
 class RecordingModel:
-    """Asks the real model, and keeps what it said."""
+    """Asks the real model, and keeps what it said. With `reuse`, a prompt already recorded is not asked again."""
 
-    def __init__(self, inner: Model, recordings: Recordings, model: str | None = None) -> None:
+    def __init__(self, inner: Model, recordings: Recordings, model: str | None = None, reuse: bool = False) -> None:
         self.inner = inner
         self.recordings = recordings
         self.model = model or str(getattr(inner, "model", DEFAULT_MODEL))
+        self.reuse = reuse
 
     def generate(self, prompt: str) -> Reply:
+        key = reply_key(self.model, prompt)
+        found = self.recordings.replies.get(key) if self.reuse else None
+        if found is not None:
+            return replayed(found)
         reply = self.inner.generate(prompt)
-        self.recordings.replies[reply_key(self.model, prompt)] = RecordedReply(
+        self.recordings.replies[key] = RecordedReply(
             model=self.model,
             task=task_of(prompt),
             text=reply.text,
@@ -213,15 +221,18 @@ class RecordedEmbedder:
 
 
 class RecordingEmbedder:
-    """Asks the real embedding model, and keeps every vector."""
+    """Asks the real embedding model, and keeps every vector. With `reuse`, only texts not yet recorded are asked."""
 
-    def __init__(self, inner: Embedder, recordings: Recordings) -> None:
+    def __init__(self, inner: Embedder, recordings: Recordings, reuse: bool = False) -> None:
         self.inner = inner
         self.recordings = recordings
         self.model = str(getattr(inner, "model", EMBEDDING_MODEL))
+        self.reuse = reuse
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        vectors = self.inner.embed(texts)
-        for text, vector in zip(texts, vectors, strict=True):
-            self.recordings.vectors[embedding_key(self.model, text)] = (self.model, pack(vector))
-        return vectors
+        keys = [embedding_key(self.model, text) for text in texts]
+        wanted = [text for text, key in zip(texts, keys, strict=True) if not (self.reuse and key in self.recordings.vectors)]
+        if wanted:
+            for text, vector in zip(wanted, self.inner.embed(wanted), strict=True):
+                self.recordings.vectors[embedding_key(self.model, text)] = (self.model, pack(vector))
+        return [unpack(self.recordings.vectors[key][1]) for key in keys]

@@ -5,6 +5,10 @@ The evaluation commands.
     python -m evals gate      anywhere, with no model: replay, score, compare with the committed baseline
     python -m evals accept    after a deliberate change: write the baseline and scoreboard the recordings score
 
+`record` reuses whatever is already recorded, so a recording that stopped partway carries on
+where it was; `--fresh` starts again from nothing, which is what a changed prompt or model needs.
+Whatever was recorded is saved even when the run fails.
+
 `gate` fails -- exit status 1, every reason printed -- when a measure is worse than the
 committed baseline, when anything is unsafe, when a prompt or case changed since recording,
 or when the committed scoreboard no longer says what the recordings score. There is no
@@ -71,15 +75,25 @@ def record(
     embedder: Embedder,
     recordings_path: Path = RECORDINGS,
     model_name: str = DEFAULT_MODEL,
+    fresh: bool = False,
 ) -> list[CaseResult]:
-    """Run `cases` with a live model, adding what it said to the recordings at `recordings_path`."""
-    recordings = Recordings.load(recordings_path)
-    with scratch_database(admin_url) as dsn:
-        results = run_cases(
-            dsn, cases, RecordingModel(model, recordings, model=model_name), RecordingEmbedder(embedder, recordings)
-        )
-    recordings.save(recordings_path)
-    return results
+    """
+    Run `cases` with a live model and keep what it said, at `recordings_path`.
+
+    What is already recorded is reused rather than asked again, unless `fresh`. What was
+    recorded is saved even if the run stops partway, so a long recording can be run again.
+    """
+    recordings = Recordings() if fresh else Recordings.load(recordings_path)
+    try:
+        with scratch_database(admin_url) as dsn:
+            return run_cases(
+                dsn,
+                cases,
+                RecordingModel(model, recordings, model=model_name, reuse=not fresh),
+                RecordingEmbedder(embedder, recordings, reuse=not fresh),
+            )
+    finally:
+        recordings.save(recordings_path)
 
 
 def replay(
@@ -158,6 +172,8 @@ def main(argv: list[str]) -> int:
         command.add_argument("--recordings", type=Path, default=RECORDINGS)
         command.add_argument("--baseline", type=Path, default=BASELINE)
         command.add_argument("--scoreboard", type=Path, default=SCOREBOARD)
+        if name == "record":
+            command.add_argument("--fresh", action="store_true", help="discard what is recorded and ask the model again")
     arguments = parser.parse_args(argv[1:])
 
     everything = {case.id: case for case in load_cases()}
@@ -170,7 +186,9 @@ def main(argv: list[str]) -> int:
         cases = [everything[case_id] for case_id in wanted]
 
     if arguments.command == "record":  # pragma: no cover - needs Ollama and its models
-        results = record(arguments.admin_url, cases, Ollama(), OllamaEmbedder(), arguments.recordings)
+        results = record(
+            arguments.admin_url, cases, Ollama(), OllamaEmbedder(), arguments.recordings, fresh=arguments.fresh
+        )
         print(f"  recorded {len(results)} case(s) into {arguments.recordings}")
         return 0
     if arguments.command == "accept":
