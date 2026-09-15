@@ -23,7 +23,7 @@ not run are all handed to a person instead of executed.
 A model or policy store that cannot be reached marks the run failed, charged for
 the calls that completed and keeping every committed step, and schedules it for
 another attempt after a backoff delay -- until its attempts run out and it is
-marked dead. A crash leaves the run marked
+marked dead, with a dead letter saying why (app/dead_letters.py). A crash leaves the run marked
 running with its committed steps intact. Once its lock is older than
 LOCK_TIMEOUT another worker reclaims it, spending an attempt, and carries on
 from the last committed step; on its last attempt it is marked dead instead.
@@ -83,11 +83,18 @@ NOT_RUN_HERE = frozenset({"search_policy"})
 # Every committed step refreshes it, so only a worker that has gone quiet loses it.
 LOCK_TIMEOUT = timedelta(minutes=5)
 
-# A run whose worker went quiet on its last attempt is not handed out again.
+# A run whose worker went quiet on its last attempt is not handed out again; it is
+# dead-lettered in the same statement, so no dead run is ever without its letter.
 BURY_EXPIRED = """
-    UPDATE runs
-       SET status = 'dead', failure_class = 'lock_expired', locked_by = NULL, locked_at = NULL
-     WHERE status = 'running' AND locked_at < now() - %s AND attempt >= max_attempts
+    WITH buried AS (
+        UPDATE runs
+           SET status = 'dead', failure_class = 'lock_expired', locked_by = NULL, locked_at = NULL
+         WHERE status = 'running' AND locked_at < now() - %s AND attempt >= max_attempts
+        RETURNING id, idempotency_key, state
+    )
+    INSERT INTO dead_letters (kind, run_id, idempotency_key, payload, reason, failure_class)
+    SELECT 'run', id, idempotency_key, state, 'lock expired on its last attempt', 'lock_expired'
+      FROM buried
 """
 
 CLAIM = """
@@ -127,15 +134,23 @@ PARK = """
      WHERE id = %s AND locked_by = %s
 """
 
-# One statement decides retry or dead, so nothing can change attempt in between.
+# One statement decides retry or dead, so nothing can change attempt in between,
+# and a run that dies is dead-lettered by that same statement.
 RELEASE = """
-    UPDATE runs
-       SET status = CASE WHEN attempt >= max_attempts THEN 'dead' ELSE 'failed' END,
-           failure_class = %s,
-           next_retry_at = CASE WHEN attempt >= max_attempts THEN NULL ELSE now() + %s END,
-           current_node = 'intake', locked_by = NULL, locked_at = NULL,
-           cost_usd = cost_usd + %s
-     WHERE id = %s AND status = 'running' AND locked_by = %s
+    WITH released AS (
+        UPDATE runs
+           SET status = CASE WHEN attempt >= max_attempts THEN 'dead' ELSE 'failed' END,
+               failure_class = %s,
+               next_retry_at = CASE WHEN attempt >= max_attempts THEN NULL ELSE now() + %s END,
+               current_node = 'intake', locked_by = NULL, locked_at = NULL,
+               cost_usd = cost_usd + %s
+         WHERE id = %s AND status = 'running' AND locked_by = %s
+        RETURNING id, status, idempotency_key, state, failure_class
+    )
+    INSERT INTO dead_letters (kind, run_id, idempotency_key, payload, reason, failure_class)
+    SELECT 'run', id, idempotency_key, state, 'out of attempts', failure_class
+      FROM released
+     WHERE status = 'dead'
 """
 
 
