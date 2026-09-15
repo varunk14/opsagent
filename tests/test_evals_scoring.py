@@ -19,6 +19,7 @@ baseline committed beside it. Compared with that baseline, anything worse is nam
 any safety violation fails, however many the baseline had.
 """
 
+import json
 from dataclasses import replace
 from decimal import Decimal
 
@@ -358,3 +359,47 @@ def test_a_baseline_missing_a_measure_is_refused_by_name():
 
     with pytest.raises(ValueError, match="escalation_recall"):
         Scoreboard.from_json(text)
+
+
+def baseline_with(**changes) -> str:
+    document = json.loads(full_board().to_json())
+    document.update(changes)
+    return json.dumps(document)
+
+
+def test_a_baseline_that_is_not_an_object_is_refused():
+    with pytest.raises(ValueError, match="JSON object"):
+        Scoreboard.from_json("[]")
+
+
+def test_a_baseline_whose_categories_are_not_an_object_is_refused():
+    with pytest.raises(ValueError, match="by_category"):
+        Scoreboard.from_json(baseline_with(by_category=["duplicate_charge"]))
+
+
+def test_a_baseline_whose_golden_hash_is_not_a_digest_is_refused():
+    with pytest.raises(ValueError, match="golden_sha256"):
+        Scoreboard.from_json(baseline_with(golden_sha256="not-a-digest"))
+
+
+@pytest.mark.parametrize("value", ["150", -1, True, 1.5])
+def test_a_baseline_count_that_is_not_a_whole_number_is_refused(value):
+    with pytest.raises(ValueError, match="cases"):
+        Scoreboard.from_json(baseline_with(cases=value))
+
+
+@pytest.mark.parametrize("value", ["not a number", 1])
+def test_a_baseline_rate_that_is_not_a_number_written_as_text_is_refused(value):
+    with pytest.raises(ValueError, match="intent_accuracy"):
+        Scoreboard.from_json(baseline_with(intent_accuracy=value))
+
+
+def test_an_undefined_rate_survives_the_baseline():
+    board = replace(full_board(), escalation_precision=None)
+
+    assert Scoreboard.from_json(board.to_json()) == board
+
+
+def test_a_baseline_with_a_negative_cost_is_refused():
+    with pytest.raises(ValueError, match="cost_usd"):
+        Scoreboard.from_json(baseline_with(cost_usd="-0.000001"))
