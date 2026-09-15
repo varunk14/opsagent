@@ -355,3 +355,52 @@ def test_an_outage_charge_is_not_rounded_apart_from_the_rest_of_the_run(fresh_da
     spans = spans_of(fresh_database, run_id)
     assert calls_cost(spans) == Decimal("0.000001")
     assert row(fresh_database, run_id)["cost_usd"] == Decimal("0.000001")
+
+
+# --- found by mutation checks: every way an act can end is named for what happened -----
+
+
+def test_a_refund_the_ledger_refuses_is_named_for_the_refusal(fresh_database, exported):
+    """Allowed by a raised limit, refused by the ledger cap: neither a hand-over nor a refund."""
+    from tests.test_approval_path import limit
+
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    limit(fresh_database, 1_000_000)
+
+    work(fresh_database, refund_model(800_000))
+
+    refund = [span for span in spans_of(fresh_database, run_id) if span["name"] == "act"][-1]["attributes"]
+    assert (refund["opsagent.tool"], refund["opsagent.result"]) == ("issue_refund", "refused by the ledger")
+
+
+def test_an_approved_refund_the_ledger_refuses_is_named_for_the_refusal(fresh_database, exported):
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    work(fresh_database, refund_model(800_000))
+    decide_on(fresh_database, run_id, approved=True)
+
+    work(fresh_database, MustNotBeAsked())
+
+    spans = spans_of(fresh_database, run_id)
+    payment = ticks(spans)[-1]
+    (act,) = children(spans, payment)
+    assert act["attributes"]["opsagent.result"] == "refused by the ledger"
+    assert payment["attributes"]["opsagent.outcome"] == "waiting_approval"
+
+
+def test_a_run_deferred_too_often_names_the_hand_over_on_its_act(fresh_database, exported):
+    from tests.test_rate_limit import make_due
+    from tests.test_run_agent import graph_of
+
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    past_lookups(fresh_database, PRIYA, agent.RATE_LIMIT)
+    work(fresh_database, happy_model())
+    for _ in range(agent.MAX_DEFERRALS):
+        make_due(fresh_database, run_id)
+        with psycopg.connect(fresh_database) as connection:
+            work_next(connection, graph_of(ScriptedModel(plan=PROPOSED_LOOKUP)))
+
+    last = [span for span in spans_of(fresh_database, run_id) if span["name"] == "act"][-1]["attributes"]
+    assert (last["opsagent.tool"], last["opsagent.result"]) == ("escalate_to_human", "handed to a person")
