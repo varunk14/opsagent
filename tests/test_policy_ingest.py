@@ -141,3 +141,37 @@ def test_the_repository_policies_ingest_cleanly(fresh_database, tmp_path):
         summary = ingest(connection, FakeEmbedder(), policies)
 
     assert summary.added >= len(policies)
+
+
+def test_two_ingests_at_once_do_not_collide(fresh_database):
+    """
+    Found in review: overlapping deploys both saw the documents as changed and
+    one crashed on the unique index. The second must wait, then find nothing to do.
+    """
+    import threading
+    import time
+
+    class SlowEmbedder(FakeEmbedder):
+        def embed(self, texts):
+            time.sleep(0.3)
+            return super().embed(texts)
+
+    errors: list[Exception] = []
+    summaries = []
+
+    def deploy():
+        try:
+            with psycopg.connect(fresh_database) as connection:
+                summaries.append(ingest(connection, SlowEmbedder(), POLICIES))
+        except Exception as exc:  # noqa: BLE001 - collected and asserted below
+            errors.append(exc)
+
+    deploys = [threading.Thread(target=deploy) for _ in range(2)]
+    for thread in deploys:
+        thread.start()
+    for thread in deploys:
+        thread.join()
+
+    assert errors == []
+    assert sorted(summary.added for summary in summaries) == [0, 3]
+    assert len(rows(fresh_database)) == 3

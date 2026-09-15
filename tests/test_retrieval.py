@@ -9,10 +9,10 @@ tests/test_policy_search_real.py.
 
 import psycopg
 import pytest
-from app.retrieval import MAX_QUERY_CHARS, PolicyRetriever
 
 from app.embeddings import QUERY_PREFIX
 from app.policies import ingest
+from app.retrieval import MAX_QUERY_CHARS, PolicyRetriever
 
 pytestmark = pytest.mark.db
 

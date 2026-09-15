@@ -83,3 +83,9 @@ def test_the_client_defaults_to_local_nomic():
 
     assert client.model == EMBEDDING_MODEL == "nomic-embed-text"
     assert client.endpoint == "http://localhost:11434/api/embed"
+
+
+def test_absurdly_nested_json_is_refused_not_crashed():
+    """A RecursionError would escape the refusal path this module promises."""
+    with pytest.raises(ModelUnavailable, match="JSON"):
+        parse_embeddings(b'{"embeddings":' + b"[" * 200_000 + b"]" * 200_000 + b"}", expected=1)

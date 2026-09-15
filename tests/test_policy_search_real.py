@@ -14,10 +14,10 @@ import os
 
 import psycopg
 import pytest
-from app.retrieval import PolicyRetriever
 
 from app.embeddings import OllamaEmbedder
 from app.policies import POLICY_DIR, ingest, load_policies
+from app.retrieval import PolicyRetriever
 
 pytestmark = [
     pytest.mark.db,

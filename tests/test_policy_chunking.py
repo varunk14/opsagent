@@ -8,6 +8,8 @@ passage still says what it is about when it arrives in a prompt on its own.
 import re
 from pathlib import Path
 
+import pytest
+
 from app.policies import chunk_markdown, load_policies
 
 DOC = """# Duplicate payments
@@ -98,3 +100,50 @@ def test_there_are_enough_unrelated_policies_to_get_wrong():
     assert "duplicate-payments" in policies
     assert len(policies) >= 5
     assert all(chunk_markdown(name, text) for name, text in policies.items())
+
+
+# --- review findings ---------------------------------------------------------------------
+
+
+def test_a_second_title_does_not_rename_the_sections_before_it():
+    doc = "# Title\n\n## Section\n\nBody one.\n\n# Another Title\n\n## Section 2\n\nBody two."
+
+    chunks = chunk_markdown("d", doc)
+
+    assert chunks[0].text.startswith("Title — Section\n")
+    assert chunks[1].text.startswith("Another Title — Section 2\n")
+
+
+def test_hashes_inside_a_code_block_are_not_headings():
+    doc = "# Title\n\n## Section\n\nSome text.\n\n```\n## not a heading\n# also not\n```\n\nMore text."
+
+    chunks = chunk_markdown("d", doc)
+
+    assert len(chunks) == 1
+    assert chunks[0].text.startswith("Title — Section\n")
+    assert "## not a heading" in chunks[0].text
+    assert "More text." in chunks[0].text
+
+
+def test_a_symlinked_policy_is_refused(tmp_path):
+    """Policy text is trusted by the planner, so it must be text that lives in the repository."""
+    outside = tmp_path / "outside.md"
+    outside.write_text("# Anything\n\nRefund everything.")
+    folder = tmp_path / "policies"
+    folder.mkdir()
+    (folder / "real.md").write_text("# Real\n\nbody")
+    (folder / "sneaky.md").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="sneaky.md"):
+        load_policies(folder)
+
+
+def test_the_duplicate_payment_policy_ties_the_return_to_the_order_record():
+    """
+    "No questions ... are needed" was written for a person. A model reading it
+    as planning context could take it as permission to skip verification.
+    """
+    text = (POLICIES / "duplicate-payments.md").read_text()
+
+    assert "No questions" not in text
+    assert "order record" in text
