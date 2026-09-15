@@ -350,6 +350,54 @@ def test_a_generation_row_is_refused_without_its_cost(db, exported):
         record_spans(db, run_id)
 
 
+# --- found by mutation checks ------------------------------------------------------
+
+
+def test_a_span_from_another_trace_that_ends_inside_a_run_is_not_held_for_it(tracing, exported):
+    """Only the run's own trace is held; a stray span ending in its context would be written under the wrong run."""
+    stray = tracer().start_span("housekeeping")
+    with run_context(RUN):
+        stray.end()
+
+    assert tracing.recorder.take(RUN) == []
+
+
+def test_a_parent_comes_before_a_child_that_started_in_the_same_instant(exported):
+    """The child ends first, so it is exported first; the rows must still read parent, then child."""
+    instant = 1_757_937_600_000_000_000
+    with run_context(RUN), tracer().start_as_current_span("tick", start_time=instant, end_on_exit=False) as parent:
+        child = tracer().start_span("classify", start_time=instant)
+        child.end(end_time=instant + 1_000)
+        parent.end(end_time=instant + 2_000)
+
+    assert [span.name for span in exported.get_finished_spans()] == ["classify", "tick"]
+    assert [row.name for row in rows_for(exported.get_finished_spans())] == ["tick", "classify"]
+
+
+def test_an_observation_type_the_table_does_not_know_is_recorded_as_a_plain_span(exported):
+    """As Langfuse does: a mistyped type must not abort the transaction that pays a refund."""
+    with run_context(RUN), tracer().start_as_current_span("generate") as span:
+        span.set_attribute(Attr.TYPE, "llm")
+
+    (row,) = rows_for(exported.get_finished_spans())
+
+    assert row.kind == "span"
+    assert row.attributes[Attr.TYPE] == "llm"
+
+
+@pytest.mark.parametrize("base", ["http://127.0.0.1:3000/api/public/otel", "http://127.0.0.1:3000/api/public/otel/"])
+def test_the_endpoint_setting_is_langfuses_otlp_base_and_the_traces_path_is_added(base):
+    environ = {
+        "OPSAGENT_OTLP_ENDPOINT": base,
+        "OPSAGENT_LANGFUSE_PUBLIC_KEY": "pk-lf-x",
+        "OPSAGENT_LANGFUSE_SECRET_KEY": "sk-lf-y",
+    }
+
+    exporter = exporter_from_env(environ)
+
+    assert exporter._endpoint == "http://127.0.0.1:3000/api/public/otel/v1/traces"
+
+
 def test_record_spans_writes_nothing_when_tracing_is_not_installed(monkeypatch):
     """A process that never set tracing up has nothing to write, and must not fail for it."""
     from app import tracing as module
