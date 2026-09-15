@@ -1,0 +1,333 @@
+"""
+Tracing: every run is one OpenTelemetry trace, recorded with the steps it describes.
+
+Three decisions shape this module.
+
+The trace id is the run's id. A run is worked in ticks, by whichever worker claims
+it, sometimes days apart around an approval. Taking each tick's trace id from the
+run's UUID -- both are 128 bits -- puts all of it in one trace without passing
+anything between processes.
+
+Spans are recorded where the steps are. A processor holds each finished span under
+its run, and the driver writes them with record_spans in the transaction that commits
+the step. A tick that never commits -- a lost claim, a crash -- leaves no spans, just
+as it leaves no steps, and `discard` drops what it held.
+
+A copy goes to Langfuse, and only on this machine. The exporter exists only when
+OPSAGENT_OTLP_ENDPOINT is set, refuses any host but 127.0.0.1 or localhost, and sends
+from a background batch with a short timeout, so a Langfuse that is down never raises
+into a tick or holds it up. The resource names the service and nothing else: a
+worker's host name and pid are what `locked_by` holds, and they stay in the database.
+"""
+
+import base64
+import threading
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import astuple, dataclass
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from typing import Any
+from urllib.parse import urlsplit
+from uuid import UUID
+
+import psycopg
+from opentelemetry import trace
+from opentelemetry.context import Context
+from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import ReadableSpan, Span, SpanProcessor, TracerProvider
+from opentelemetry.sdk.trace.export import (
+    BatchSpanProcessor,
+    SimpleSpanProcessor,
+    SpanExporter,
+)
+from opentelemetry.sdk.trace.id_generator import IdGenerator, RandomIdGenerator
+from opentelemetry.trace import StatusCode
+from psycopg.types.json import Jsonb
+
+SERVICE_NAME = "opsagent"
+TRACER_NAME = "opsagent"
+
+ENDPOINT_VAR = "OPSAGENT_OTLP_ENDPOINT"
+PUBLIC_KEY_VAR = "OPSAGENT_LANGFUSE_PUBLIC_KEY"
+SECRET_KEY_VAR = "OPSAGENT_LANGFUSE_SECRET_KEY"
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost"})
+# Long enough for a local Langfuse under load, short enough that shutting a worker down stays quick.
+EXPORT_TIMEOUT_SECONDS = 5
+
+# What the spans table accepts. Any other type is recorded as a plain span, as Langfuse
+# itself does, so a mistyped attribute can never abort the transaction that pays a refund.
+KINDS = frozenset({"span", "chain", "generation", "retriever", "embedding", "tool", "guardrail"})
+
+
+class Attr:
+    """Span attribute names: Langfuse's own where Langfuse reads one (checked against 4.36.1), ours otherwise."""
+
+    TYPE = "langfuse.observation.type"
+    TRACE_NAME = "langfuse.trace.name"
+    MODEL = "gen_ai.request.model"
+    INPUT_TOKENS = "gen_ai.usage.input_tokens"
+    OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
+    # Langfuse reads cost as JSON; the exact decimal string is ours, and is what the table stores.
+    COST_DETAILS = "langfuse.observation.cost_details"
+    COST_USD = "opsagent.cost_usd"
+    # Filterable in Langfuse under metadata, and kept verbatim under our own name.
+    PROMPT_VERSION = "opsagent.prompt_version"
+    PROMPT_VERSION_METADATA = "langfuse.observation.metadata.prompt_version"
+    LATENCY_MS = "opsagent.latency_ms"
+
+
+_current_run: ContextVar[UUID | None] = ContextVar("opsagent_current_run", default=None)
+
+
+@contextmanager
+def run_context(run_id: UUID) -> Iterator[None]:
+    """Everything traced inside belongs to this run's trace."""
+    token = _current_run.set(run_id)
+    try:
+        yield
+    finally:
+        _current_run.reset(token)
+
+
+class RunTraceIds(IdGenerator):
+    """A trace started inside run_context takes the run's id; any other trace gets a random one."""
+
+    def __init__(self) -> None:
+        self._random = RandomIdGenerator()
+
+    def generate_span_id(self) -> int:
+        return self._random.generate_span_id()
+
+    def generate_trace_id(self) -> int:
+        run_id = _current_run.get()
+        return run_id.int if run_id is not None else self._random.generate_trace_id()
+
+
+class RunSpanRecorder(SpanProcessor):
+    """
+    Holds each finished span of a run until the driver writes it or drops it.
+
+    Only spans that end inside run_context, in their run's own trace, are held, so
+    tracing outside a run cannot grow this without bound.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._held: dict[int, list[ReadableSpan]] = {}
+
+    def on_start(self, span: Span, parent_context: Context | None = None) -> None:
+        return None
+
+    def on_end(self, span: ReadableSpan) -> None:
+        run_id = _current_run.get()
+        if run_id is None or span.context is None or span.context.trace_id != run_id.int:
+            return
+        with self._lock:
+            self._held.setdefault(run_id.int, []).append(span)
+
+    def take(self, run_id: UUID) -> list[ReadableSpan]:
+        with self._lock:
+            return self._held.pop(run_id.int, [])
+
+    def clear(self) -> None:
+        with self._lock:
+            self._held.clear()
+
+    def shutdown(self) -> None:
+        self.clear()
+
+    def force_flush(self, timeout_millis: int = 30_000) -> bool:
+        return True
+
+
+_installed: "Tracing | None" = None
+
+
+class Tracing:
+    """
+    One process's tracing: a provider whose spans are held for the database and,
+    when an exporter is given, copied to it.
+
+    `immediate` exports each span as it ends, for tests; a worker batches.
+    """
+
+    def __init__(self, exporter: SpanExporter | None = None, *, immediate: bool = False) -> None:
+        self.exporter = exporter
+        self.recorder = RunSpanRecorder()
+        # Built from this one attribute rather than Resource.create(), which would also
+        # read OTEL_RESOURCE_ATTRIBUTES -- a way for a host name or pid to leave the machine.
+        self.provider = TracerProvider(resource=Resource({"service.name": SERVICE_NAME}), id_generator=RunTraceIds())
+        self.provider.add_span_processor(self.recorder)
+        if exporter is not None:
+            processor: SpanProcessor
+            if immediate:
+                processor = SimpleSpanProcessor(exporter)
+            else:
+                processor = BatchSpanProcessor(exporter, export_timeout_millis=EXPORT_TIMEOUT_SECONDS * 1000)
+            self.provider.add_span_processor(processor)
+        self.tracer = self.provider.get_tracer(TRACER_NAME)
+
+    def install(self) -> "Tracing":
+        """Make this the process's tracing. OpenTelemetry keeps the first; a second would silently trace nothing."""
+        global _installed
+        if _installed is not None:
+            raise RuntimeError("tracing is already installed in this process")
+        trace.set_tracer_provider(self.provider)
+        _installed = self
+        return self
+
+    def shutdown(self) -> None:
+        """Send what is still batched, within the export timeout, and stop."""
+        self.provider.shutdown()
+
+
+def tracer() -> trace.Tracer:
+    """The tracer the agent's code uses: the installed one, or OpenTelemetry's no-op one when none is."""
+    return trace.get_tracer(TRACER_NAME)
+
+
+def loopback_exporter(endpoint: str, public_key: str, secret_key: str) -> OTLPSpanExporter:
+    """An OTLP/HTTP exporter to a Langfuse on this machine. Any other host is refused."""
+    parts = urlsplit(endpoint)
+    if parts.scheme != "http" or parts.hostname not in LOOPBACK_HOSTS:
+        # Only scheme and host are echoed: an endpoint can carry credentials in it.
+        raise ValueError(
+            f"traces are only sent to this machine (http://127.0.0.1 or http://localhost), "
+            f"not {parts.scheme}://{parts.hostname}"
+        )
+    credentials = base64.b64encode(f"{public_key}:{secret_key}".encode()).decode()
+    return OTLPSpanExporter(
+        endpoint=endpoint,
+        headers={"Authorization": f"Basic {credentials}", "x-langfuse-ingestion-version": "4"},
+        timeout=EXPORT_TIMEOUT_SECONDS,
+    )
+
+
+def exporter_from_env(environ: Mapping[str, str]) -> OTLPSpanExporter | None:
+    """
+    The Langfuse exporter the environment asks for, or None when it asks for none.
+
+    OPSAGENT_OTLP_ENDPOINT is Langfuse's OTLP base, e.g. http://127.0.0.1:3000/api/public/otel.
+    """
+    endpoint = environ.get(ENDPOINT_VAR, "").strip()
+    if not endpoint:
+        return None
+    missing = [name for name in (PUBLIC_KEY_VAR, SECRET_KEY_VAR) if not environ.get(name, "").strip()]
+    if missing:
+        raise ValueError(f"{ENDPOINT_VAR} is set, so {' and '.join(missing)} must be set too")
+    return loopback_exporter(
+        endpoint.rstrip("/") + "/v1/traces",
+        public_key=environ[PUBLIC_KEY_VAR].strip(),
+        secret_key=environ[SECRET_KEY_VAR].strip(),
+    )
+
+
+@dataclass(frozen=True)
+class SpanRow:
+    """One span as the spans table stores it. Field order is the INSERT's column order."""
+
+    trace_id: UUID
+    span_id: str
+    parent_span_id: str | None
+    name: str
+    kind: str
+    started_at: datetime
+    ended_at: datetime
+    status: str
+    status_message: str | None
+    model: str | None
+    prompt_version: str | None
+    input_tokens: int | None
+    output_tokens: int | None
+    cost_usd: Decimal | None
+    attributes: dict[str, Any]
+
+
+INSERT_SPAN = """
+    INSERT INTO spans (trace_id, span_id, parent_span_id, name, kind, started_at, ended_at, status,
+                       status_message, model, prompt_version, input_tokens, output_tokens, cost_usd, attributes)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+"""
+
+
+def _when(nanoseconds: int) -> datetime:
+    """Nanoseconds since the epoch, to the microsecond Postgres keeps, without float rounding."""
+    seconds, remainder = divmod(nanoseconds, 1_000_000_000)
+    return datetime.fromtimestamp(seconds, UTC) + timedelta(microseconds=remainder // 1_000)
+
+
+def _hex(span_id: int) -> str:
+    return format(span_id, "016x")
+
+
+def _optional_int(value: object) -> int | None:
+    return None if value is None else int(str(value))
+
+
+def _row(span: ReadableSpan) -> SpanRow:
+    context = span.context
+    if context is None or span.start_time is None:  # pragma: no cover - the SDK sets both on every started span
+        raise ValueError(f"span {span.name!r} was never started")
+    attributes = dict(span.attributes or {})
+    kind = str(attributes.get(Attr.TYPE, "span"))
+    cost = attributes.get(Attr.COST_USD)
+    model = attributes.get(Attr.MODEL)
+    version = attributes.get(Attr.PROMPT_VERSION)
+    return SpanRow(
+        trace_id=UUID(int=context.trace_id),
+        span_id=_hex(context.span_id),
+        parent_span_id=_hex(span.parent.span_id) if span.parent is not None else None,
+        name=span.name,
+        kind=kind if kind in KINDS else "span",
+        started_at=_when(span.start_time),
+        ended_at=_when(span.end_time if span.end_time is not None else span.start_time),
+        status="error" if span.status.status_code is StatusCode.ERROR else "ok",
+        status_message=span.status.description,
+        model=None if model is None else str(model),
+        prompt_version=None if version is None else str(version),
+        input_tokens=_optional_int(attributes.get(Attr.INPUT_TOKENS)),
+        output_tokens=_optional_int(attributes.get(Attr.OUTPUT_TOKENS)),
+        cost_usd=None if cost is None else Decimal(str(cost)),
+        attributes={key: list(value) if isinstance(value, tuple) else value for key, value in attributes.items()},
+    )
+
+
+def rows_for(spans: Sequence[ReadableSpan]) -> list[SpanRow]:
+    """Spans as rows, by start time, a parent before a child that started in the same instant."""
+    rows = [_row(span) for span in spans]
+    parents = {row.span_id: row.parent_span_id for row in rows}
+
+    def depth(row: SpanRow) -> int:
+        levels, parent = 0, row.parent_span_id
+        while parent is not None and parent in parents and levels < len(parents):
+            levels, parent = levels + 1, parents[parent]
+        return levels
+
+    return sorted(rows, key=lambda row: (row.started_at, depth(row)))
+
+
+def record_spans(connection: psycopg.Connection, run_id: UUID) -> int:
+    """
+    Write the run's finished spans in the caller's transaction, and say how many.
+
+    Commits nothing: the caller's transaction is the step's, so the spans commit with
+    it or not at all. A process that never installed tracing writes nothing.
+    """
+    if _installed is None:
+        return 0
+    rows = rows_for(_installed.recorder.take(run_id))
+    if rows:
+        with connection.cursor() as cursor:
+            cursor.executemany(
+                INSERT_SPAN, [(*astuple(row)[:-1], Jsonb(row.attributes)) for row in rows]
+            )
+    return len(rows)
+
+
+def discard(run_id: UUID) -> None:
+    """Drop what a tick that will never commit was holding, so its next tick does not write it."""
+    if _installed is not None:
+        _installed.recorder.take(run_id)

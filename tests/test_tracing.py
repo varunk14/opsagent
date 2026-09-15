@@ -258,8 +258,11 @@ def insert_run(connection, run_id: UUID) -> None:
 
 
 def stored(connection, run_id: UUID) -> list[tuple]:
+    # A parent and its first child can start in the same microsecond; the root is listed first.
     return connection.execute(
-        "SELECT name, parent_span_id IS NULL FROM spans WHERE trace_id = %s ORDER BY started_at, span_id", (run_id,)
+        "SELECT name, parent_span_id IS NULL FROM spans WHERE trace_id = %s "
+        "ORDER BY started_at, parent_span_id IS NOT NULL, span_id",
+        (run_id,),
     ).fetchall()
 
 

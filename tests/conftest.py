@@ -83,7 +83,9 @@ def tracing():
     OpenTelemetry allows one global provider per process, so it is installed once
     here and every test that traces shares it; `exported` empties it per test.
     """
-    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+        InMemorySpanExporter,
+    )
 
     from app.tracing import Tracing
 
