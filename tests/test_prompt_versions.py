@@ -207,6 +207,59 @@ def test_the_run_version_moves_with_any_prompt():
     assert run_prompt_version(PROMPT_VERSIONS) == run_prompt_version()
 
 
+def test_render_refuses_an_unfilled_placeholder():
+    """A placeholder left out is an error, never a blank the model reads as nothing."""
+    with pytest.raises(KeyError):
+        prompt_module.render("extract")
+
+
+def a_template_dir(tmp_path, monkeypatch, task: str, text: str) -> Path:
+    monkeypatch.setattr(prompt_module, "PROMPTS_DIR", tmp_path)
+    path = tmp_path / f"{task}.txt"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_a_stray_dollar_sign_is_refused_naming_the_file(tmp_path, monkeypatch):
+    """Templates are prose someone will edit; 'refund $ 50' must fail loudly and say where."""
+    path = a_template_dir(tmp_path, monkeypatch, "extract", "TASK: extract\nRefund $ 50.\n$customer_message\n")
+
+    with pytest.raises(ValueError, match="not a placeholder") as refused:
+        load_template("extract")
+
+    assert str(path) in str(refused.value)
+
+
+def test_a_literal_dollar_written_twice_is_allowed(tmp_path, monkeypatch):
+    a_template_dir(tmp_path, monkeypatch, "extract", "TASK: extract\nUp to $$50.\n$customer_message\n")
+
+    assert "$$50" in load_template("extract")
+
+
+def test_a_template_missing_a_placeholder_is_refused(tmp_path, monkeypatch):
+    path = a_template_dir(tmp_path, monkeypatch, "classify", "TASK: classify\n$customer_message\n")
+
+    with pytest.raises(ValueError, match="placeholders") as refused:
+        load_template("classify")
+
+    assert str(path) in str(refused.value)
+
+
+def test_a_template_with_an_unknown_placeholder_is_refused(tmp_path, monkeypatch):
+    a_template_dir(tmp_path, monkeypatch, "extract", "TASK: extract\n$customer_message\n$secret\n")
+
+    with pytest.raises(ValueError, match="placeholders"):
+        load_template("extract")
+
+
+def test_a_blank_line_at_the_end_of_a_template_is_refused(tmp_path, monkeypatch):
+    """One trailing newline is how editors end a file; a second would reach the model silently."""
+    a_template_dir(tmp_path, monkeypatch, "extract", "TASK: extract\n$customer_message\n\n")
+
+    with pytest.raises(ValueError, match="blank line"):
+        load_template("extract")
+
+
 def test_the_run_version_does_not_depend_on_the_order_of_tasks():
     """The same three versions must give the same run version however they were collected."""
     reversed_order = dict(reversed(list(PROMPT_VERSIONS.items())))
