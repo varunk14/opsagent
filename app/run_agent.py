@@ -72,6 +72,7 @@ from app.embeddings import OllamaEmbedder
 from app.executor import OWNED_ORDER, ToolOutcome, execute
 from app.graph.build import build_graph, run_graph
 from app.graph.nodes import escalation
+from app.graph.prompts import run_prompt_version
 from app.graph.state import AgentState
 from app.guardrails import judge
 from app.guardrails import load as load_guardrails
@@ -174,31 +175,39 @@ RECENT_LOOKUPS = """
            (SELECT lower(state -> 'untrusted' ->> 'sender') FROM runs WHERE id = %s)
 """
 
+# Every statement that records a tick's model work also records the prompt version
+# it was made under. Paying an approved action asks no model, so it passes NULL and
+# the run keeps the version it was planned under.
+#
 # Busy is not a failure: the attempt the claim spent is given back.
 DEFER = """
     UPDATE runs
        SET status = 'queued', attempt = attempt - 1, next_retry_at = %s + %s, state = state || %s,
-           current_node = 'act', cost_usd = cost_usd + %s, locked_by = NULL, locked_at = NULL
+           current_node = 'act', cost_usd = cost_usd + %s, prompt_version = coalesce(%s, prompt_version),
+           locked_by = NULL, locked_at = NULL
      WHERE id = %s AND locked_by = %s
 """
 
 CONTINUE = """
     UPDATE runs
-       SET current_node = 'act', state = state || %s, cost_usd = cost_usd + %s, locked_at = now()
+       SET current_node = 'act', state = state || %s, cost_usd = cost_usd + %s,
+           prompt_version = coalesce(%s, prompt_version), locked_at = now()
      WHERE id = %s AND locked_by = %s
 """
 
 PARK = """
     UPDATE runs
        SET status = 'waiting_approval', current_node = %s, state = state || %s,
-           cost_usd = cost_usd + %s, locked_by = NULL, locked_at = NULL
+           cost_usd = cost_usd + %s, prompt_version = coalesce(%s, prompt_version),
+           locked_by = NULL, locked_at = NULL
      WHERE id = %s AND locked_by = %s
 """
 
 FINISH = """
     UPDATE runs
        SET status = 'done', current_node = 'act', state = state || %s,
-           cost_usd = cost_usd + %s, locked_by = NULL, locked_at = NULL
+           cost_usd = cost_usd + %s, prompt_version = coalesce(%s, prompt_version),
+           locked_by = NULL, locked_at = NULL
      WHERE id = %s AND locked_by = %s
 """
 
@@ -221,7 +230,7 @@ RELEASE = """
                failure_class = %s,
                next_retry_at = CASE WHEN attempt >= max_attempts THEN NULL ELSE now() + %s END,
                current_node = 'intake', locked_by = NULL, locked_at = NULL,
-               cost_usd = cost_usd + %s
+               cost_usd = cost_usd + %s, prompt_version = coalesce(%s, prompt_version)
          WHERE id = %s AND status = 'running' AND locked_by = %s
         RETURNING id, status, idempotency_key, state, failure_class
     )
@@ -484,6 +493,8 @@ def evidence_for(claimed: ClaimedRun, agent: Mapping[str, Any]) -> dict[str, Any
 def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_steps: int) -> RunOutcome:
     """Walk the graph from what the run holds, then act on one proposal in one transaction."""
     before = agent_of(connection, claimed.run_id)
+    # Read before the walk: the version this tick's prompts were built from.
+    version = run_prompt_version()
     try:
         state = run_graph(graph, claimed.subject, claimed.body, prior_from(before))
     except ServiceUnavailable as outage:
@@ -495,6 +506,7 @@ def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_st
                     outage.failure_class,
                     retry_delay(claimed.attempt),
                     cost_of(outage.replies),
+                    version,
                     claimed.run_id,
                     claimed.worker,
                 ),
@@ -524,7 +536,15 @@ def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_st
                     deferred["deferrals"] = deferrals + 1
                     connection.execute(
                         DEFER,
-                        (recent[1], RATE_WINDOW, Jsonb({"agent": deferred}), cost, claimed.run_id, claimed.worker),
+                        (
+                            recent[1],
+                            RATE_WINDOW,
+                            Jsonb({"agent": deferred}),
+                            cost,
+                            version,
+                            claimed.run_id,
+                            claimed.worker,
+                        ),
                     )
                     return RunOutcome(
                         run_id=claimed.run_id,
@@ -547,7 +567,7 @@ def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_st
                 failure = pay(connection, claimed.run_id, steps, proposal)
 
         agent, cost = summarise_agent(state, before, proposal, failure, steps)
-        stored = (Jsonb({"agent": agent}), cost, claimed.run_id, claimed.worker)
+        stored = (Jsonb({"agent": agent}), cost, version, claimed.run_id, claimed.worker)
         if proposal.tool == "get_order":
             status = "running"
             connection.execute(CONTINUE, stored)
@@ -594,7 +614,13 @@ def act_on_approval(connection: psycopg.Connection, claimed: ClaimedRun, approve
             failure = f"act: the approved action could not be read ({unreadable.error_count()} validation errors)"
         else:
             failure = pay(connection, claimed.run_id, steps, action)
-        stored = (Jsonb({"agent": {**before, "steps": steps, "failure": failure}}), Decimal(0), claimed.run_id, claimed.worker)
+        stored = (
+            Jsonb({"agent": {**before, "steps": steps, "failure": failure}}),
+            Decimal(0),
+            None,  # no model was asked, so the version the run was planned under stands
+            claimed.run_id,
+            claimed.worker,
+        )
         if failure is None:
             status = "done"
             connection.execute(FINISH, stored)
