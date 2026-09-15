@@ -21,7 +21,14 @@ import pytest
 from pydantic import ValidationError
 
 from evals.golden import load_cases
-from evals.judge import JudgeBoard, Verdict, compare_judge, judge_board_of, judge_case, judge_prompt
+from evals.judge import (
+    JudgeBoard,
+    Verdict,
+    compare_judge,
+    judge_board_of,
+    judge_case,
+    judge_prompt,
+)
 from evals.runner import run_cases
 from tests.fakes import FakeEmbedder, ScriptedModel
 from tests.test_evals_replay import script_for

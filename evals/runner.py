@@ -16,6 +16,7 @@ paid and what was put to a person, and why a run that failed or died did so. It 
 nothing that differs between two runs of the same recording, so replays compare equal.
 """
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -68,6 +69,9 @@ class CaseResult:
     cost_usd: Decimal
     # The passages the run was planned with, as document#chunk, in the order they were given.
     policy_sources: tuple[str, ...] = ()
+    # What the run saw and did, for the judge: policy text, steps with their results, the last
+    # proposal and why it stopped, as JSON with sorted keys.
+    evidence: str = ""
 
 
 def refuse_the_application_database(dsn: str) -> None:
@@ -121,4 +125,9 @@ def read_back(connection: psycopg.Connection, case_id: str, run_id: UUID) -> Cas
         model_calls=int(agent.get("model_calls", 0)),
         cost_usd=cost_usd,
         policy_sources=tuple(agent.get("policy_sources", [])),
+        evidence=json.dumps(
+            {key: agent.get(key) for key in ("policy", "steps", "proposal", "failure")},
+            sort_keys=True,
+            ensure_ascii=False,
+        ),
     )
