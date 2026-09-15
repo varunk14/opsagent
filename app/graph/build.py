@@ -41,6 +41,10 @@ AgentGraph = CompiledStateGraph[AgentState, None, AgentState, AgentState]
 # extraction counts even when it is None: a status question has nothing to extract.
 RESUMABLE = ("classification", "extraction", "policy")
 
+# A model's name is set by whoever runs the worker, never by a customer, but every
+# call's span copies it, so it is bounded like everything else that reaches a trace.
+MAX_MODEL_NAME_CHARS = 120
+
 
 @contextmanager
 def failure_recorded(name: str, kind: str | None = None) -> Iterator[Span]:
@@ -73,7 +77,7 @@ class TracedModel:
 
     def __init__(self, model: Model) -> None:
         self.model = model
-        self.name = str(getattr(model, "model", None) or type(model).__name__)
+        self.name = str(getattr(model, "model", None) or type(model).__name__)[:MAX_MODEL_NAME_CHARS]
 
     def generate(self, prompt: str) -> Reply:
         task = task_of(prompt)
