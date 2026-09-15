@@ -300,6 +300,7 @@ def test_the_token_cookie_is_strict_and_out_of_reach_of_scripts(fresh_database):
 
 def test_each_screen_has_its_own_token(fresh_database):
     """A token taken from one run of the screen is worthless against another."""
+    waiting_refund(fresh_database)
     first = token_from(client_for(fresh_database).get("/approvals").text)
     second = token_from(client_for(fresh_database).get("/approvals").text)
 

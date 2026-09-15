@@ -59,6 +59,7 @@ from psycopg.types.json import Jsonb
 from pydantic import ValidationError
 
 from app.approvals import (
+    EXCERPT_CHARS,
     ApprovedAction,
     approved_unexecuted,
     mark_executed,
@@ -209,7 +210,7 @@ LOCK_OWNED_ORDER = OWNED_ORDER + "   FOR UPDATE OF o"
 REFUNDED_SO_FAR = "SELECT coalesce(sum(amount_paise), 0)::bigint FROM refunds WHERE order_id = %s"
 
 # How much of the customer's message is kept with an approval, for the person deciding.
-EVIDENCE_BODY_CHARS = 2000
+EVIDENCE_BODY_CHARS = EXCERPT_CHARS
 
 # One statement decides retry or dead, so nothing can change attempt in between,
 # and a run that dies is dead-lettered by that same statement.

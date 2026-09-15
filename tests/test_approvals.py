@@ -18,7 +18,6 @@ from decimal import Decimal
 
 import psycopg
 import pytest
-
 from psycopg.types.json import Jsonb
 
 from app.approvals import (

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}OpsAgent{% endblock %}</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 60rem; padding: 0 1rem; color: #1a1a1a; line-height: 1.45; }
+  nav { margin-bottom: 1.5rem; }
+  nav a { margin-right: 1rem; }
+  h1 { font-size: 1.4rem; margin-top: 2rem; }
+  h2 { font-size: 1.1rem; margin: 0 0 .5rem; }
+  .card { border: 1px solid #ccc; border-radius: 6px; padding: 1rem 1.25rem; margin: 1rem 0; }
+  .reason { font-weight: 600; }
+  .customer { white-space: pre-wrap; background: #f6f6f6; padding: .75rem; border-radius: 4px; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; }
+  dt { color: #555; }
+  dd { margin: 0; }
+  form { margin-top: .75rem; }
+  textarea { width: 100%; box-sizing: border-box; }
+  .warning { background: #fff4e5; border: 1px solid #f0b36b; padding: .75rem; border-radius: 4px; }
+</style>
+</head>
+<body>
+<nav><a href="/approvals">Approvals</a><a href="/guardrails">Guardrails</a></nav>
+{% block content %}{% endblock %}
+</body>
+</html>

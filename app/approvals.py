@@ -27,6 +27,9 @@ from app.contracts import ProposedAction
 
 MAX_NOTE = 1000
 
+# How much of a customer's message is kept for the person deciding.
+EXCERPT_CHARS = 2000
+
 OPEN = """
     INSERT INTO approvals (run_id, action, evidence, confidence, reason)
     VALUES (%s, %s, %s, %s, %s)
@@ -68,6 +71,26 @@ DECIDE = """
     RETURNING runs.id
 """
 
+# Runs waiting for a person with nothing to approve: escalations, and actions that
+# were allowed but could not be completed. Without this list they wait where no
+# screen shows them. Never the run's raw state or its lock holder.
+HANDED_OVER = """
+    SELECT runs.id,
+           runs.current_node,
+           coalesce(runs.state -> 'agent' ->> 'failure',
+                    runs.state -> 'agent' -> 'proposal' -> 'args' ->> 'reason'),
+           runs.state -> 'untrusted' ->> 'sender',
+           runs.state -> 'untrusted' ->> 'subject',
+           left(runs.state -> 'untrusted' ->> 'body', %s),
+           runs.created_at
+      FROM runs
+     WHERE runs.status = 'waiting_approval'
+       AND NOT EXISTS (
+            SELECT 1 FROM approvals WHERE approvals.run_id = runs.id AND approvals.status = 'pending'
+           )
+     ORDER BY runs.created_at, runs.id
+"""
+
 APPROVED_UNEXECUTED = """
     SELECT id, action FROM approvals
      WHERE run_id = %s AND status = 'approved' AND executed_at IS NULL
@@ -90,6 +113,19 @@ class PendingApproval:
     evidence: dict[str, Any]
     confidence: Decimal | None
     reason: str
+    created_at: datetime
+
+
+@dataclass(frozen=True)
+class HandedOver:
+    """A run waiting for a person with nothing to approve, and why it stopped."""
+
+    run_id: UUID
+    node: str
+    why: str | None
+    sender: str | None
+    subject: str | None
+    body: str | None
     created_at: datetime
 
 
@@ -120,6 +156,11 @@ def open_approval(
 def list_pending(connection: psycopg.Connection) -> list[PendingApproval]:
     """Decisions waiting to be made, oldest first."""
     return [PendingApproval(*row) for row in connection.execute(LIST_PENDING).fetchall()]
+
+
+def list_handed_over(connection: psycopg.Connection) -> list[HandedOver]:
+    """Runs waiting for a person that have nothing to approve, oldest first."""
+    return [HandedOver(*row) for row in connection.execute(HANDED_OVER, (EXCERPT_CHARS,)).fetchall()]
 
 
 def decide(
