@@ -38,11 +38,13 @@ DEFAULT_MAX_DISTANCE = 0.45
 # opening of a message carries its point; the rest would only dilute the vector.
 MAX_QUERY_CHARS = 2_000
 
+# Equally near passages are ordered by where they came from, so the same question always
+# gets the same passages in the same order -- and so the same planning prompt.
 SEARCH = """
     SELECT document, chunk_index, chunk, embedding <=> %s::vector AS distance
       FROM policy_chunks
      WHERE embedding_model = %s
-     ORDER BY embedding <=> %s::vector
+     ORDER BY embedding <=> %s::vector, document, chunk_index
      LIMIT %s
 """
 

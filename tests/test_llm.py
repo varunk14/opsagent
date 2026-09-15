@@ -188,6 +188,23 @@ def test_a_reply_cannot_close_its_own_fence():
     assert model.prompts[1].count("PREVIOUS_REPLY>>>") == 1
 
 
+@pytest.mark.parametrize("run", range(3, 15))
+@pytest.mark.parametrize("character", ["<", ">"])
+def test_no_run_of_marker_characters_comes_out_as_a_marker(character, run):
+    """Found in review: replacing '>>>' once turned a run of five into '> > >>>', a marker again."""
+    from app.llm import fence_safe
+
+    assert character * 3 not in fence_safe(f"a{character * run}b", 1_000)
+
+
+def test_text_with_no_run_of_marker_characters_is_left_exactly_as_it_was():
+    from app.llm import fence_safe
+
+    text = "Order #4821 -> refund <= Rs 3,600 >> soon << ok"
+
+    assert fence_safe(text, 1_000) == text
+
+
 def test_an_enormous_reply_is_cut_before_it_is_sent_back():
     model = FakeModel("x" * 50_000, VALID)
 

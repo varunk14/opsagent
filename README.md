@@ -46,6 +46,7 @@ to fail first, because the failure is the part worth seeing.
 | `app/dead_letters.py` | Runs that ran out of attempts, and quarantined messages, each with the reason. `python -m app.dead_letters` lists them and requeues a run. |
 | `app/seed.py` | Loads a small fictional ledger: customers, orders, and the charges behind them. |
 | `app/baseline.py` | What a run costs before any optimisation, so later cost work has something to compare against. |
+| `evals/` | The golden set, recorded model replies, and the gate that scores every pull request against a committed baseline. |
 
 The tables are defined in `migrations/`, including a refund ledger that refuses, inside Postgres, to
 pay back more than an order was charged. `policies/` holds six short fictional store policies.
@@ -101,6 +102,52 @@ Costs are reference costs: tokens priced at the fixed rate in `BASELINE.md`, so 
 compared. The models run locally and cost nothing. Embedding a search query is traced, but its
 tokens are not yet counted in a run's cost; the page says "not counted".
 
+### Evaluation
+
+`evals/golden.jsonl` holds 150 fictional cases, each a customer message and what should happen to
+it: 120 ordinary requests of ten kinds, and 30 written to break the agent -- instructions hidden in
+the message, someone else's order, more money than was charged, an order that does not exist, a
+policy quoted that does not exist. Every case has an order of its own in `evals/ledger.json`, and a
+test checks every label against that ledger and the default guardrail.
+
+CI has no GPU, so the real model cannot run there. Instead every case is run once on a machine with
+Ollama, and each model reply and embedding is recorded, keyed by the model and a hash of the exact
+prompt. CI replays the recordings through the real worker and Postgres, and scores what happened.
+
+    .venv/bin/python -m evals record    # with Ollama: run all 150 cases, keep every reply
+    .venv/bin/python -m evals accept    # after a deliberate change: write the baseline and scoreboard
+    .venv/bin/python -m evals gate      # anywhere, no model: replay, score, compare
+    .venv/bin/python -m evals verify    # with Ollama: record again, report any reply that differs
+
+The scores are task completion; intent and extraction accuracy; precision, recall and false-positive
+rate for handing a case to a person; and safety violations -- paying when a person should have
+decided, paying a different amount, or paying twice. `gate` runs on every pull request. It fails
+when a score falls below `evals/baseline.json`, when anything is unsafe, when the golden set
+changed, or when `evals/scoreboard.md` no longer says what the recordings score. A prompt edited
+without recording again fails as well, because nothing was ever recorded for it.
+`tests/test_evals_bad_prompt.py` checks both ways a bad prompt can reach a pull request.
+
+A label cannot say whether a decision was grounded in the policy and the ledger, so the 25 smoke
+cases are also judged by the local model (`prompts/judge.txt`). It is shown what the run saw and did
+-- the message, the policy passages, what the lookups returned, where the run came to rest -- and
+never the label. Its verdicts are recorded and replayed like every other reply and printed on the
+scoreboard, with how often the judge agrees with the exact checks beside its score. It gates
+nothing: small local models are poor judges, and this one has not earned it yet.
+`python -m evals full` judges every case before a release and writes `evals/full.md`.
+
+The first recording, on llama3.1:8b, is the baseline in `evals/scoreboard.md`, and it is not flattering.
+The agent completes 89 of the 150 cases (59%). When a case should reach a person it does 85% of the
+time, and 90% of the cases it hands over should be. It also made 19 unsafe payments: refunds under the
+limit, paid with no person involved, that a person should have decided -- a claimed double charge
+with one charge on the ledger, change-of-mind and damaged-item refunds paid without checking the
+policy's conditions, one prompt injection. The guardrail checks the amount and the model's confidence,
+not whether the policy allows the refund. Those 19 cases are named on the scoreboard and pinned: a
+case that is safe today becoming unsafe fails the gate, and fixing the 19 is the next piece of work.
+
+A recording is keyed by what the model was asked, not by what it said, so a hand-edited reply would
+replay as real. At temperature 0 with a fixed seed the model's replies are byte-identical from run
+to run, so `verify` records everything again and any difference is the edit.
+
 ### The experiments
 
 | Script | Question it answers | Outcome |
@@ -116,7 +163,7 @@ tokens are not yet counted in a run's cost; the page says "not counted".
     docker compose up -d db
     .venv/bin/python -m pytest
 
-Over 750 tests with the run failing below 80% coverage. Tests that need Postgres are marked `db`
+Over 900 tests with the run failing below 80% coverage. Tests that need Postgres are marked `db`
 and **fail rather than skip** when it is absent, because a skipped test that reads as green is the
 failure this project is about. CI runs the same checks on every push to `main` and every pull
 request, and a pull request cannot merge into `main` until they pass.
@@ -168,8 +215,8 @@ failure modes are the interesting part, and each one is pinned by a test.
 
 ## Planned
 
-A live deployment, an evaluation suite gating every pull request, a failure
-taxonomy, and cost routing measured against `BASELINE.md`.
+A live deployment, a failure taxonomy, and cost routing measured against
+`BASELINE.md`.
 
 ## Running the experiments
 

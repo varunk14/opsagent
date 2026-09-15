@@ -132,6 +132,22 @@ def test_the_nearest_passage_wins_even_when_it_was_stored_last(fresh_database):
     assert [hit.document for hit in hits] == ["duplicate-payments"]
 
 
+def test_passages_equally_near_come_back_in_the_same_order_every_time(fresh_database):
+    """
+    Found in review: equal distances had no tie-break, so equally near passages -- and the
+    plan prompt built from them -- could come back in either order, and a recorded reply
+    keyed by that prompt would no longer be found on replay.
+    """
+    embedder = AxisEmbedder()
+    same = "# Refunds\n\n## Rule\n\nduplicate returned in full"
+    with psycopg.connect(fresh_database) as connection:
+        ingest(connection, embedder, {"zeta-refunds": same, "alpha-refunds": same, "mid-refunds": same})
+
+    hits = retriever(fresh_database, embedder, k=3, max_distance=2.0).search("duplicate")
+
+    assert [hit.document for hit in hits] == ["alpha-refunds", "mid-refunds", "zeta-refunds"]
+
+
 def test_a_database_outage_during_search_is_an_outage_not_a_crash():
     """Found in review: psycopg's OperationalError escaped, crashing the worker mid-batch."""
     from app.llm import ServiceUnavailable
