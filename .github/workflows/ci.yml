@@ -50,7 +50,7 @@ jobs:
         run: pip install -r requirements-dev.txt
 
       - name: Build
-        run: python -m compileall -q app experiments tests
+        run: python -m compileall -q app evals experiments tests
 
       - name: Types
         run: mypy
@@ -71,3 +71,44 @@ jobs:
                --include="*.py" --include="*.yml" --include="*.toml" --include="*.json*" --include="*.md" .; then
             echo "Possible secret committed"; exit 1
           fi
+
+  evals:
+    # Replays the committed recordings through the real driver against its own Postgres, scores
+    # them, and fails on anything worse than evals/baseline.json or unsafe. No model runs here:
+    # recording happens on a machine with one (python -m evals record).
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      db:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: opsagent
+          POSTGRES_PASSWORD: dev
+          POSTGRES_DB: opsagent
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U opsagent -d opsagent"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      OPSAGENT_DATABASE_URL: postgresql://opsagent:dev@localhost:5432/opsagent
+      OPSAGENT_EVAL_ADMIN_URL: postgresql://opsagent:dev@localhost:5432/postgres
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install
+        run: pip install -r requirements-dev.txt
+
+      - name: Evaluation gate
+        run: python -m evals gate
