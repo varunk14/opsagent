@@ -219,3 +219,14 @@ def test_tracing_changes_nothing_the_graph_returns(exported):
 
     assert traced["proposal"] == untraced["proposal"]
     assert traced["replies"] == untraced["replies"]
+
+
+def test_a_model_name_is_cut_to_a_bounded_length(exported):
+    """Set by whoever runs the worker, not by a customer; bounded anyway, since every call's span copies it."""
+
+    class LongNamed(ScriptedModel):
+        model = "m" * 500
+
+    rows = walk(exported, LongNamed(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=PROPOSED_LOOKUP))
+
+    assert named(rows, "classify.generate").model == "m" * 120
