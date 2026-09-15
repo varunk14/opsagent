@@ -14,12 +14,13 @@ dropped afterwards, so no command can touch the application's database.
 import psycopg
 import pytest
 
-from app.llm import Reply
+from app.llm import ModelUnavailable, Reply
 from evals.__main__ import accept, gate, main, record, replay, scratch_database
 from evals.golden import GoldenCase, load_cases
 from tests.conftest import dsn_for
 from tests.fakes import (
     CLASSIFIED_DUPLICATE,
+    OUTAGE,
     FakeEmbedder,
     ScriptedModel,
     proposed_refund,
@@ -137,7 +138,7 @@ def test_the_gate_passes_when_nothing_got_worse(tmp_path):
 
 def test_the_gate_fails_when_what_the_model_does_got_worse(tmp_path):
     files = recorded_and_accepted(tmp_path)
-    record(ADMIN, CHOSEN, greedy_model(), FakeEmbedder(), files["recordings_path"])
+    record(ADMIN, CHOSEN, greedy_model(), FakeEmbedder(), files["recordings_path"], fresh=True)
 
     problems = gate(ADMIN, CHOSEN, embedding_model=FakeEmbedder.model, **files)
 
@@ -146,7 +147,7 @@ def test_the_gate_fails_when_what_the_model_does_got_worse(tmp_path):
 
 def test_the_gate_fails_on_anything_unsafe(tmp_path):
     files = recorded_and_accepted(tmp_path)
-    record(ADMIN, CHOSEN, greedy_model(), FakeEmbedder(), files["recordings_path"])
+    record(ADMIN, CHOSEN, greedy_model(), FakeEmbedder(), files["recordings_path"], fresh=True)
 
     problems = gate(ADMIN, CHOSEN, embedding_model=FakeEmbedder.model, **files)
 
@@ -180,12 +181,47 @@ def test_the_gate_fails_without_a_baseline_to_compare_with(tmp_path):
     assert any("baseline" in problem for problem in problems)
 
 
+# --- recording is long: nothing recorded is lost, and nothing is asked twice ------------------
+
+
+def test_what_was_recorded_before_an_outage_is_kept(tmp_path):
+    files = paths(tmp_path)
+    outage = ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED, plan=OUTAGE)
+
+    with pytest.raises(ModelUnavailable):
+        record(ADMIN, CHOSEN, outage, FakeEmbedder(), files["recordings_path"])
+
+    text = files["recordings_path"].read_text()
+    assert '"task": "classify"' in text
+    assert '"kind": "embedding"' in text
+
+
+def test_recording_again_reuses_what_is_already_recorded_and_asks_no_model(tmp_path):
+    files = paths(tmp_path)
+    first = record(ADMIN, CHOSEN, good_model(), FakeEmbedder(), files["recordings_path"])
+    unreachable = ScriptedModel(classify=OUTAGE, extract=OUTAGE, plan=OUTAGE)
+
+    again = record(ADMIN, CHOSEN, unreachable, FakeEmbedder(), files["recordings_path"])
+
+    assert again == first
+    assert unreachable.prompts == []
+
+
+def test_a_fresh_recording_asks_the_model_again(tmp_path):
+    files = paths(tmp_path)
+    record(ADMIN, CHOSEN, good_model(), FakeEmbedder(), files["recordings_path"])
+    unreachable = ScriptedModel(classify=OUTAGE, extract=OUTAGE, plan=OUTAGE)
+
+    with pytest.raises(ModelUnavailable):
+        record(ADMIN, CHOSEN, unreachable, FakeEmbedder(), files["recordings_path"], fresh=True)
+
+
 # --- the command line -----------------------------------------------------------------------
 
 
 def test_the_command_exits_non_zero_and_says_why_when_the_gate_fails(tmp_path, capsys, monkeypatch):
     files = recorded_and_accepted(tmp_path)
-    record(ADMIN, CHOSEN, greedy_model(), FakeEmbedder(), files["recordings_path"])
+    record(ADMIN, CHOSEN, greedy_model(), FakeEmbedder(), files["recordings_path"], fresh=True)
     monkeypatch.setattr("evals.__main__.EMBEDDING_MODEL", FakeEmbedder.model)
 
     assert main(gate_command(files)) == 1
