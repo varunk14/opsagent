@@ -185,3 +185,33 @@ def test_collisions_are_counted_rather_than_stopping_the_pass(fresh_database, tm
 
     assert (summary.accepted, summary.collisions) == (1, 1)
     assert run_count(fresh_database) == 1
+
+
+def test_a_bad_line_just_past_the_limit_keeps_the_accepted_runs(fresh_database, tmp_path):
+    """
+    Found in milestone review. The pass peeks one line past its limit to report
+    whether more is waiting; a malformed line there rolled back runs it had
+    already accepted within its limit.
+    """
+    good = [
+        json.dumps(
+            {
+                "channel": "email",
+                "external_id": f"ok{n}",
+                "sender": "a@example.com",
+                "subject": "hello",
+                "body": "hello",
+                "received_at": "2026-09-13T09:00:00+00:00",
+            }
+        )
+        for n in (1, 2)
+    ]
+    inbox = tmp_path / "bad_after_limit.jsonl"
+    inbox.write_text(f"{good[0]}\n{good[1]}\n{{not json\n")
+
+    with psycopg.connect(fresh_database) as connection:
+        summary = poll_once(connection, inbox, limit=2)
+
+    assert summary.accepted == 2
+    assert summary.more_waiting is True
+    assert run_count(fresh_database) == 2
