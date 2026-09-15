@@ -25,8 +25,8 @@ import json
 
 import psycopg
 import pytest
-from app.failures import FailureCategory, RunRest, backfill, classify, rest_of
 
+from app.failures import FailureCategory, RunRest, backfill, classify, rest_of
 from evals.golden import load_cases
 from evals.runner import run_cases
 from tests.fakes import CLASSIFIED_DUPLICATE, FakeEmbedder, ScriptedModel
@@ -47,7 +47,6 @@ def rest(**changes) -> RunRest:
         "steps": [LOOKUP, REFUND],
         "proposal": {"tool": "issue_refund", "args": {"order_id": "4821", "amount_paise": 360000}},
         "extraction": {"order_id": "4821", "amount_paise": 360000},
-        "deferrals": 0,
         "refunds_paise": (360000,),
         "approval_paise": None,
         "approval_status": None,
@@ -105,10 +104,8 @@ def test_repeating_a_step_or_using_the_whole_budget_is_a_loop(failure):
     assert classify(handed_over) is FailureCategory.LOOP
 
 
-def test_deferring_until_the_limit_is_a_loop():
-    from app.run_agent import MAX_DEFERRALS
-
-    deferred = rest(status="waiting_approval", refunds_paise=(), deferrals=MAX_DEFERRALS)
+def test_being_deferred_by_the_rate_limit_until_a_person_must_take_it_is_a_loop():
+    deferred = rest(status="waiting_approval", refunds_paise=(), failure="plan: deferred 3 times by the rate limit")
 
     assert classify(deferred) is FailureCategory.LOOP
 

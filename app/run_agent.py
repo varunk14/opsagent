@@ -73,6 +73,7 @@ from app.contracts import Classification, ExtractedRefund, ProposedAction, StepR
 from app.db import apply_migrations, connect
 from app.embeddings import OllamaEmbedder
 from app.executor import OWNED_ORDER, ToolOutcome, execute
+from app.failures import record_category
 from app.graph.build import build_graph, failure_recorded, run_graph
 from app.graph.nodes import escalation
 from app.graph.prompts import run_prompt_version
@@ -669,6 +670,11 @@ def act(
             node = failure.split(":", 1)[0] if failure else "plan"
             connection.execute(PARK, (node, *stored))
         span.set_attribute(Attr.RESULT, result)
+        if status != "running":
+            # The run has rested: name how it failed, if it did, in this same transaction.
+            category = record_category(connection, claimed.run_id)
+            if category is not None:
+                span.set_attribute(Attr.FAILURE_CATEGORY, category.value)
     return status, proposal, failure, cost
 
 
@@ -764,6 +770,9 @@ def act_on_approval(connection: psycopg.Connection, claimed: ClaimedRun, approve
                 else:
                     status = "waiting_approval"
                     connection.execute(PARK, ("act", *stored))
+                category = record_category(connection, claimed.run_id)
+                if category is not None:
+                    act.set_attribute(Attr.FAILURE_CATEGORY, category.value)
             close_tick(connection, claimed.run_id, tick_span, status)
 
     return RunOutcome(
