@@ -45,11 +45,20 @@ ALLOWED_HOSTS = [HOST, "localhost"]
 CSRF_COOKIE = "opsagent_csrf"
 
 # Escaping is switched on for every template whatever its name, not left to the file extension.
+# A detail that was never recorded reads as that, not as Python's "None".
 TEMPLATES = Jinja2Templates(
     env=jinja2.Environment(
         loader=jinja2.FileSystemLoader(Path(__file__).resolve().parent / "templates"),
         autoescape=True,
+        finalize=lambda value: "not recorded" if value is None else value,
     )
+)
+
+# Shown for any unhandled error. Fixed text: nothing about the cause reaches the page.
+FAILED_PAGE = (
+    "<!doctype html><title>Something went wrong</title>"
+    "<p>Something went wrong and nothing on this page was completed. "
+    "The screen's own output says why. Reload to see the current state.</p>"
 )
 
 SECURITY_HEADERS = {
@@ -58,6 +67,9 @@ SECURITY_HEADERS = {
     ),
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
+    # Customer emails are on these pages; they should not outlive the tab in a browser cache.
+    "Cache-Control": "no-store",
+    "X-Frame-Options": "DENY",
 }
 
 DECISIONS = {"approve": True, "reject": False}
@@ -100,6 +112,11 @@ def create_app(dsn: str | None = None, operator: str | None = None) -> FastAPI:
         response.headers.update(SECURITY_HEADERS)
         return response
 
+    @app.exception_handler(Exception)
+    async def failed(request: Request, error: Exception) -> Response:
+        # Starlette answers an unhandled error outside every middleware, so the headers are attached here as well.
+        return HTMLResponse(FAILED_PAGE, status_code=500, headers=SECURITY_HEADERS)
+
     def page(request: Request, template: str, context: dict[str, Any], status_code: int = 200) -> Response:
         response = TEMPLATES.TemplateResponse(
             request, template, {**context, "csrf": token, "operator": name}, status_code=status_code
@@ -125,6 +142,9 @@ def create_app(dsn: str | None = None, operator: str | None = None) -> FastAPI:
         csrf: Annotated[str, Form()] = "",
         note: Annotated[str, Form()] = "",
     ) -> Response:
+        origin = request.headers.get("origin")
+        if origin is not None and origin != str(request.base_url).rstrip("/"):
+            return message(request, "This form was sent from another site. Nothing was recorded.", 403)
         cookie = request.cookies.get(CSRF_COOKIE, "")
         if not (hmac.compare_digest(csrf.encode(), token.encode()) and hmac.compare_digest(cookie.encode(), token.encode())):
             return message(request, "This form did not come from this screen, or the screen has restarted. Reload the page.", 403)
