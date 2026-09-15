@@ -47,6 +47,7 @@ def rest(**changes) -> RunRest:
         "steps": [LOOKUP, REFUND],
         "proposal": {"tool": "issue_refund", "args": {"order_id": "4821", "amount_paise": 360000}},
         "extraction": {"order_id": "4821", "amount_paise": 360000},
+        "policy": (),
         "refunds_paise": (360000,),
         "approval_paise": None,
         "approval_status": None,
@@ -181,6 +182,51 @@ def test_rupees_in_the_message_count_as_paise():
     )
 
     assert classify(stated) is None
+
+
+def test_an_amount_read_from_a_policy_passage_is_not_invented():
+    """Found in review: the planner sees policy passages, and a flat amount stated there is a source like any other."""
+    from_policy = rest(
+        status="waiting_approval",
+        refunds_paise=(),
+        approval_paise=25000,
+        approval_status="pending",
+        steps=[LOOKUP],
+        policy=("Damaged items — A flat Rs 250 is paid for a damaged box when the item itself is fine.",),
+        proposal={"tool": "issue_refund", "args": {"order_id": "4821", "amount_paise": 25000}},
+    )
+
+    assert classify(from_policy) is None
+
+
+def test_rupees_with_paise_in_the_message_count_exactly():
+    """Found in review: "Rs 99.50" is 9950 paise, not 9900 and 5000."""
+    stated = rest(
+        status="waiting_approval",
+        refunds_paise=(),
+        approval_paise=9950,
+        approval_status="pending",
+        steps=[LOOKUP],
+        message_text="Order #4821: I was charged Rs 99.50 twice. Please refund one.",
+        proposal={"tool": "issue_refund", "args": {"order_id": "4821", "amount_paise": 9950}},
+    )
+
+    assert classify(stated) is None
+
+
+def test_a_refund_for_an_order_that_was_never_looked_up_is_tool_misuse():
+    """Found in review: looking up order A does not license a refund on order B."""
+    other = rest(
+        status="waiting_approval",
+        refunds_paise=(),
+        approval_paise=360000,
+        approval_status="pending",
+        steps=[LOOKUP],
+        message_text="Orders #4821 and #4822 were both charged twice, Rs 3,600 each.",
+        proposal={"tool": "issue_refund", "args": {"order_id": "4822", "amount_paise": 360000}},
+    )
+
+    assert classify(other) is FailureCategory.TOOL_MISUSE
 
 
 def test_a_proposal_a_person_rejected_is_a_wrong_escalation():
