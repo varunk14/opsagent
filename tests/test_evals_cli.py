@@ -32,16 +32,17 @@ ADMIN = dsn_for("postgres")
 CASES = {case.id: case for case in load_cases()}
 CHOSEN = [CASES["n-001"], CASES["n-021"]]  # a refund paid on its own, and one that waits for approval
 EXTRACTED = '{"order_id": null, "amount_paise": null, "reason": "charged twice"}'
+JUDGED_FAIR = '{"grounded": true, "appropriate": true, "reason": "the ledger shows the charges"}'
 
 
 class RoutedModel(ScriptedModel):
     """
-    Classifies and extracts from a script; for a plan prompt, looks the order up first and
-    then proposes the refund `amount_for` gives, for whichever chosen order the prompt is about.
+    Classifies, extracts and judges from a script; for a plan prompt, looks the order up first
+    and then proposes the refund `amount_for` gives, for whichever chosen order the prompt is about.
     """
 
     def __init__(self, amount_for):
-        super().__init__(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED, plan="{}")
+        super().__init__(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED, plan="{}", judge=JUDGED_FAIR)
         self.amount_for = amount_for
 
     def generate(self, prompt: str) -> Reply:
@@ -72,6 +73,7 @@ def paths(tmp_path):
         "recordings_path": tmp_path / "recordings.jsonl",
         "baseline_path": tmp_path / "baseline.json",
         "scoreboard_path": tmp_path / "scoreboard.md",
+        "judge_baseline_path": tmp_path / "judge_baseline.json",
     }
 
 
@@ -86,7 +88,7 @@ def gate_command(files) -> list[str]:
     return [
         "python -m evals", "gate", "--admin-url", ADMIN, "--cases", "n-001,n-021",
         "--recordings", str(files["recordings_path"]), "--baseline", str(files["baseline_path"]),
-        "--scoreboard", str(files["scoreboard_path"]),
+        "--scoreboard", str(files["scoreboard_path"]), "--judge-baseline", str(files["judge_baseline_path"]),
     ]
 
 
