@@ -49,7 +49,7 @@ import sys
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -77,7 +77,7 @@ from app.graph.build import build_graph, failure_recorded, run_graph
 from app.graph.nodes import escalation
 from app.graph.prompts import run_prompt_version
 from app.graph.state import AgentState
-from app.guardrails import judge
+from app.guardrails import Verdict, judge
 from app.guardrails import load as load_guardrails
 from app.llm import Ollama, Reply, ServiceUnavailable
 from app.retrieval import PolicyRetriever
@@ -543,6 +543,127 @@ def close_tick(
     record_spans(connection, run_id)
 
 
+def oldest_lookup_if_limited(connection: psycopg.Connection, run_id: UUID) -> datetime | None:
+    """
+    When the run's sender is at the lookup limit, the time of their oldest lookup in the
+    window -- the run may come back once it leaves; otherwise None.
+
+    The sender's advisory lock is taken first and held until the transaction ends, so
+    two workers counting for one sender cannot both see the last free slot.
+    """
+    connection.execute(LOCK_SENDER, (run_id,))
+    recent = connection.execute(RECENT_LOOKUPS, (RATE_WINDOW, run_id)).fetchone()
+    if recent is not None and recent[0] >= RATE_LIMIT:
+        return recent[1]
+    return None
+
+
+def defer(
+    connection: psycopg.Connection,
+    claimed: ClaimedRun,
+    before: Mapping[str, Any],
+    state: AgentState,
+    steps: list[dict[str, Any]],
+    proposal: ProposedAction,
+    version: str,
+    oldest_lookup: datetime,
+) -> Decimal:
+    """
+    Send the run back to the queue until the sender's window frees, and say what the tick cost.
+
+    What this tick found is kept, so the next one plans from it and each model call is
+    charged once. Nothing is executed and no attempt is spent.
+    """
+    deferred, cost = summarise_agent(state, before, proposal, None, steps)
+    deferred["deferrals"] = before.get("deferrals", 0) + 1
+    connection.execute(
+        DEFER,
+        (oldest_lookup, RATE_WINDOW, Jsonb({"agent": deferred}), cost, version, claimed.run_id, claimed.worker),
+    )
+    return cost
+
+
+def judged(connection: psycopg.Connection, run_id: UUID, proposal: ProposedAction) -> Verdict:
+    """The guardrail's verdict on a refund, recorded as the act's guardrail span."""
+    with failure_recorded("guardrail", "guardrail") as span:
+        # Read now, inside this transaction: a limit changed a second ago applies.
+        limits = load_guardrails(connection)
+        verdict = judge(proposal, limits, refunded_so_far(connection, run_id, proposal))
+        span.set_attributes(
+            {
+                Attr.VERDICT: "runs" if verdict.runs else "needs a person",
+                Attr.LIMIT_PAISE: limits.auto_refund_limit_paise,
+                Attr.MIN_CONFIDENCE: str(limits.min_confidence),
+            }
+        )
+        if verdict.reason:
+            span.set_attribute(Attr.REASON, verdict.reason)
+    return verdict
+
+
+def act(
+    connection: psycopg.Connection,
+    claimed: ClaimedRun,
+    before: Mapping[str, Any],
+    state: AgentState,
+    steps: list[dict[str, Any]],
+    proposal: ProposedAction,
+    failure: str | None,
+    version: str,
+) -> tuple[str, ProposedAction, str | None, Decimal]:
+    """
+    Carry out one proposal in the tick's transaction, as the tick's act span, and record the run.
+
+    Returns the status the run was left in, the action actually taken (a hand-over can
+    replace the proposal), why a person must look if one must, and what the tick cost.
+    """
+    with failure_recorded("act", "tool") as span:
+        span.set_attribute(Attr.TOOL, proposal.tool)
+        if proposal.tool in RATE_LIMITED:
+            oldest_lookup = oldest_lookup_if_limited(connection, claimed.run_id)
+            if oldest_lookup is not None:
+                deferrals = before.get("deferrals", 0)
+                if deferrals < MAX_DEFERRALS:
+                    cost = defer(connection, claimed, before, state, steps, proposal, version, oldest_lookup)
+                    span.set_attribute(Attr.RESULT, "deferred by the rate limit")
+                    return "queued", proposal, None, cost
+                proposal, failure = hand_over(
+                    f"deferred {deferrals} times by the rate limit",
+                    "The sender kept this case over the lookup limit; a person should look at it.",
+                )
+                span.set_attribute(Attr.TOOL, proposal.tool)
+
+        if proposal.tool in RUNS_NOW:
+            record_step(connection, claimed.run_id, steps, proposal)
+
+        verdict = judged(connection, claimed.run_id, proposal) if proposal.tool in GUARDED else None
+        if verdict is not None and verdict.runs:
+            failure = pay(connection, claimed.run_id, steps, proposal)
+
+        agent, cost = summarise_agent(state, before, proposal, failure, steps)
+        stored = (Jsonb({"agent": agent}), cost, version, claimed.run_id, claimed.worker)
+        if proposal.tool == "get_order":
+            status, result = "running", "looked up"
+            connection.execute(CONTINUE, stored)
+        elif verdict is not None and not verdict.runs:
+            status, result = "waiting_approval", "approval opened"
+            reason = verdict.reason or ""
+            approval_id = open_approval(connection, claimed.run_id, proposal, evidence_for(claimed, agent), reason)
+            span.set_attribute(Attr.APPROVAL_ID, approval_id)
+            connection.execute(PARK, ("approval", *stored))
+        elif verdict is not None and failure is None:
+            status, result = "done", "refunded"
+            connection.execute(FINISH, stored)
+        else:
+            status = "waiting_approval"
+            result = "refused by the ledger" if verdict is not None else "handed to a person"
+            # A run that escalated early stopped at the step that failed.
+            node = failure.split(":", 1)[0] if failure else "plan"
+            connection.execute(PARK, (node, *stored))
+        span.set_attribute(Attr.RESULT, result)
+    return status, proposal, failure, cost
+
+
 def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_steps: int) -> RunOutcome:
     """Walk the graph from what the run holds, then act on one proposal in one transaction."""
     with traced_tick(claimed.run_id, {Attr.ATTEMPT: claimed.attempt}) as tick_span:
@@ -580,93 +701,10 @@ def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_st
 
         steps = list(before.get("steps", []))
         proposal, failure = decide(state, steps, max_steps)
-        deferred: dict[str, Any] | None = None
         with connection.transaction():
             if connection.execute(HOLD_CLAIM, (claimed.run_id, claimed.worker)).fetchone() is None:
                 raise LostClaim(f"run {claimed.run_id} was reclaimed before this worker could act on it")
-
-            with failure_recorded("act", "tool") as act:
-                act.set_attribute(Attr.TOOL, proposal.tool)
-                if proposal.tool in RATE_LIMITED:
-                    connection.execute(LOCK_SENDER, (claimed.run_id,))
-                    recent = connection.execute(RECENT_LOOKUPS, (RATE_WINDOW, claimed.run_id)).fetchone()
-                    if recent is not None and recent[0] >= RATE_LIMIT:
-                        deferrals = before.get("deferrals", 0)
-                        if deferrals >= MAX_DEFERRALS:
-                            proposal, failure = hand_over(
-                                f"deferred {deferrals} times by the rate limit",
-                                "The sender kept this case over the lookup limit; a person should look at it.",
-                            )
-                            act.set_attribute(Attr.TOOL, proposal.tool)
-                        else:
-                            # What this tick found is kept, so the next one plans from it and each
-                            # model call is charged once. Nothing is executed and no attempt is spent.
-                            deferred, cost = summarise_agent(state, before, proposal, None, steps)
-                            deferred["deferrals"] = deferrals + 1
-                            connection.execute(
-                                DEFER,
-                                (
-                                    recent[1],
-                                    RATE_WINDOW,
-                                    Jsonb({"agent": deferred}),
-                                    cost,
-                                    version,
-                                    claimed.run_id,
-                                    claimed.worker,
-                                ),
-                            )
-                            act.set_attribute(Attr.RESULT, "deferred by the rate limit")
-
-                if deferred is None:
-                    if proposal.tool in RUNS_NOW:
-                        record_step(connection, claimed.run_id, steps, proposal)
-
-                    verdict = None
-                    if proposal.tool in GUARDED:
-                        with failure_recorded("guardrail", "guardrail") as guard:
-                            # Read now, inside this transaction: a limit changed a second ago applies.
-                            limits = load_guardrails(connection)
-                            verdict = judge(proposal, limits, refunded_so_far(connection, claimed.run_id, proposal))
-                            guard.set_attributes(
-                                {
-                                    Attr.VERDICT: "runs" if verdict.runs else "needs a person",
-                                    Attr.LIMIT_PAISE: limits.auto_refund_limit_paise,
-                                    Attr.MIN_CONFIDENCE: str(limits.min_confidence),
-                                }
-                            )
-                            if verdict.reason:
-                                guard.set_attribute(Attr.REASON, verdict.reason)
-                        if verdict.runs:
-                            failure = pay(connection, claimed.run_id, steps, proposal)
-
-                    agent, cost = summarise_agent(state, before, proposal, failure, steps)
-                    stored = (Jsonb({"agent": agent}), cost, version, claimed.run_id, claimed.worker)
-                    if proposal.tool == "get_order":
-                        status, result = "running", "looked up"
-                        connection.execute(CONTINUE, stored)
-                    elif verdict is not None and not verdict.runs:
-                        status, result = "waiting_approval", "approval opened"
-                        approval_id = open_approval(
-                            connection, claimed.run_id, proposal, evidence_for(claimed, agent), verdict.reason or ""
-                        )
-                        act.set_attribute(Attr.APPROVAL_ID, approval_id)
-                        connection.execute(PARK, ("approval", *stored))
-                    elif verdict is not None and failure is None:
-                        status, result = "done", "refunded"
-                        connection.execute(FINISH, stored)
-                    else:
-                        status = "waiting_approval"
-                        result = "refused by the ledger" if verdict is not None else "handed to a person"
-                        # A run that escalated early stopped at the step that failed.
-                        node = failure.split(":", 1)[0] if failure else "plan"
-                        connection.execute(PARK, (node, *stored))
-                    act.set_attribute(Attr.RESULT, result)
-
-            if deferred is not None:
-                close_tick(connection, claimed.run_id, tick_span, "queued")
-                return RunOutcome(
-                    run_id=claimed.run_id, status="queued", tool=proposal.tool, steps=len(steps), failure=None, cost_usd=cost
-                )
+            status, proposal, failure, cost = act(connection, claimed, before, state, steps, proposal, failure, version)
             close_tick(connection, claimed.run_id, tick_span, status)
 
     return RunOutcome(
