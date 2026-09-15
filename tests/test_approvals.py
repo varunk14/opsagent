@@ -19,7 +19,13 @@ from decimal import Decimal
 import psycopg
 import pytest
 
-from app.approvals import PendingApproval, decide, list_pending, open_approval
+from app.approvals import (
+    PendingApproval,
+    decide,
+    list_pending,
+    mark_executed,
+    open_approval,
+)
 from app.contracts import ProposedAction
 
 pytestmark = pytest.mark.db
@@ -108,6 +114,32 @@ def test_a_decision_is_taken_once(db):
 
     assert approval(db, approval_id)[:2] == ("approved", "asha")
     assert run_of(db, run_id) == ("queued", None)
+
+
+def test_an_approval_already_decided_stays_decided_when_its_run_waits_again(db):
+    """
+    An approved refund the ledger refuses sends its run back to waiting, with the
+    approval still approved. Deciding that approval again must change nothing.
+    """
+    run_id = waiting_run(db)
+    approval_id = ask(db, run_id)
+    decide(db, approval_id, approved=True, by="asha")
+    db.execute("UPDATE runs SET status = 'waiting_approval' WHERE id = %s", (run_id,))
+
+    assert decide(db, approval_id, approved=False, by="ravi") is False
+
+    assert approval(db, approval_id)[:2] == ("approved", "asha")
+
+
+@pytest.mark.parametrize("decision", [None, False], ids=["pending", "rejected"])
+def test_only_an_approved_action_can_be_marked_executed(db, decision):
+    """Database review: anything else is refused as False, not raised as a CHECK violation."""
+    run_id = waiting_run(db)
+    approval_id = ask(db, run_id)
+    if decision is not None:
+        decide(db, approval_id, approved=decision, by="asha")
+
+    assert mark_executed(db, approval_id) is False
 
 
 def test_a_run_that_is_no_longer_waiting_is_not_moved(db):

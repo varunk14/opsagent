@@ -460,6 +460,13 @@ def test_an_executed_approval_stays_executed(db, change):
         db.execute(f"UPDATE approvals SET {change} WHERE id = %s", (approval_id(db, run_id),))
 
 
+def test_pending_approvals_can_be_listed_in_order_from_the_index_alone(db):
+    """Database review: the screen orders by (created_at, id); an index on created_at alone still sorts."""
+    indexed = db.execute("SELECT indexdef FROM pg_indexes WHERE tablename = 'approvals'").fetchall()
+
+    assert any("(created_at, id)" in definition and "pending" in definition for (definition,) in indexed)
+
+
 def test_a_run_has_at_most_one_approved_action_waiting_to_execute(db):
     run_id = insert_run(db, key="email_msg_two_approved", status="queued")
     decided = {"status": "approved", "decided_by": "asha", "decided_at": "2026-09-15T10:00:00Z"}

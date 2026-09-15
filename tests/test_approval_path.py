@@ -15,15 +15,28 @@ one the ledger refuses goes to a person rather than being tried again.
 These tests commit, so each one gets its own scratch database.
 """
 
+import threading
+import time
+from datetime import UTC, datetime
+
 import psycopg
 import pytest
 
 from app.approvals import approved_unexecuted, decide, list_pending
+from app.contracts import Channel, IncomingMessage
 from app.guardrails import set_limits
-from app.run_agent import LostClaim, act_on_approval, claim_next, work_next
+from app.intake import accept
+from app.run_agent import (
+    EVIDENCE_BODY_CHARS,
+    LostClaim,
+    act_on_approval,
+    claim_next,
+    work_next,
+)
 from tests.fakes import (
     CLASSIFIED_DUPLICATE,
     EXTRACTED_4821,
+    PROPOSED_ESCALATE,
     PROPOSED_LOOKUP,
     ScriptedModel,
     proposed_refund,
@@ -92,6 +105,20 @@ def decide_on(dsn: str, run_id: str, *, approved: bool) -> None:
 def limit(dsn: str, paise: int) -> None:
     with psycopg.connect(dsn) as connection:
         set_limits(connection, limit_paise=paise, by="asha")
+
+
+def wait_for_lock_waiters(dsn: str, expected: int, timeout: float = 20.0) -> None:
+    """Block until `expected` sessions in this database are waiting on a lock."""
+    deadline = time.monotonic() + timeout
+    with psycopg.connect(dsn, autocommit=True) as watcher:
+        while time.monotonic() < deadline:
+            waiting = watcher.execute(
+                "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'"
+            ).fetchone()[0]
+            if waiting >= expected:
+                return
+            time.sleep(0.05)
+    raise AssertionError(f"expected {expected} sessions waiting on a lock")
 
 
 # --- the guardrail at the act step -------------------------------------------------------
@@ -185,6 +212,60 @@ def test_a_refund_split_in_two_is_judged_as_the_whole_it_adds_up_to(fresh_databa
     assert asked["reason"] == (
         "Rs 3,600 would bring refunds on order 4821 to Rs 7,200, not under the Rs 5,000 limit for automatic refunds"
     )
+
+
+def test_two_runs_refunding_one_order_at_once_are_judged_one_after_the_other(fresh_database):
+    """
+    The race half of the splitting finding. Both runs reach the act step while
+    something else holds order 4821; released together, the second must judge
+    against the first's refund, not against the nothing both would read unlocked.
+    """
+    ledger(fresh_database)
+    queue(fresh_database, "first", minute=1)
+    queue(fresh_database, "second", minute=2)
+    outcomes = []
+    errors: list[BaseException] = []
+
+    def worker(name: str) -> None:
+        try:
+            outcomes.append(work(fresh_database, refund_model(360_000), worker=name))
+        except BaseException as exc:  # noqa: BLE001 - surfaced by the assertion below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(name,)) for name in ("worker-a", "worker-b")]
+    with psycopg.connect(fresh_database) as holder:
+        holder.execute("SELECT 1 FROM orders WHERE id = '4821' FOR UPDATE")
+        for thread in threads:
+            thread.start()
+        wait_for_lock_waiters(fresh_database, 2)
+        holder.rollback()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    assert errors == []
+    assert sorted(outcome.status for outcome in outcomes) == ["done", "waiting_approval"]
+    assert len(refunds(fresh_database)) == 1
+
+
+def test_the_evidence_keeps_only_the_start_of_a_long_message(fresh_database):
+    """The whole thread stays on the run; the approval holds what a person will read."""
+    ledger(fresh_database)
+    message = IncomingMessage(
+        channel=Channel.EMAIL,
+        external_id="long-thread",
+        sender="priya@example.com",
+        subject="Charged twice",
+        body="Charged twice for 4821. " + "quoted thread " * 1000,
+        received_at=datetime(2026, 9, 13, 9, tzinfo=UTC),
+    )
+    with psycopg.connect(fresh_database) as connection:
+        run_id = str(accept(connection, message).run_id)
+
+    work(fresh_database, refund_model(720_000))
+
+    (asked,) = approvals_of(fresh_database, run_id)
+    assert len(asked["evidence"]["body"]) == EVIDENCE_BODY_CHARS
+    assert asked["evidence"]["body"].startswith("Charged twice for 4821.")
 
 
 def test_the_limit_in_force_when_the_worker_acts_is_the_one_applied(fresh_database):
@@ -292,6 +373,65 @@ def test_an_approved_refund_survives_the_worker_that_took_it_dying(fresh_databas
     assert outcome.status == "done"
     assert refunds(fresh_database) == [("4821", 720_000, run_id)]
     assert work(fresh_database, MustNotBeAsked()) is None
+
+
+def test_a_run_sent_back_to_the_queue_by_hand_never_pays_an_approval_twice(fresh_database):
+    """Once executed, an approval is spent. An operator's UPDATE, or any future requeue, must not pay it again."""
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    work(fresh_database, refund_model(360_000, confidence="0.5"))
+    decide_on(fresh_database, run_id, approved=True)
+    assert work(fresh_database, MustNotBeAsked()).status == "done"
+    with psycopg.connect(fresh_database) as connection:
+        connection.execute("UPDATE runs SET status = 'queued' WHERE id = %s", (run_id,))
+
+    work(fresh_database, ScriptedModel(plan=PROPOSED_ESCALATE))
+
+    assert refunds(fresh_database) == [("4821", 360_000, run_id)]
+
+
+def test_an_approved_action_that_can_no_longer_be_read_goes_to_a_person(fresh_database):
+    """
+    Python review: a stored action that no longer validates -- a schema change, an
+    older worker's record -- must not crash every worker that claims the run.
+    """
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    with psycopg.connect(fresh_database) as connection:
+        connection.execute(
+            "INSERT INTO approvals (run_id, action, evidence, reason, status, decided_by, decided_at) "
+            "VALUES (%s, '{\"tool\": \"issue_refund\", \"args\": {\"order_id\": \"4821\"}}', '{}', 'test', "
+            "'approved', 'asha', now())",
+            (run_id,),
+        )
+
+    outcome = work(fresh_database, MustNotBeAsked())
+
+    assert outcome.status == "waiting_approval"
+    assert "the approved action could not be read" in outcome.failure
+    assert refunds(fresh_database) == []
+    assert work(fresh_database, MustNotBeAsked()) is None
+
+
+def test_an_approval_already_executed_is_not_paid_by_a_worker_holding_an_old_copy(fresh_database):
+    """Python review: the act transaction checks for itself that the approval is still unexecuted."""
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    work(fresh_database, refund_model(360_000, confidence="0.5"))
+    decide_on(fresh_database, run_id, approved=True)
+    with psycopg.connect(fresh_database) as connection:
+        with connection.transaction():
+            old_copy = approved_unexecuted(connection, run_id)
+    assert work(fresh_database, MustNotBeAsked()).status == "done"
+    with psycopg.connect(fresh_database) as connection:
+        connection.execute("UPDATE runs SET status = 'queued' WHERE id = %s", (run_id,))
+    with psycopg.connect(fresh_database) as connection:
+        claimed = claim_next(connection, worker="worker-late")
+
+        with pytest.raises(RuntimeError, match="already executed"):
+            act_on_approval(connection, claimed, old_copy)
+
+    assert refunds(fresh_database) == [("4821", 360_000, run_id)]
 
 
 def test_a_worker_that_lost_its_claim_pays_nothing_that_was_approved(fresh_database):
