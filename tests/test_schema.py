@@ -220,3 +220,62 @@ def test_the_worker_can_find_due_runs_without_a_sequential_scan(db):
         "status" in definition and "next_retry_at" in definition
         for (definition,) in indexed
     )
+
+
+def test_the_worker_can_find_expired_locks_without_a_sequential_scan(db):
+    """Lock expiry looks for running runs by how old their lock is, on every claim."""
+    indexed = db.execute("SELECT indexdef FROM pg_indexes WHERE tablename = 'runs'").fetchall()
+
+    assert any("locked_at" in definition and "running" in definition for (definition,) in indexed)
+
+
+# --- week 4: dead letters -----------------------------------------------------
+
+
+def insert_dead_letter(db, *, kind: str, run_id: uuid.UUID | None = None, key: str = "email_msg_dead") -> None:
+    db.execute(
+        "INSERT INTO dead_letters (kind, run_id, idempotency_key, payload, reason) "
+        "VALUES (%s, %s, %s, '{}'::jsonb, 'test')",
+        (kind, run_id, key),
+    )
+
+
+def test_a_dead_letter_is_about_a_run_or_a_message_and_nothing_else(db):
+    with pytest.raises(psycopg.errors.CheckViolation):
+        insert_dead_letter(db, kind="mystery")
+
+
+def test_a_dead_run_letter_names_its_run(db):
+    with pytest.raises(psycopg.errors.CheckViolation):
+        insert_dead_letter(db, kind="run", run_id=None)
+
+
+def test_a_quarantined_message_names_no_run(db):
+    """It never became a run of its own: that is why it is quarantined."""
+    run_id = insert_run(db, key="email_msg_real")
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        insert_dead_letter(db, kind="message", run_id=run_id)
+
+
+def test_a_dead_letter_cannot_name_a_run_that_does_not_exist(db):
+    with pytest.raises(psycopg.errors.ForeignKeyViolation):
+        insert_dead_letter(db, kind="run", run_id=uuid.uuid4())
+
+
+def test_a_dead_run_has_at_most_one_open_dead_letter(db):
+    run_id = insert_run(db, key="email_msg_dead_once", status="dead")
+    insert_dead_letter(db, kind="run", run_id=run_id)
+
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        insert_dead_letter(db, kind="run", run_id=run_id)
+
+
+def test_a_requeued_run_that_dies_again_gets_a_new_dead_letter(db):
+    run_id = insert_run(db, key="email_msg_dies_again", status="dead")
+    insert_dead_letter(db, kind="run", run_id=run_id)
+    db.execute("UPDATE dead_letters SET requeued_at = now() WHERE run_id = %s", (run_id,))
+
+    insert_dead_letter(db, kind="run", run_id=run_id)
+
+    assert db.execute("SELECT count(*) FROM dead_letters WHERE run_id = %s", (run_id,)).fetchone()[0] == 2
