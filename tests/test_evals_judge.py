@@ -119,6 +119,21 @@ def test_text_the_run_produced_cannot_close_the_fence_it_is_shown_in():
     assert prompt.count("DECISION>>>") == 1
 
 
+def test_the_judge_is_told_when_a_run_never_came_to_rest():
+    prompt = judge_prompt(REFUNDED, replace(seen(), status="failed", refunds_paise=()))
+
+    assert "never came to rest" in prompt
+
+
+def test_a_judge_template_with_the_wrong_placeholders_is_refused(monkeypatch):
+    from evals import judge
+
+    monkeypatch.setattr(judge, "load_template", lambda task: "TASK: judge\n$policy\n$customer_message")
+
+    with pytest.raises(ValueError, match="placeholders"):
+        judge.load_judge_template()
+
+
 def test_a_run_that_left_no_evidence_is_still_judged_on_what_there_is():
     prompt = judge_prompt(HANDED_OVER, perfect(HANDED_OVER))
 
