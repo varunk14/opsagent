@@ -1,38 +1,52 @@
 """
 Tracing: every run is one OpenTelemetry trace, recorded with the steps it describes.
 
-Three decisions shape this module.
+Four decisions shape this module.
 
 The trace id is the run's id. A run is worked in ticks, by whichever worker claims
 it, sometimes days apart around an approval. Taking each tick's trace id from the
 run's UUID -- both are 128 bits -- puts all of it in one trace without passing
-anything between processes.
+anything between processes. Which run a span belongs to is settled when it starts,
+exactly as its trace id is, so a span that ends after its run's context has closed
+is still the run's.
 
 Spans are recorded where the steps are. A processor holds each finished span under
 its run, and the driver writes them with record_spans in the transaction that commits
 the step. A tick that never commits -- a lost claim, a crash -- leaves no spans, just
-as it leaves no steps, and `discard` drops what it held.
+as it leaves no steps, and `discard` drops what it held. A run holds at most
+MAX_HELD_SPANS_PER_RUN, so a retry storm cannot grow a worker's memory without limit.
+
+Writing spans never takes a step down. That transaction may be paying a refund, so
+every value the spans table would refuse is left out of its column (and kept, as it
+was set, among the attributes): a count that is not a whole number, a cost that is
+not a finite amount, a version that is not a version. A generation left without its
+model, counts or cost is written as a plain span that says why.
 
 A copy goes to Langfuse, and only on this machine. The exporter exists only when
-OPSAGENT_OTLP_ENDPOINT is set, refuses any host but 127.0.0.1 or localhost, and sends
-from a background batch with a short timeout, so a Langfuse that is down never raises
-into a tick or holds it up. The resource names the service and nothing else: a
-worker's host name and pid are what `locked_by` holds, and they stay in the database.
+OPSAGENT_OTLP_ENDPOINT is set, refuses any host but 127.0.0.1 or localhost, and its
+connection honours no proxy from the environment and follows no redirect -- either
+would carry spans addressed to this machine somewhere else. It sends from a
+background batch with a short timeout, so a Langfuse that is down never raises into a
+tick or holds it up. The resource names the service and nothing else: a worker's host
+name and pid are what `locked_by` holds, and they stay in the database.
 """
 
 import base64
+import re
+import sys
 import threading
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import astuple, dataclass
+from dataclasses import dataclass, fields
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import urlsplit
 from uuid import UUID
 
 import psycopg
+import requests
 from opentelemetry import trace
 from opentelemetry.context import Context
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
@@ -57,9 +71,16 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost"})
 # Long enough for a local Langfuse under load, short enough that shutting a worker down stays quick.
 EXPORT_TIMEOUT_SECONDS = 5
 
+# A tick makes a few dozen spans. Far past that, something is looping, and holding
+# every span it makes would turn a runaway step into a runaway worker.
+MAX_HELD_SPANS_PER_RUN = 1_000
+
 # What the spans table accepts. Any other type is recorded as a plain span, as Langfuse
 # itself does, so a mistyped attribute can never abort the transaction that pays a refund.
 KINDS = frozenset({"span", "chain", "generation", "retriever", "embedding", "tool", "guardrail"})
+PROMPT_VERSION_PATTERN = re.compile(r"[0-9a-f]{12}")
+GENERATION_NEEDS = "a generation needs a model, token counts and a cost"
+UNNAMED = "unnamed"
 
 
 class Attr:
@@ -77,6 +98,8 @@ class Attr:
     PROMPT_VERSION = "opsagent.prompt_version"
     PROMPT_VERSION_METADATA = "langfuse.observation.metadata.prompt_version"
     LATENCY_MS = "opsagent.latency_ms"
+    # Why a span that asked to be a generation was written as a plain span.
+    RECORDED_AS_SPAN = "opsagent.recorded_as_span"
 
 
 _current_run: ContextVar[UUID | None] = ContextVar("opsagent_current_run", default=None)
@@ -110,31 +133,52 @@ class RunSpanRecorder(SpanProcessor):
     """
     Holds each finished span of a run until the driver writes it or drops it.
 
-    Only spans that end inside run_context, in their run's own trace, are held, so
-    tracing outside a run cannot grow this without bound.
+    A span is the run's if it started inside that run's context, in that run's trace --
+    decided at start, as its trace id was -- so where it happens to end does not
+    matter, and spans traced outside any run are never held at all.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
+        self._started_in_a_run: set[tuple[int, int]] = set()
         self._held: dict[int, list[ReadableSpan]] = {}
+        self._dropped: dict[int, int] = {}
 
     def on_start(self, span: Span, parent_context: Context | None = None) -> None:
-        return None
+        run_id = _current_run.get()
+        context = span.get_span_context()
+        if run_id is not None and context.trace_id == run_id.int:
+            with self._lock:
+                self._started_in_a_run.add((context.trace_id, context.span_id))
 
     def on_end(self, span: ReadableSpan) -> None:
-        run_id = _current_run.get()
-        if run_id is None or span.context is None or span.context.trace_id != run_id.int:
+        context = span.context
+        if context is None:  # pragma: no cover - the SDK gives every span a context
             return
         with self._lock:
-            self._held.setdefault(run_id.int, []).append(span)
+            key = (context.trace_id, context.span_id)
+            if key not in self._started_in_a_run:
+                return
+            self._started_in_a_run.discard(key)
+            held = self._held.setdefault(context.trace_id, [])
+            if len(held) >= MAX_HELD_SPANS_PER_RUN:
+                self._dropped[context.trace_id] = self._dropped.get(context.trace_id, 0) + 1
+                return
+            held.append(span)
 
     def take(self, run_id: UUID) -> list[ReadableSpan]:
+        return self.take_with_dropped(run_id)[0]
+
+    def take_with_dropped(self, run_id: UUID) -> tuple[list[ReadableSpan], int]:
+        """The run's finished spans, and how many past the bound were not kept. Both are cleared."""
         with self._lock:
-            return self._held.pop(run_id.int, [])
+            return self._held.pop(run_id.int, []), self._dropped.pop(run_id.int, 0)
 
     def clear(self) -> None:
         with self._lock:
+            self._started_in_a_run.clear()
             self._held.clear()
+            self._dropped.clear()
 
     def shutdown(self) -> None:
         self.clear()
@@ -189,6 +233,26 @@ def tracer() -> trace.Tracer:
     return trace.get_tracer(TRACER_NAME)
 
 
+class LoopbackSession(requests.Session):
+    """
+    The connection traces leave on, with two of requests' defaults turned off.
+
+    requests takes a proxy from HTTP_PROXY or ALL_PROXY, which would send spans
+    addressed to 127.0.0.1 to the proxy's host; and it follows redirects, which would
+    send a batch again to wherever a redirect points. A Langfuse on this machine needs
+    neither, so neither happens.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.trust_env = False
+        self.max_redirects = 0  # a second guard: were a redirect ever seen, it would be refused
+
+    def get_redirect_target(self, resp: requests.Response) -> str | None:
+        """No response names somewhere else to go: a redirect comes back as the failure it is."""
+        return None
+
+
 def loopback_exporter(endpoint: str, public_key: str, secret_key: str) -> OTLPSpanExporter:
     """An OTLP/HTTP exporter to a Langfuse on this machine. Any other host is refused."""
     parts = urlsplit(endpoint)
@@ -203,6 +267,7 @@ def loopback_exporter(endpoint: str, public_key: str, secret_key: str) -> OTLPSp
         endpoint=endpoint,
         headers={"Authorization": f"Basic {credentials}", "x-langfuse-ingestion-version": "4"},
         timeout=EXPORT_TIMEOUT_SECONDS,
+        session=LoopbackSession(),
     )
 
 
@@ -227,7 +292,7 @@ def exporter_from_env(environ: Mapping[str, str]) -> OTLPSpanExporter | None:
 
 @dataclass(frozen=True)
 class SpanRow:
-    """One span as the spans table stores it. Field order is the INSERT's column order."""
+    """One span as the spans table stores it: each field is the column of the same name."""
 
     trace_id: UUID
     span_id: str
@@ -249,7 +314,9 @@ class SpanRow:
 INSERT_SPAN = """
     INSERT INTO spans (trace_id, span_id, parent_span_id, name, kind, started_at, ended_at, status,
                        status_message, model, prompt_version, input_tokens, output_tokens, cost_usd, attributes)
-    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    VALUES (%(trace_id)s, %(span_id)s, %(parent_span_id)s, %(name)s, %(kind)s, %(started_at)s, %(ended_at)s,
+            %(status)s, %(status_message)s, %(model)s, %(prompt_version)s, %(input_tokens)s, %(output_tokens)s,
+            %(cost_usd)s, %(attributes)s)
 """
 
 
@@ -263,35 +330,65 @@ def _hex(span_id: int) -> str:
     return format(span_id, "016x")
 
 
-def _optional_int(value: object) -> int | None:
-    return None if value is None else int(str(value))
+def _count(value: object) -> int | None:
+    """A token count as the table takes it -- a whole number, not negative -- or nothing."""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _cost(value: object) -> Decimal | None:
+    """A cost as the table takes it -- a finite amount, not negative -- or nothing."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        cost = Decimal(str(value))
+    except InvalidOperation:
+        return None
+    return cost if cost.is_finite() and cost >= 0 else None
+
+
+def _version(value: object) -> str | None:
+    return value if isinstance(value, str) and PROMPT_VERSION_PATTERN.fullmatch(value) else None
 
 
 def _row(span: ReadableSpan) -> SpanRow:
+    """One span as a row the spans table will accept, whatever was set on it."""
     context = span.context
     if context is None or span.start_time is None:  # pragma: no cover - the SDK sets both on every started span
         raise ValueError(f"span {span.name!r} was never started")
-    attributes = dict(span.attributes or {})
-    kind = str(attributes.get(Attr.TYPE, "span"))
-    cost = attributes.get(Attr.COST_USD)
+    attributes = {
+        key: list(value) if isinstance(value, tuple) else value for key, value in (span.attributes or {}).items()
+    }
     model = attributes.get(Attr.MODEL)
-    version = attributes.get(Attr.PROMPT_VERSION)
+    model = None if model is None else str(model)
+    input_tokens = _count(attributes.get(Attr.INPUT_TOKENS))
+    output_tokens = _count(attributes.get(Attr.OUTPUT_TOKENS))
+    cost = _cost(attributes.get(Attr.COST_USD))
+    kind = str(attributes.get(Attr.TYPE, "span"))
+    if kind not in KINDS:
+        kind = "span"
+    if kind == "generation" and None in (model, input_tokens, output_tokens, cost):
+        kind = "span"
+        attributes[Attr.RECORDED_AS_SPAN] = GENERATION_NEEDS
+    started_at = _when(span.start_time)
+    ended_at = started_at if span.end_time is None else max(started_at, _when(span.end_time))
     return SpanRow(
         trace_id=UUID(int=context.trace_id),
         span_id=_hex(context.span_id),
         parent_span_id=_hex(span.parent.span_id) if span.parent is not None else None,
-        name=span.name,
-        kind=kind if kind in KINDS else "span",
-        started_at=_when(span.start_time),
-        ended_at=_when(span.end_time if span.end_time is not None else span.start_time),
+        name=span.name if span.name.strip() else UNNAMED,
+        kind=kind,
+        started_at=started_at,
+        ended_at=ended_at,
         status="error" if span.status.status_code is StatusCode.ERROR else "ok",
         status_message=span.status.description,
-        model=None if model is None else str(model),
-        prompt_version=None if version is None else str(version),
-        input_tokens=_optional_int(attributes.get(Attr.INPUT_TOKENS)),
-        output_tokens=_optional_int(attributes.get(Attr.OUTPUT_TOKENS)),
-        cost_usd=None if cost is None else Decimal(str(cost)),
-        attributes={key: list(value) if isinstance(value, tuple) else value for key, value in attributes.items()},
+        model=model,
+        prompt_version=_version(attributes.get(Attr.PROMPT_VERSION)),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost_usd=cost,
+        attributes=attributes,
     )
 
 
@@ -309,6 +406,12 @@ def rows_for(spans: Sequence[ReadableSpan]) -> list[SpanRow]:
     return sorted(rows, key=lambda row: (row.started_at, depth(row)))
 
 
+def _parameters(row: SpanRow) -> dict[str, Any]:
+    values = {field.name: getattr(row, field.name) for field in fields(row)}
+    values["attributes"] = Jsonb(row.attributes)
+    return values
+
+
 def record_spans(connection: psycopg.Connection, run_id: UUID) -> int:
     """
     Write the run's finished spans in the caller's transaction, and say how many.
@@ -318,16 +421,21 @@ def record_spans(connection: psycopg.Connection, run_id: UUID) -> int:
     """
     if _installed is None:
         return 0
-    rows = rows_for(_installed.recorder.take(run_id))
+    spans, dropped = _installed.recorder.take_with_dropped(run_id)
+    if dropped:
+        print(
+            f"  warning: {dropped} spans of run {run_id} were not recorded: "
+            f"one step made more than {MAX_HELD_SPANS_PER_RUN}",
+            file=sys.stderr,
+        )
+    rows = rows_for(spans)
     if rows:
         with connection.cursor() as cursor:
-            cursor.executemany(
-                INSERT_SPAN, [(*astuple(row)[:-1], Jsonb(row.attributes)) for row in rows]
-            )
+            cursor.executemany(INSERT_SPAN, [_parameters(row) for row in rows])
     return len(rows)
 
 
 def discard(run_id: UUID) -> None:
     """Drop what a tick that will never commit was holding, so its next tick does not write it."""
     if _installed is not None:
-        _installed.recorder.take(run_id)
+        _installed.recorder.take_with_dropped(run_id)
