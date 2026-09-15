@@ -24,7 +24,6 @@ from evals.golden import load_cases
 from evals.judge import (
     JudgeBoard,
     Verdict,
-    compare_judge,
     judge_board_of,
     judge_case,
     judge_prompt,
@@ -228,37 +227,6 @@ def test_a_board_with_nothing_judged_leaves_its_shares_undefined():
 def test_a_case_with_no_verdict_at_all_is_refused_by_id():
     with pytest.raises(ValueError, match="n-001"):
         judge_board_of([REFUNDED], [perfect(REFUNDED)], {})
-
-
-def board(**changes) -> JudgeBoard:
-    fields = {
-        "judged": 25,
-        "unjudged": 0,
-        "grounded": Decimal("0.8000"),
-        "appropriate": Decimal("0.6000"),
-        "agreement": Decimal("0.4000"),
-    }
-    return JudgeBoard(**{**fields, **changes})
-
-
-def test_the_same_judge_board_is_no_worse():
-    assert compare_judge(board(), board()) == []
-
-
-def test_fewer_decisions_judged_appropriate_is_worse():
-    assert compare_judge(board(appropriate=Decimal("0.5600")), board()) == ["judged appropriate fell from 0.6000 to 0.5600"]
-
-
-def test_fewer_decisions_judged_grounded_is_worse():
-    assert compare_judge(board(grounded=Decimal("0.7600")), board()) == ["judged grounded fell from 0.8000 to 0.7600"]
-
-
-def test_more_cases_left_unjudged_is_worse():
-    assert compare_judge(board(unjudged=2), board()) == ["unjudged cases rose from 0 to 2"]
-
-
-def test_the_judge_agreeing_less_with_layer_one_is_published_not_failed():
-    assert compare_judge(board(agreement=Decimal("0.1000")), board()) == []
 
 
 # --- what a run leaves for the judge -----------------------------------------------------------

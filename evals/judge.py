@@ -9,12 +9,11 @@ message comes first and the instruction to reply comes last, so untrusted text i
 last thing the model reads.
 
 Small local models are poor judges: measured before this was written, two of them called a
-double refund appropriate. So the board says how often the judge agrees with layer 1 beside
-the judge's own score, and only that score falling, or more cases left unjudged, is a
-failure. Agreement measures the judge, not the agent.
+double refund appropriate, and on the first real recording the judge called no decision
+appropriate at all. So the judge gates nothing. Its board is published on the scoreboard with
+how often it agrees with layer 1 beside its score; agreement measures the judge, not the agent.
 
-The smoke cases are judged on every pull request, from recorded verdicts; the board is kept
-in a baseline of its own, refused by name when it is not a real board. Before a release,
+The smoke cases are judged on every pull request, from recorded verdicts. Before a release,
 every case is judged (layer 3), on a machine with the model.
 """
 
@@ -31,15 +30,7 @@ from app.graph.prompts import MAX_OBSERVATIONS, customer_message, load_template
 from app.llm import Model, ModelOutputInvalid, fence_safe, structured
 from evals.golden import GoldenCase, Outcome
 from evals.runner import CaseResult
-from evals.scoring import (
-    as_text,
-    checked_count,
-    checked_share,
-    outcome_of,
-    rate,
-    score_case,
-    shown,
-)
+from evals.scoring import outcome_of, rate, score_case, shown
 
 TASK = "judge"
 PLACEHOLDERS = frozenset({"policy", "steps", "decision", "customer_message"})
@@ -151,42 +142,14 @@ def judge_cases(
     return {case.id: judge_case(model, case, by_id[case.id]) for case in judged}
 
 
-JUDGE_SHARES = ("grounded", "appropriate", "agreement")
-
-
 @dataclass(frozen=True)
 class JudgeBoard:
     judged: int
     unjudged: int
     grounded: Decimal | None
     appropriate: Decimal | None
-    # How often "appropriate" matches layer 1's "complete": a measure of the judge, published, not gated.
+    # How often "appropriate" matches layer 1's "complete": a measure of the judge, not the agent.
     agreement: Decimal | None
-
-    def to_json(self) -> str:
-        document = {
-            "judged": self.judged,
-            "unjudged": self.unjudged,
-            **{name: as_text(getattr(self, name)) for name in JUDGE_SHARES},
-        }
-        return json.dumps(document, indent=2, sort_keys=True) + "\n"
-
-    @classmethod
-    def from_json(cls, text: str) -> "JudgeBoard":
-        """A committed judge baseline, refused by name if any part of it is not a real board."""
-        document = json.loads(text)
-        if not isinstance(document, dict):
-            raise ValueError("the judge baseline is not a board: expected a JSON object")  # noqa: TRY004
-        try:
-            return cls(
-                judged=checked_count("judged", document["judged"]),
-                unjudged=checked_count("unjudged", document["unjudged"]),
-                grounded=checked_share("grounded", document["grounded"]),
-                appropriate=checked_share("appropriate", document["appropriate"]),
-                agreement=checked_share("agreement", document["agreement"]),
-            )
-        except KeyError as missing:
-            raise ValueError(f"the judge baseline is missing {missing.args[0]}") from missing
 
 
 def judge_board_of(
@@ -211,18 +174,6 @@ def judge_board_of(
             sum(verdict.appropriate == score_case(case, by_id[case.id]).completed for case, verdict in judged), len(judged)
         ),
     )
-
-
-def compare_judge(current: JudgeBoard, baseline: JudgeBoard) -> list[str]:
-    """Every way the judge's board is worse than its baseline. Agreement is not compared."""
-    problems = []
-    if current.unjudged > baseline.unjudged:
-        problems.append(f"unjudged cases rose from {baseline.unjudged} to {current.unjudged}")
-    for label, attribute in (("judged grounded", "grounded"), ("judged appropriate", "appropriate")):
-        now, before = getattr(current, attribute), getattr(baseline, attribute)
-        if before is not None and (now is None or now < before):
-            problems.append(f"{label} fell from {before} to {shown(now)}")
-    return problems
 
 
 def render_judge(board: JudgeBoard, every_case: bool = False) -> str:

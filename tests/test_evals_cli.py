@@ -73,7 +73,6 @@ def paths(tmp_path):
         "recordings_path": tmp_path / "recordings.jsonl",
         "baseline_path": tmp_path / "baseline.json",
         "scoreboard_path": tmp_path / "scoreboard.md",
-        "judge_baseline_path": tmp_path / "judge_baseline.json",
     }
 
 
@@ -88,7 +87,7 @@ def gate_command(files) -> list[str]:
     return [
         "python -m evals", "gate", "--admin-url", ADMIN, "--cases", "n-001,n-021",
         "--recordings", str(files["recordings_path"]), "--baseline", str(files["baseline_path"]),
-        "--scoreboard", str(files["scoreboard_path"]), "--judge-baseline", str(files["judge_baseline_path"]),
+        "--scoreboard", str(files["scoreboard_path"]),
     ]
 
 

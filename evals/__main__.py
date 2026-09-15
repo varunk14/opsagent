@@ -13,10 +13,11 @@ Whatever was recorded is saved even when the run fails. Once the runs have reste
 model judges each smoke case, and its verdicts are recorded with everything else.
 
 `gate` fails -- exit status 1, every reason printed -- when a measure is worse than the
-committed baseline, when the judge thinks less of the decisions than its own baseline did,
-when anything is unsafe, when a prompt or case changed since recording, or when the committed
-scoreboard no longer says what the recordings score. There are no baselines until `accept`
-writes them, and changing one is a reviewed change to a committed file.
+committed baseline, when a case that was safe became unsafe, when a prompt or case changed
+since recording, or when the committed scoreboard no longer says what the recordings score.
+The judge's verdicts are on that scoreboard, so a changed verdict shows, but the judge's score
+fails nothing. There is no baseline until `accept` writes one, and changing it is a reviewed
+change to a committed file.
 
 `verify` is the check a replay cannot make. A recording is keyed by its prompt, not by what the
 model said, so a hand-edited reply or verdict would replay as real; recording again live, where
@@ -46,14 +47,7 @@ from psycopg.conninfo import make_conninfo
 from app.embeddings import EMBEDDING_MODEL, Embedder, OllamaEmbedder
 from app.llm import DEFAULT_MODEL, Model, Ollama
 from evals.golden import EVALS_DIR, GoldenCase, load_cases
-from evals.judge import (
-    JudgeBoard,
-    Verdict,
-    compare_judge,
-    judge_board_of,
-    judge_cases,
-    render_judge,
-)
+from evals.judge import Verdict, judge_board_of, judge_cases, render_judge
 from evals.recording import (
     RecordedEmbedder,
     RecordedModel,
@@ -67,7 +61,6 @@ from evals.scoring import Scoreboard, compare, render_markdown, scoreboard_of
 
 RECORDINGS = EVALS_DIR / "recordings.jsonl"
 BASELINE = EVALS_DIR / "baseline.json"
-JUDGE_BASELINE = EVALS_DIR / "judge_baseline.json"
 SCOREBOARD = EVALS_DIR / "scoreboard.md"
 FULL = EVALS_DIR / "full.md"
 
@@ -200,6 +193,11 @@ def recorded_verdicts(
     return judge_cases(RecordedModel(Recordings.load(recordings_path), model=model_name), cases, results)
 
 
+def scoreboard_text(cases: Sequence[GoldenCase], results: Sequence[CaseResult], verdicts: dict[str, Verdict | None]) -> str:
+    """The committed scoreboard: layer 1, then the judge's section."""
+    return render_markdown(scoreboard_of(cases, results)) + render_judge(judge_board_of(cases, results, verdicts))
+
+
 def gate(
     admin_url: str,
     cases: Sequence[GoldenCase],
@@ -208,23 +206,18 @@ def gate(
     scoreboard_path: Path = SCOREBOARD,
     model_name: str = DEFAULT_MODEL,
     embedding_model: str = EMBEDDING_MODEL,
-    judge_baseline_path: Path = JUDGE_BASELINE,
 ) -> list[str]:
-    """Every reason the recordings do not pass. Empty means nothing is worse and nothing is unsafe."""
-    for path, what in ((baseline_path, "baseline"), (judge_baseline_path, "judge baseline")):
-        if not path.exists():
-            return [f"there is no {what} at {path}: run `python -m evals accept` once and commit what it writes"]
+    """Every reason the recordings do not pass. Empty means nothing is worse and no safe case became unsafe."""
+    if not baseline_path.exists():
+        return [f"there is no baseline at {baseline_path}: run `python -m evals accept` once and commit what it writes"]
     try:
         results = replay(admin_url, cases, recordings_path, model_name, embedding_model)
         verdicts = recorded_verdicts(cases, results, recordings_path, model_name)
     except RecordingMissing as missing:
         return [str(missing)]
 
-    board = scoreboard_of(cases, results)
-    judged = judge_board_of(cases, results, verdicts)
-    problems = compare(board, Scoreboard.from_json(baseline_path.read_text()))
-    problems += compare_judge(judged, JudgeBoard.from_json(judge_baseline_path.read_text()))
-    if not scoreboard_path.exists() or scoreboard_path.read_text() != render_markdown(board) + render_judge(judged):
+    problems = compare(scoreboard_of(cases, results), Scoreboard.from_json(baseline_path.read_text()))
+    if not scoreboard_path.exists() or scoreboard_path.read_text() != scoreboard_text(cases, results, verdicts):
         problems.append(
             f"the committed scoreboard {scoreboard_path.name} does not say what the recordings score: "
             "run `python -m evals accept` if the change is deliberate"
@@ -240,15 +233,12 @@ def accept(
     scoreboard_path: Path = SCOREBOARD,
     model_name: str = DEFAULT_MODEL,
     embedding_model: str = EMBEDDING_MODEL,
-    judge_baseline_path: Path = JUDGE_BASELINE,
 ) -> Scoreboard:
-    """Score the recordings and write that as the baselines and scoreboard, for a reviewed commit."""
+    """Score the recordings and write that as the baseline and scoreboard, for a reviewed commit."""
     results = replay(admin_url, cases, recordings_path, model_name, embedding_model)
     board = scoreboard_of(cases, results)
-    judged = judge_board_of(cases, results, recorded_verdicts(cases, results, recordings_path, model_name))
     baseline_path.write_text(board.to_json())
-    judge_baseline_path.write_text(judged.to_json())
-    scoreboard_path.write_text(render_markdown(board) + render_judge(judged))
+    scoreboard_path.write_text(scoreboard_text(cases, results, recorded_verdicts(cases, results, recordings_path, model_name)))
     return board
 
 
@@ -267,7 +257,7 @@ def main(argv: list[str]) -> int:
     commands = parser.add_subparsers(dest="command", required=True)
     for name, purpose in (
         ("record", "run the golden cases with the live model and keep what it said"),
-        ("gate", "replay the recordings and fail on anything worse than the baseline or unsafe"),
+        ("gate", "replay the recordings and fail on anything worse than the baseline or newly unsafe"),
         ("accept", "write the baseline and scoreboard the recordings score"),
         ("verify", "record every case again, live, and report anything that differs from the committed recordings"),
         ("full", "record and judge every case with the live model, and write the whole board"),
@@ -281,7 +271,6 @@ def main(argv: list[str]) -> int:
         command.add_argument("--cases", help="comma-separated case ids (default: every case)")
         command.add_argument("--recordings", type=Path, default=RECORDINGS)
         command.add_argument("--baseline", type=Path, default=BASELINE)
-        command.add_argument("--judge-baseline", type=Path, default=JUDGE_BASELINE)
         command.add_argument("--scoreboard", type=Path, default=SCOREBOARD)
         command.add_argument("--full", type=Path, default=FULL, help="where `full` writes the whole board")
         if name == "record":
@@ -313,16 +302,16 @@ def main(argv: list[str]) -> int:
     if arguments.command == "accept":
         accept(
             arguments.admin_url, cases, arguments.recordings, arguments.baseline, arguments.scoreboard,
-            embedding_model=EMBEDDING_MODEL, judge_baseline_path=arguments.judge_baseline,
+            embedding_model=EMBEDDING_MODEL,
         )
         print(arguments.scoreboard.read_text())
         return 0
 
     problems = gate(
         arguments.admin_url, cases, arguments.recordings, arguments.baseline, arguments.scoreboard,
-        embedding_model=EMBEDDING_MODEL, judge_baseline_path=arguments.judge_baseline,
+        embedding_model=EMBEDDING_MODEL,
     )
-    return report(problems, f"{len(cases)} case(s): no worse than the baseline, nothing unsafe")
+    return report(problems, f"{len(cases)} case(s): no worse than the baseline, no safe case became unsafe")
 
 
 if __name__ == "__main__":  # pragma: no cover
