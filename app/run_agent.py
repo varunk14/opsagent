@@ -30,7 +30,7 @@ from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
 
 from app.baseline import REFERENCE_RATE, token_cost
-from app.db import connect
+from app.db import apply_migrations, connect
 from app.embeddings import OllamaEmbedder
 from app.graph.build import build_graph, run_graph
 from app.graph.state import AgentState
@@ -183,11 +183,27 @@ def propose_next(
     )
 
 
+def prepare_database(connection: psycopg.Connection) -> int:
+    """
+    Bring the schema up to date and report how many policy passages are loaded.
+
+    Migrations are safe to run on every start-up, and running them here means a
+    deploy that restarts only the driver cannot leave it querying columns that
+    do not exist yet. Zero passages means app.policies has not been run.
+    """
+    apply_migrations(connection)
+    with connection.transaction():
+        row = connection.execute("SELECT count(*) FROM policy_chunks").fetchone()
+    return int(row[0]) if row else 0
+
+
 def main(argv: list[str]) -> int:  # pragma: no cover - the interactive driver
     limit = int(argv[1]) if len(argv) > 1 else 10
     graph = build_graph(Ollama(), PolicyRetriever(connect, OllamaEmbedder()))
 
     with connect() as connection:
+        if prepare_database(connection) == 0:
+            print("  warning: no policy passages loaded; run `python -m app.policies` first")
         for _ in range(limit):
             try:
                 outcome = propose_next(connection, graph)

@@ -69,10 +69,11 @@ class PolicyRetriever:
         try:
             with self.connect() as connection:
                 rows = connection.execute(SEARCH, (vector, self.embedder.model, vector, self.k)).fetchall()
-        except psycopg.OperationalError as exc:
-            # A dropped or refused connection is an outage, handled like a model
-            # outage: the run is requeued, not crashed and left marked running.
-            raise PolicySearchUnavailable(f"policy search could not reach the database: {exc}") from exc
+        except (psycopg.OperationalError, psycopg.errors.UndefinedTable, psycopg.errors.UndefinedColumn) as exc:
+            # A dropped connection, or a policy store whose schema is not in place yet,
+            # is an outage: the run is requeued and, if it persists, ends dead with a
+            # visible failure_class -- never a crashed worker and a run stuck running.
+            raise PolicySearchUnavailable(f"policy search could not use the database: {exc}") from exc
         return [
             PolicyPassage(document=document, chunk_index=index, text=text, distance=float(distance))
             for document, index, text, distance in rows
