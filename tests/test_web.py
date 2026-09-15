@@ -322,7 +322,10 @@ def test_pages_allow_no_scripts_and_no_framing(fresh_database):
     assert "frame-ancestors 'none'" in policy
     assert "form-action 'self'" in policy
     assert headers["x-content-type-options"] == "nosniff"
-    assert headers["referrer-policy"] == "no-referrer"
+    # Found in the real gate run: under "no-referrer" a browser sends "Origin: null" on the screen's own
+    # form posts, and the Origin check refused every decision. "same-origin" still sends no referrer
+    # to other sites, and a cross-site post still arrives as "Origin: null".
+    assert headers["referrer-policy"] == "same-origin"
     # Security review: customer emails must not linger in a browser cache; framing refused for old browsers too.
     assert headers["cache-control"] == "no-store"
     assert headers["x-frame-options"] == "DENY"
@@ -369,6 +372,20 @@ def test_a_decision_posted_from_another_origin_is_refused(fresh_database):
         data={"csrf": token},
         headers={"origin": "http://evil.example"},
         follow_redirects=False,
+    )
+
+    assert response.status_code == 403
+    assert decision(fresh_database, approval_id)[0] == "pending"
+
+
+def test_a_decision_whose_origin_the_browser_withheld_is_refused(fresh_database):
+    """A cross-site form post under the screen's referrer policy arrives as "Origin: null"."""
+    _, approval_id = waiting_refund(fresh_database)
+    client = client_for(fresh_database)
+    token = token_from(client.get("/approvals").text)
+
+    response = client.post(
+        f"/approvals/{approval_id}/approve", data={"csrf": token}, headers={"origin": "null"}, follow_redirects=False
     )
 
     assert response.status_code == 403
