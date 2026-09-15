@@ -23,7 +23,15 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
-from app.traces import RunSummary, RunTrace, TraceSpan, build_tree, list_runs, trace_of
+from app.traces import (
+    RunSummary,
+    RunTrace,
+    TraceSpan,
+    build_tree,
+    list_runs,
+    trace_of,
+    walk,
+)
 from tests.test_approval_path import decide_on, refund_model, work
 from tests.test_run_agent import happy_model, ledger, queue
 
@@ -94,6 +102,15 @@ def test_a_span_whose_parent_is_missing_is_kept_at_the_top():
 
 def test_a_span_naming_itself_as_its_parent_is_kept_at_the_top():
     assert names(build_tree([span("loop", "loop", 0, 5)])) == ["loop"]
+
+
+def test_spans_whose_parents_loop_are_each_kept_once_at_the_top():
+    """No SDK writes a loop, but a tree built from one must still end and lose nothing."""
+    roots = build_tree([span("a", "b", 0, 10), span("b", "a", 5, 8), span("c", "a", 6, 7)])
+
+    assert sorted(node.name for node in walk(roots)) == ["a", "b", "c"]
+    assert names(roots) == ["a"]
+    assert roots[0].total_cost == Decimal(0)
 
 
 def test_a_step_costs_everything_beneath_it_and_nothing_of_its_own():
