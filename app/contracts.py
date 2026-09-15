@@ -20,9 +20,11 @@ measurement.
 """
 
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Annotated, Any, Self
 
 from pydantic import (
@@ -30,11 +32,12 @@ from pydantic import (
     BeforeValidator,
     ConfigDict,
     Field,
+    field_serializer,
     field_validator,
     model_validator,
 )
 
-from app.tools import TOOLS
+from app.tools import MAX_AMOUNT_PAISE, TOOLS
 
 
 class Channel(StrEnum):
@@ -229,7 +232,7 @@ class ExtractedRefund(BaseModel):
 
     order_id: str | None = Field(default=None, max_length=64)
     # strict: 7200.0, "720000" and true are all refused rather than coerced.
-    amount_paise: int | None = Field(default=None, ge=0, strict=True)
+    amount_paise: int | None = Field(default=None, ge=0, le=MAX_AMOUNT_PAISE, strict=True)
     reason: str = Field(max_length=1000)
 
     @field_validator("order_id")
@@ -242,6 +245,43 @@ class ExtractedRefund(BaseModel):
 
 _TOOL_PARAMETERS = {tool.name: tool.parameters for tool in TOOLS}
 _JSON_TYPES: dict[str, type] = {"string": str, "integer": int}
+_ALLOWED_WHITESPACE = {"\n", "\t"}
+
+
+def _has_control_characters(text: str) -> bool:
+    """NUL, escape sequences and friends have no business in an order id or a reason."""
+    return any(
+        (ord(char) < 32 and char not in _ALLOWED_WHITESPACE) or ord(char) == 127
+        for char in text
+    )
+
+
+def _check_argument(tool: str, name: str, value: object, spec: dict[str, Any]) -> None:
+    """One argument against its declared schema: type, then the limits the schema states."""
+    declared = spec.get("type")
+    expected = _JSON_TYPES.get(declared) if isinstance(declared, str) else None
+    if expected is None:
+        # A bare KeyError here would escape structured(), which retries only
+        # ValidationError. Say it plainly instead, and let pydantic wrap it.
+        raise ValueError(f"{tool} argument {name} declares unsupported type {declared!r}")
+
+    # bool is a subclass of int, and True is not an amount of paise.
+    # ValueError, not TypeError: pydantic only wraps ValueError.
+    if isinstance(value, bool) or not isinstance(value, expected):
+        raise ValueError(  # noqa: TRY004
+            f"{tool} argument {name} must be {declared}, got {type(value).__name__}"
+        )
+
+    if isinstance(value, int):
+        if "minimum" in spec and value < spec["minimum"]:
+            raise ValueError(f"{tool} argument {name} must be at least {spec['minimum']}")
+        if "maximum" in spec and value > spec["maximum"]:
+            raise ValueError(f"{tool} argument {name} must be at most {spec['maximum']}")
+    elif isinstance(value, str):
+        if "maxLength" in spec and len(value) > spec["maxLength"]:
+            raise ValueError(f"{tool} argument {name} is longer than {spec['maxLength']} characters")
+        if _has_control_characters(value):
+            raise ValueError(f"{tool} argument {name} contains control characters")
 
 
 class ProposedAction(BaseModel):
@@ -249,13 +289,15 @@ class ProposedAction(BaseModel):
     One tool call the agent would make, checked against that tool's schema.
 
     Checked here rather than when the tool runs, so a malformed refund is
-    refused while it is still only a proposal.
+    refused while it is still only a proposal. After validation the arguments
+    are a read-only copy: frozen=True alone stops reassigning args, not editing
+    the dict inside it, and a later executor must act on exactly what was checked.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     tool: str
-    args: dict[str, Any]
+    args: Mapping[str, Any]
     confidence: Confidence
     reasoning: str = Field(max_length=1000)
 
@@ -275,11 +317,11 @@ class ProposedAction(BaseModel):
             raise ValueError(f"{self.tool} got unexpected argument(s): {', '.join(unexpected)}")
 
         for name, value in self.args.items():
-            declared = properties[name]["type"]
-            # bool is a subclass of int, and True is not an amount of paise.
-            # ValueError, not TypeError: pydantic only wraps ValueError.
-            if isinstance(value, bool) or not isinstance(value, _JSON_TYPES[declared]):
-                raise ValueError(  # noqa: TRY004
-                    f"{self.tool} argument {name} must be {declared}, got {type(value).__name__}"
-                )
+            _check_argument(self.tool, name, value, properties[name])
+
+        object.__setattr__(self, "args", MappingProxyType(dict(self.args)))
         return self
+
+    @field_serializer("args")
+    def serialise_args(self, args: Mapping[str, Any]) -> dict[str, Any]:
+        return dict(args)
