@@ -19,7 +19,7 @@ from app.contracts import Channel, IncomingMessage
 from app.graph.build import build_graph
 from app.intake import accept
 from app.llm import ModelUnavailable, Reply
-from app.run_agent import claim_next, propose_next
+from app.run_agent import LostClaim, claim_next, propose_next
 from tests.fakes import (
     CLASSIFIED_DUPLICATE,
     EXTRACTED_4821,
@@ -240,3 +240,67 @@ def test_an_unreachable_model_puts_the_run_back_in_the_queue(fresh_database):
     assert (stored["status"], stored["locked_by"], stored["locked_at"]) == ("queued", None, None)
     assert "agent" not in stored["state"]
     assert stored["attempt"] == 1, "the attempt still counts toward max_attempts"
+
+
+# --- review findings: attempts run out, claims can be lost ------------------------
+
+
+class Down:
+    def generate(self, prompt: str) -> Reply:
+        raise ModelUnavailable("connection refused")
+
+
+def test_a_run_out_of_attempts_is_dead_not_requeued(fresh_database):
+    """
+    Requeueing forever lets one message that always fails sit at the head of the
+    queue for good, starving everything behind it.
+    """
+    run_id = queue(fresh_database)
+    with psycopg.connect(fresh_database) as connection:
+        connection.execute("UPDATE runs SET attempt = max_attempts - 1 WHERE id = %s", (run_id,))
+
+    with psycopg.connect(fresh_database) as connection, pytest.raises(ModelUnavailable):
+        propose_next(connection, build_graph(Down()))
+
+    with psycopg.connect(fresh_database) as connection:
+        status, failure_class, locked_by = connection.execute(
+            "SELECT status, failure_class, locked_by FROM runs WHERE id = %s", (run_id,)
+        ).fetchone()
+    assert (status, failure_class, locked_by) == ("dead", "model_unavailable", None)
+
+
+class ReclaimedMidRun:
+    """Stands in for week 4's lock expiry: another worker takes the run while the model thinks."""
+
+    def __init__(self, dsn: str, inner=None, then_raise: Exception | None = None):
+        self.dsn, self.inner, self.then_raise = dsn, inner, then_raise
+
+    def invoke(self, initial):
+        with psycopg.connect(self.dsn) as other:
+            other.execute("UPDATE runs SET locked_by = 'worker-b', locked_at = now()")
+        if self.then_raise is not None:
+            raise self.then_raise
+        return self.inner.invoke(initial)
+
+
+def test_a_proposal_is_not_recorded_over_a_claim_that_was_lost(fresh_database):
+    run_id = queue(fresh_database)
+    graph = ReclaimedMidRun(fresh_database, inner=happy_graph())
+
+    with psycopg.connect(fresh_database) as connection, pytest.raises(LostClaim):
+        propose_next(connection, graph, worker="worker-a")
+
+    stored = row(fresh_database, run_id)
+    assert stored["locked_by"] == "worker-b"
+    assert "agent" not in stored["state"]
+
+
+def test_an_outage_does_not_release_a_claim_that_was_lost(fresh_database):
+    run_id = queue(fresh_database)
+    graph = ReclaimedMidRun(fresh_database, then_raise=ModelUnavailable("down"))
+
+    with psycopg.connect(fresh_database) as connection, pytest.raises(ModelUnavailable):
+        propose_next(connection, graph, worker="worker-a")
+
+    stored = row(fresh_database, run_id)
+    assert (stored["status"], stored["locked_by"]) == ("running", "worker-b")
