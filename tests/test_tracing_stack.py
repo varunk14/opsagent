@@ -24,7 +24,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from app.tracing import exporter_from_env, main, write_env
+from app.tracing import env_settings, exporter_from_env, main, write_env
 from app.web import langfuse_link_base
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -264,6 +264,12 @@ def test_a_last_line_without_a_newline_is_kept_whole(tmp_path):
 
     assert env.read_text().startswith("OPSAGENT_OPERATOR=asha\nLANGFUSE_")
     assert settings(env)["OPSAGENT_OPERATOR"] == "asha"
+
+
+def test_only_real_settings_are_read_from_an_env_file():
+    text = "# LANGFUSE_SALT=old\n\njust some words\n=no-name\nexport LANGFUSE_SECRET_KEY='sk-lf-mine'\n"
+
+    assert env_settings(text) == {"LANGFUSE_SECRET_KEY": "sk-lf-mine"}
 
 
 def test_comments_blanks_and_stray_words_set_nothing(tmp_path):
