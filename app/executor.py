@@ -16,6 +16,12 @@ A repeat must be the same operation. A key that comes back with other arguments,
 another tool or another run is refused rather than replayed, because replaying
 would report a refund that was never made for what was asked.
 
+An order is reachable only by the run whose sender placed it. Anyone can email
+in quoting a guessed order number, so another customer's order is answered
+exactly as a missing one is: nothing confirms it exists. The sender is the
+address the message came from, which a forged From header can still claim; the
+approval step in week 5 is what stands between that and money.
+
 Refusals a person or the planner should see -- an unknown order, a refund above
 what was charged -- are returned as data and stored like any result, so the same
 operation gets the same answer every time it is asked.
@@ -43,6 +49,15 @@ CLAIM_KEY = """
     RETURNING idempotency_key
 """
 
+# Mail addresses are compared without regard to case; a run with no sender matches nothing.
+OWNED_ORDER = """
+    SELECT o.customer_email, o.amount_paise, o.status
+      FROM orders o
+      JOIN runs r ON r.id = %s
+     WHERE o.id = %s
+       AND lower(o.customer_email) = lower(r.state -> 'untrusted' ->> 'sender')
+"""
+
 INSERT_REFUND = """
     INSERT INTO refunds (order_id, amount_paise, reason, run_id, idempotency_key)
     VALUES (%s, %s, %s, %s, %s)
@@ -67,11 +82,9 @@ def operation_key(run_id: UUID, step: int, tool: str) -> str:
 
 
 def get_order(connection: psycopg.Connection, run_id: UUID, key: str, args: JsonObject) -> JsonObject:
-    """The order, every charge taken for it, and what has already been paid back."""
+    """The sender's order, every charge taken for it, and what has already been paid back."""
     order_id = args["order_id"]
-    order = connection.execute(
-        "SELECT customer_email, amount_paise, status FROM orders WHERE id = %s", (order_id,)
-    ).fetchone()
+    order = connection.execute(OWNED_ORDER, (run_id, order_id)).fetchone()
     if order is None:
         return {"error": f"no order {order_id}"}
 
@@ -100,7 +113,7 @@ def get_order(connection: psycopg.Connection, run_id: UUID, key: str, args: Json
 def issue_refund(connection: psycopg.Connection, run_id: UUID, key: str, args: JsonObject) -> JsonObject:
     """Pay money back. The cap is enforced by the database, under a lock on the order."""
     order_id, amount_paise = args["order_id"], args["amount_paise"]
-    if connection.execute("SELECT 1 FROM orders WHERE id = %s", (order_id,)).fetchone() is None:
+    if connection.execute(OWNED_ORDER, (run_id, order_id)).fetchone() is None:
         return {"refunded": False, "error": f"no order {order_id}"}
 
     try:
