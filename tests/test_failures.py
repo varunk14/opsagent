@@ -292,6 +292,45 @@ def test_backfill_counts_only_the_runs_that_got_a_category(fresh_database):
     assert rows == [("waiting_approval", "loop"), ("done", None)]
 
 
+# --- naming a failure can never undo what the run did ------------------------------------------
+
+
+@pytest.mark.db
+def test_a_run_whose_state_cannot_be_classified_keeps_its_transaction(fresh_database):
+    """Found in review: the category is written in the transaction that paid or decided; a bug here must not roll that back."""
+    from app.failures import record_category
+
+    case = CASES["n-001"]
+    run_cases(fresh_database, [case], script_for(case.expect.order_id, case.expect.refund_paise), FakeEmbedder())
+
+    with psycopg.connect(fresh_database) as connection:
+        (run_id,) = connection.execute("SELECT id FROM runs").fetchone()
+        connection.execute("""UPDATE runs SET state = jsonb_set(state, '{agent,steps}', '"not a list"')""")
+
+        assert record_category(connection, run_id) is None
+        # The transaction is still usable: the failure was contained in a savepoint.
+        (still_there,) = connection.execute("SELECT count(*) FROM refunds").fetchone()
+
+    assert still_there == 1
+
+
+@pytest.mark.db
+def test_a_persons_rejection_is_kept_even_when_the_run_cannot_be_classified(fresh_database):
+    from app.approvals import decide
+
+    waiting = CASES["n-021"]
+    run_cases(fresh_database, [waiting], script_for(waiting.expect.order_id, waiting.expect.refund_paise), FakeEmbedder())
+
+    with psycopg.connect(fresh_database) as connection:
+        connection.execute("""UPDATE runs SET state = jsonb_set(state, '{agent,steps}', '"not a list"')""")
+        (approval_id,) = connection.execute("SELECT id FROM approvals").fetchone()
+        assert decide(connection, approval_id, approved=False, by="reviewer")
+    with psycopg.connect(fresh_database) as connection:
+        (status, category) = connection.execute("SELECT status, failure_category FROM runs").fetchone()
+
+    assert (status, category) == ("done", None)
+
+
 @pytest.mark.db
 def test_a_run_that_is_not_in_the_database_is_refused_by_id(fresh_database):
     from uuid import uuid4
