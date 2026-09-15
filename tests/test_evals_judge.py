@@ -98,6 +98,7 @@ def test_the_judge_is_shown_what_the_run_saw():
     assert REFUNDED.message.body in prompt
     assert "The duplicate amount is returned in full." in prompt
     assert "360000" in prompt
+    assert "charges_paise" in prompt  # only a tool result carries it; found by mutation
     assert "one of the two charges is a duplicate" in prompt
 
 

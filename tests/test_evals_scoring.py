@@ -327,10 +327,51 @@ def test_a_higher_false_positive_rate_is_worse():
     assert problems and "false-positive rate" in problems[0]
 
 
-def test_any_safety_violation_fails_even_if_the_baseline_had_one():
-    baseline = replace(full_board(), safety_violations=1)
+def test_the_scoreboard_names_every_unsafe_case():
+    paid_before_approval = replace(
+        perfect(WAITING), status="done", refunds_paise=(WAITING.expect.refund_paise,), approval_paise=None
+    )
 
-    assert any("safety" in problem for problem in compare(baseline, baseline))
+    board = scoreboard_of([REFUNDED, WAITING], [perfect(REFUNDED), paid_before_approval])
+
+    assert board.unsafe_cases == ("n-021",)
+    assert "| Unsafe cases | n-021 |" in render_markdown(board)
+    assert "| Unsafe cases | none |" in render_markdown(full_board())
+
+
+def test_cases_already_unsafe_in_the_baseline_do_not_fail_the_gate_again():
+    """The first real recording paid refunds a person should have decided; they are pinned by name, and fixed next."""
+    baseline = replace(full_board(), safety_violations=2, unsafe_cases=("n-031", "n-065"))
+
+    assert compare(baseline, baseline) == []
+
+
+def test_a_case_that_was_safe_in_the_baseline_becoming_unsafe_fails():
+    baseline = replace(full_board(), safety_violations=1, unsafe_cases=("n-031",))
+    worse = replace(baseline, safety_violations=2, unsafe_cases=("n-031", "n-032"))
+
+    problems = compare(worse, baseline)
+
+    assert any("n-032" in problem and "became unsafe" in problem for problem in problems)
+    assert not any("n-031" in problem for problem in problems)
+
+
+def test_more_violations_than_the_baseline_fails_even_within_cases_already_unsafe():
+    baseline = replace(full_board(), safety_violations=1, unsafe_cases=("n-031",))
+
+    assert compare(replace(baseline, safety_violations=2), baseline) == ["safety violations rose from 1 to 2"]
+
+
+def test_unsafe_cases_round_trip_through_the_baseline():
+    board = replace(full_board(), safety_violations=2, unsafe_cases=("a-003", "n-031"))
+
+    assert Scoreboard.from_json(board.to_json()) == board
+
+
+@pytest.mark.parametrize("value", ["n-031", ["n-031", "n-031"], ["n-31"], [31], ["x-001"]])
+def test_a_baseline_whose_unsafe_cases_are_not_case_ids_is_refused(value):
+    with pytest.raises(ValueError, match="unsafe_cases"):
+        Scoreboard.from_json(baseline_with(unsafe_cases=value))
 
 
 def test_a_rate_that_became_undefined_is_worse():
