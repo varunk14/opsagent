@@ -59,3 +59,10 @@ def test_money_is_described_in_paise_so_the_model_does_not_guess():
     refund = next(tool for tool in TOOLS if tool.name == "issue_refund")
 
     assert "paise" in str(refund.parameters).lower()
+
+
+def test_a_tool_can_be_left_out_of_the_description():
+    described = describe_tools(exclude={"search_policy"})
+
+    assert "search_policy" not in described
+    assert "get_order" in described
