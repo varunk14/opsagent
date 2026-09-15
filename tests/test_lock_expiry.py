@@ -100,8 +100,11 @@ def test_a_dead_workers_run_continues_from_its_last_committed_step(fresh_databas
         outcome = work_next(connection, graph_of(resumed), worker="worker-b", lock_timeout=FIVE_MINUTES)
 
     assert resumed.tasks() == ["plan"], "classify and extract were already on record"
-    assert (outcome.status, outcome.tool) == ("waiting_approval", "issue_refund")
-    assert keys(fresh_database, run_id) == [f"{run_id}:step_1:get_order"], "the lookup is not repeated"
+    assert (outcome.status, outcome.tool) == ("done", "issue_refund")
+    assert keys(fresh_database, run_id) == [
+        f"{run_id}:step_1:get_order",
+        f"{run_id}:step_2:issue_refund",
+    ], "the lookup is not repeated"
     assert row(fresh_database, run_id)["attempt"] == 2
 
 

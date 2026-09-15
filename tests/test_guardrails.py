@@ -102,6 +102,30 @@ def test_paise_are_shown_when_an_amount_is_not_whole_rupees():
     assert verdict.reason.startswith("Rs 7,200.50 is not under")
 
 
+def test_what_the_order_has_already_had_back_counts_toward_the_limit():
+    """Found in the Unit A security review: otherwise two Rs 3,600 refunds pass a Rs 5,000 limit."""
+    verdict = judge(refund(360_000), DEFAULTS, already_refunded_paise=360_000)
+
+    assert verdict.runs is False
+    assert verdict.reason == (
+        "Rs 3,600 would bring refunds on order 4821 to Rs 7,200, not under the Rs 5,000 limit for automatic refunds"
+    )
+
+
+def test_a_further_refund_that_keeps_the_order_under_the_limit_runs():
+    assert judge(refund(100_000), DEFAULTS, already_refunded_paise=399_999).runs is True
+
+
+def test_a_further_refund_that_reaches_the_limit_exactly_needs_a_person():
+    assert judge(refund(100_000), DEFAULTS, already_refunded_paise=400_000).runs is False
+
+
+def test_what_was_already_refunded_cannot_be_negative():
+    """A negative total would widen the limit instead of narrowing it."""
+    with pytest.raises(ValueError, match="already refunded"):
+        judge(refund(90_000), DEFAULTS, already_refunded_paise=-1)
+
+
 @pytest.mark.parametrize("tool", ["get_order", "search_policy", "escalate_to_human"])
 def test_only_refunds_are_judged(tool):
     """
