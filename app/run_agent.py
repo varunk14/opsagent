@@ -23,7 +23,9 @@ not run are all handed to a person instead of executed.
 A model or policy store that cannot be reached puts the run back in the queue,
 charged for the calls that completed and keeping every committed step, until
 its attempts run out and it is marked dead. A crash leaves the run marked
-running with its committed steps intact, for lock expiry to recover.
+running with its committed steps intact. Once its lock is older than
+LOCK_TIMEOUT another worker reclaims it, spending an attempt, and carries on
+from the last committed step; on its last attempt it is marked dead instead.
 
 Run:  .venv/bin/python -m app.run_agent [how many runs, default 10]
 """
@@ -33,6 +35,7 @@ import socket
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -60,6 +63,17 @@ MAX_STEPS = 4
 RUNS_NOW = frozenset({"get_order", "escalate_to_human"})
 WAITS_FOR_APPROVAL = frozenset({"issue_refund"})
 
+# How long a lock may go without a committed step before the run is taken back.
+# Every committed step refreshes it, so only a worker that has gone quiet loses it.
+LOCK_TIMEOUT = timedelta(minutes=5)
+
+# A run whose worker went quiet on its last attempt is not handed out again.
+BURY_EXPIRED = """
+    UPDATE runs
+       SET status = 'dead', failure_class = 'lock_expired', locked_by = NULL, locked_at = NULL
+     WHERE status = 'running' AND locked_at < now() - %s AND attempt >= max_attempts
+"""
+
 CLAIM = """
     UPDATE runs
        SET status = 'running', current_node = 'classify', attempt = attempt + 1,
@@ -67,6 +81,7 @@ CLAIM = """
      WHERE id = (
             SELECT id FROM runs
              WHERE status = 'queued'
+                OR (status = 'running' AND locked_at < now() - %s AND attempt < max_attempts)
              ORDER BY created_at, id
                FOR UPDATE SKIP LOCKED
              LIMIT 1
@@ -142,11 +157,14 @@ def require_idle(connection: psycopg.Connection) -> None:
         )
 
 
-def claim_next(connection: psycopg.Connection, worker: str) -> ClaimedRun | None:
-    """Take the oldest queued run nobody else holds, or None if there is none."""
+def claim_next(
+    connection: psycopg.Connection, worker: str, lock_timeout: timedelta = LOCK_TIMEOUT
+) -> ClaimedRun | None:
+    """Take the oldest run that is queued, or whose worker went quiet; None if there is none."""
     require_idle(connection)
     with connection.transaction():
-        claimed = connection.execute(CLAIM, (worker,)).fetchone()
+        connection.execute(BURY_EXPIRED, (lock_timeout,))
+        claimed = connection.execute(CLAIM, (worker, lock_timeout)).fetchone()
     if claimed is None:
         return None
 
@@ -302,6 +320,7 @@ def work_next(
     worker: str | None = None,
     max_steps: int = MAX_STEPS,
     after_step: Callable[[UUID, int], None] | None = None,
+    lock_timeout: timedelta = LOCK_TIMEOUT,
 ) -> RunOutcome | None:
     """
     Claim one run and work it until it waits for a person.
@@ -309,7 +328,7 @@ def work_next(
     `after_step` is called once each continuing step has been committed, with the
     run id and how many steps it now has -- the moment a dying worker loses nothing.
     """
-    claimed = claim_next(connection, worker or default_worker())
+    claimed = claim_next(connection, worker or default_worker(), lock_timeout)
     if claimed is None:
         return None
 
