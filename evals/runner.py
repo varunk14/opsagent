@@ -11,9 +11,9 @@ That database is migrated and written to -- refunds included -- so it must be a 
 one. The application's own database is refused before any connection is made.
 
 A CaseResult is what the run left behind, read from the database: where it came to rest,
-what it understood, which tools it ran, what was paid and what was put to a person, and why
-a run that failed or died did so. It holds nothing that differs between two runs of the same
-recording, so replays compare equal.
+what it understood, which policy passages it planned with, which tools it ran, what was
+paid and what was put to a person, and why a run that failed or died did so. It holds
+nothing that differs between two runs of the same recording, so replays compare equal.
 """
 
 from collections.abc import Sequence
@@ -66,6 +66,8 @@ class CaseResult:
     approval_paise: int | None
     model_calls: int
     cost_usd: Decimal
+    # The passages the run was planned with, as document#chunk, in the order they were given.
+    policy_sources: tuple[str, ...] = ()
 
 
 def refuse_the_application_database(dsn: str) -> None:
@@ -118,4 +120,5 @@ def read_back(connection: psycopg.Connection, case_id: str, run_id: UUID) -> Cas
         approval_paise=approval[0] if approval else None,
         model_calls=int(agent.get("model_calls", 0)),
         cost_usd=cost_usd,
+        policy_sources=tuple(agent.get("policy_sources", [])),
     )
