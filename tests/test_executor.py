@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
 from app.contracts import ProposedAction
 from app.executor import KeyReused, execute, operation_key
@@ -21,14 +22,17 @@ pytestmark = pytest.mark.db
 PRIYA = "priya@example.com"
 
 
-def insert_run(connection: psycopg.Connection, key: str | None = None) -> UUID:
+def insert_run(
+    connection: psycopg.Connection, key: str | None = None, sender: str | None = PRIYA
+) -> UUID:
     run_id = uuid4()
+    state = {"untrusted": {"sender": sender}} if sender is not None else {}
     connection.execute(
         """
         INSERT INTO runs (id, channel, status, current_node, state, idempotency_key)
-        VALUES (%s, 'email', 'running', 'act', '{}'::jsonb, %s)
+        VALUES (%s, 'email', 'running', 'act', %s, %s)
         """,
-        (run_id, key or f"email_msg_{run_id}"),
+        (run_id, Jsonb(state), key or f"email_msg_{run_id}"),
     )
     return run_id
 
@@ -300,6 +304,46 @@ def test_a_refund_amount_must_be_positive_in_the_database(db):
             "VALUES ('4821', 0, 'nothing', %s, %s)",
             (run_id, key),
         )
+
+
+# --- only the sender's own orders ---------------------------------------------------
+
+
+def test_another_customers_order_looks_exactly_like_no_order(db):
+    """Anyone can email in with a guessed order number; the reply must not confirm it exists."""
+    run_id = insert_run(db, sender="dev@example.com")
+    insert_order(db)
+
+    order = execute(db, run_id, 1, lookup()).result
+
+    assert order == {"error": "no order 4821"}
+
+
+def test_a_refund_on_another_customers_order_is_refused(db):
+    run_id = insert_run(db, sender="dev@example.com")
+    insert_order(db)
+
+    outcome = execute(db, run_id, 5, refund())
+
+    assert outcome.result == {"refunded": False, "error": "no order 4821"}
+    assert refunds_for(db) == []
+
+
+def test_a_run_with_no_sender_reaches_no_order(db):
+    run_id = insert_run(db, sender=None)
+    insert_order(db)
+
+    assert execute(db, run_id, 1, lookup()).result == {"error": "no order 4821"}
+    assert execute(db, run_id, 5, refund()).result["refunded"] is False
+    assert refunds_for(db) == []
+
+
+def test_the_sender_matches_regardless_of_letter_case(db):
+    """Mail systems treat Priya@Example.com and priya@example.com as the same person."""
+    run_id = insert_run(db, sender="Priya@Example.com")
+    insert_order(db)
+
+    assert execute(db, run_id, 1, lookup()).result["order_id"] == "4821"
 
 
 # --- the other tools ---------------------------------------------------------------
