@@ -7,14 +7,14 @@ of state would eventually disagree with it.
 """
 
 from collections.abc import Callable
-from typing import cast
+from typing import Any, cast
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from app.graph import nodes
 from app.graph.state import AgentState
-from app.llm import Model
+from app.llm import Model, ModelUnavailable
 
 AgentGraph = CompiledStateGraph[AgentState, None, AgentState, AgentState]
 
@@ -46,6 +46,19 @@ def build_graph(model: Model) -> AgentGraph:
 
 
 def run_graph(graph: AgentGraph, subject: str | None, body: str) -> AgentState:
-    """Walk one message through the graph and return everything it found."""
-    # invoke() is typed as returning dict[str, Any]; the state schema is AgentState.
-    return cast(AgentState, graph.invoke({"subject": subject, "body": body, "replies": []}))
+    """
+    Walk one message through the graph and return everything it found.
+
+    Streams the state after each step rather than calling invoke(), so that if
+    the model goes down partway through, the replies from the steps that did
+    finish are still known -- and attached to the outage -- instead of vanishing
+    with the half-built state.
+    """
+    latest: dict[str, Any] = {}
+    try:
+        for latest in graph.stream({"subject": subject, "body": body, "replies": []}, stream_mode="values"):
+            pass
+    except ModelUnavailable as outage:
+        outage.replies = list(latest.get("replies", [])) + outage.replies
+        raise
+    return cast(AgentState, latest)

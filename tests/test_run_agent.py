@@ -276,12 +276,12 @@ class ReclaimedMidRun:
     def __init__(self, dsn: str, inner=None, then_raise: Exception | None = None):
         self.dsn, self.inner, self.then_raise = dsn, inner, then_raise
 
-    def invoke(self, initial):
+    def stream(self, initial, stream_mode="values"):
         with psycopg.connect(self.dsn) as other:
             other.execute("UPDATE runs SET locked_by = 'worker-b', locked_at = now()")
         if self.then_raise is not None:
             raise self.then_raise
-        return self.inner.invoke(initial)
+        yield from self.inner.stream(initial, stream_mode=stream_mode)
 
 
 def test_a_proposal_is_not_recorded_over_a_claim_that_was_lost(fresh_database):

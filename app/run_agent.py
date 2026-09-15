@@ -33,7 +33,7 @@ from app.baseline import REFERENCE_RATE, token_cost
 from app.db import connect
 from app.graph.build import build_graph, run_graph
 from app.graph.state import AgentState
-from app.llm import ModelUnavailable, Ollama
+from app.llm import ModelUnavailable, Ollama, Reply
 
 MICRO_DOLLAR = Decimal("0.000001")  # matches runs.cost_usd numeric(10, 6)
 
@@ -64,7 +64,8 @@ RELEASE = """
        SET status = CASE WHEN attempt >= max_attempts THEN 'dead' ELSE 'queued' END,
            failure_class = CASE WHEN attempt >= max_attempts
                                 THEN 'model_unavailable' ELSE failure_class END,
-           current_node = 'intake', locked_by = NULL, locked_at = NULL
+           current_node = 'intake', locked_by = NULL, locked_at = NULL,
+           cost_usd = cost_usd + %s
      WHERE id = %s AND status = 'running' AND locked_by = %s
 """
 
@@ -116,12 +117,19 @@ def claim_next(connection: psycopg.Connection, worker: str) -> ClaimedRun | None
     )
 
 
+def cost_of(replies: list[Reply]) -> Decimal:
+    """Every reply priced once, at the baseline rate, to the column's precision."""
+    prompt_tokens = sum(reply.prompt_tokens for reply in replies)
+    completion_tokens = sum(reply.completion_tokens for reply in replies)
+    return token_cost(prompt_tokens, completion_tokens, REFERENCE_RATE).quantize(MICRO_DOLLAR)
+
+
 def summarise_agent(state: AgentState) -> tuple[dict[str, Any], Decimal]:
     """What gets stored on the run, and what the run cost."""
     replies = state.get("replies", [])
     prompt_tokens = sum(reply.prompt_tokens for reply in replies)
     completion_tokens = sum(reply.completion_tokens for reply in replies)
-    cost = token_cost(prompt_tokens, completion_tokens, REFERENCE_RATE).quantize(MICRO_DOLLAR)
+    cost = cost_of(replies)
 
     classification = state.get("classification")
     extraction = state.get("extraction")
@@ -149,9 +157,10 @@ def propose_next(
 
     try:
         state = run_graph(graph, claimed.subject, claimed.body)
-    except ModelUnavailable:
+    except ModelUnavailable as outage:
+        # Back to the queue, but charged for the calls that did complete.
         with connection.transaction():
-            connection.execute(RELEASE, (claimed.run_id, claimed.worker))
+            connection.execute(RELEASE, (cost_of(outage.replies), claimed.run_id, claimed.worker))
         raise
 
     agent, cost = summarise_agent(state)
