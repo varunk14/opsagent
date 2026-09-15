@@ -44,7 +44,9 @@ REQUEUE = """
     )
     UPDATE runs
        SET status = 'queued', attempt = 0, next_retry_at = NULL, failure_class = NULL,
-           current_node = 'intake', locked_by = NULL, locked_at = NULL
+           current_node = 'intake', locked_by = NULL, locked_at = NULL,
+           -- fresh attempts include the rate limit's deferrals; a run with no agent state is left as it is
+           state = jsonb_set(state, '{agent,deferrals}', '0', false)
       FROM letter
      WHERE runs.id = letter.run_id AND runs.status = 'dead'
     RETURNING runs.id
