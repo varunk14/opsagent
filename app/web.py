@@ -66,7 +66,9 @@ SECURITY_HEADERS = {
         "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
     ),
     "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "no-referrer",
+    # Not "no-referrer": under it a browser sends "Origin: null" on this screen's own form posts,
+    # and the Origin check below would refuse every decision. Other sites still get no referrer.
+    "Referrer-Policy": "same-origin",
     # Customer emails are on these pages; they should not outlive the tab in a browser cache.
     "Cache-Control": "no-store",
     "X-Frame-Options": "DENY",

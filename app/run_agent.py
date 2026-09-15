@@ -608,7 +608,7 @@ def act_on_approval(connection: psycopg.Connection, claimed: ClaimedRun, approve
         tool=tool,
         steps=len(steps),
         failure=failure,
-        cost_usd=Decimal(0),
+        cost_usd=Decimal(0),  # no model is asked: paying what a person approved costs no tokens
     )
 
 
