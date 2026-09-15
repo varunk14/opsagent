@@ -19,6 +19,7 @@ recorded now, and a comparison between two accumulated floats is not a
 measurement.
 """
 
+import re
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -37,7 +38,7 @@ from pydantic import (
     model_validator,
 )
 
-from app.tools import MAX_AMOUNT_PAISE, TOOLS
+from app.tools import MAX_AMOUNT_PAISE, ORDER_ID_PATTERN, TOOLS
 
 
 class Channel(StrEnum):
@@ -230,16 +231,20 @@ class ExtractedRefund(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    order_id: str | None = Field(default=None, max_length=64)
+    order_id: str | None = Field(default=None, max_length=32, pattern=ORDER_ID_PATTERN)
     # strict: 7200.0, "720000" and true are all refused rather than coerced.
     amount_paise: int | None = Field(default=None, ge=0, le=MAX_AMOUNT_PAISE, strict=True)
     reason: str = Field(max_length=1000)
 
-    @field_validator("order_id")
+    @field_validator("order_id", mode="before")
     @classmethod
-    def order_id_is_missing_or_real(cls, value: str | None) -> str | None:
-        if value is not None and not value.strip():
-            raise ValueError("an order id is either absent or not blank")
+    def tidy_order_id(cls, value: object) -> object:
+        """
+        '#4821' and ' 4821 ' are how people write 4821, so those are tidied.
+        Anything else must match ORDER_ID_PATTERN; a blank one is refused.
+        """
+        if isinstance(value, str):
+            return value.strip().removeprefix("#")
         return value
 
 
@@ -282,6 +287,8 @@ def _check_argument(tool: str, name: str, value: object, spec: dict[str, Any]) -
             raise ValueError(f"{tool} argument {name} is longer than {spec['maxLength']} characters")
         if _has_control_characters(value):
             raise ValueError(f"{tool} argument {name} contains control characters")
+        if "pattern" in spec and not re.fullmatch(spec["pattern"], value):
+            raise ValueError(f"{tool} argument {name} does not have the expected shape")
 
 
 class ProposedAction(BaseModel):

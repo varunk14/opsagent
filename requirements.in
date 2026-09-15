@@ -1,0 +1,5 @@
+# Runtime dependencies. Edit this file, then regenerate requirements.txt:
+#   uv pip compile requirements.in --universal --python-version 3.13 -o requirements.txt
+pydantic==2.13.5
+psycopg[binary]==3.3.5
+langgraph==1.2.11
