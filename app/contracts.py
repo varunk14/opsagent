@@ -20,7 +20,7 @@ measurement.
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Self
@@ -128,7 +128,7 @@ class RunRecord(BaseModel):
     prompt_version: str | None = None
     cost_usd: Decimal = Field(default=Decimal(0), ge=0, max_digits=10, decimal_places=6)
     failure_class: str | None = None
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @field_validator("cost_usd", mode="before")
     @classmethod

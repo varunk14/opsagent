@@ -11,7 +11,7 @@ is told it did not create anything and is handed the existing run, rather than
 being given an error to swallow or a second row to process.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 import psycopg
 import pytest
@@ -27,7 +27,7 @@ PRIYA = IncomingMessage(
     sender="priya@example.com",
     subject="Charged twice for order #4821",
     body="Hi, I think I was charged twice for order #4821 last Tuesday.",
-    received_at=datetime(2026, 9, 13, 9, 0, tzinfo=timezone.utc),
+    received_at=datetime(2026, 9, 13, 9, 0, tzinfo=UTC),
 )
 
 
