@@ -14,7 +14,7 @@ from langgraph.graph.state import CompiledStateGraph
 
 from app.graph import nodes
 from app.graph.state import AgentState, Retriever
-from app.llm import Model, ModelUnavailable
+from app.llm import Model, ServiceUnavailable
 
 AgentGraph = CompiledStateGraph[AgentState, None, AgentState, AgentState]
 
@@ -50,7 +50,7 @@ def run_graph(graph: AgentGraph, subject: str | None, body: str) -> AgentState:
     Walk one message through the graph and return everything it found.
 
     Streams the state after each step rather than calling invoke(), so that if
-    the model goes down partway through, the replies from the steps that did
+    a model or the policy store goes down partway through, the replies from the steps that did
     finish are still known -- and attached to the outage -- instead of vanishing
     with the half-built state.
     """
@@ -58,7 +58,7 @@ def run_graph(graph: AgentGraph, subject: str | None, body: str) -> AgentState:
     try:
         for latest in graph.stream({"subject": subject, "body": body, "replies": []}, stream_mode="values"):
             pass
-    except ModelUnavailable as outage:
+    except ServiceUnavailable as outage:
         outage.replies = list(latest.get("replies", [])) + outage.replies
         raise
     return cast(AgentState, latest)

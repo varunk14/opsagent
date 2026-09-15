@@ -34,7 +34,7 @@ from app.db import connect
 from app.embeddings import OllamaEmbedder
 from app.graph.build import build_graph, run_graph
 from app.graph.state import AgentState
-from app.llm import ModelUnavailable, Ollama, Reply
+from app.llm import Ollama, Reply, ServiceUnavailable
 from app.retrieval import PolicyRetriever
 
 MICRO_DOLLAR = Decimal("0.000001")  # matches runs.cost_usd numeric(10, 6)
@@ -64,8 +64,7 @@ RECORD = """
 RELEASE = """
     UPDATE runs
        SET status = CASE WHEN attempt >= max_attempts THEN 'dead' ELSE 'queued' END,
-           failure_class = CASE WHEN attempt >= max_attempts
-                                THEN 'model_unavailable' ELSE failure_class END,
+           failure_class = CASE WHEN attempt >= max_attempts THEN %s ELSE failure_class END,
            current_node = 'intake', locked_by = NULL, locked_at = NULL,
            cost_usd = cost_usd + %s
      WHERE id = %s AND status = 'running' AND locked_by = %s
@@ -160,10 +159,12 @@ def propose_next(
 
     try:
         state = run_graph(graph, claimed.subject, claimed.body)
-    except ModelUnavailable as outage:
+    except ServiceUnavailable as outage:
         # Back to the queue, but charged for the calls that did complete.
         with connection.transaction():
-            connection.execute(RELEASE, (cost_of(outage.replies), claimed.run_id, claimed.worker))
+            connection.execute(
+                RELEASE, (outage.failure_class, cost_of(outage.replies), claimed.run_id, claimed.worker)
+            )
         raise
 
     agent, cost = summarise_agent(state)
@@ -190,8 +191,8 @@ def main(argv: list[str]) -> int:  # pragma: no cover - the interactive driver
         for _ in range(limit):
             try:
                 outcome = propose_next(connection, graph)
-            except ModelUnavailable as exc:
-                print(f"  model unavailable, run returned to the queue: {exc}")
+            except ServiceUnavailable as exc:
+                print(f"  {exc.failure_class}, run returned to the queue: {exc}")
                 return 1
             if outcome is None:
                 print("  queue empty")

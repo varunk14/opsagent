@@ -97,7 +97,11 @@ def retrieve(state: AgentState, retriever: Retriever) -> AgentState:
     if classification is None:
         return missing_classification("retrieve")
 
-    passages = retriever.search(f"{state.get('subject') or ''}\n{state['body']}".strip())
+    question = f"{state.get('subject') or ''}\n{state['body']}".strip()
+    if not question:
+        return {"policy": [], "policy_sources": []}
+
+    passages = retriever.search(question)
     return {
         "policy": [passage.text for passage in passages],
         "policy_sources": [passage.source for passage in passages],

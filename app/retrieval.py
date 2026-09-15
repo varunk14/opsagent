@@ -19,6 +19,7 @@ import psycopg
 
 from app.embeddings import Embedder, embed_query
 from app.graph.state import PolicyPassage
+from app.llm import ServiceUnavailable
 
 DEFAULT_K = 3
 # Tuned on these policies with nomic-embed-text: relevant passages sat at
@@ -36,6 +37,12 @@ SEARCH = """
      ORDER BY embedding <=> %s::vector
      LIMIT %s
 """
+
+
+class PolicySearchUnavailable(ServiceUnavailable):
+    """The policy store could not be reached while searching."""
+
+    failure_class = "policy_search_unavailable"
 
 
 def as_pgvector(vector: list[float]) -> str:
@@ -59,8 +66,13 @@ class PolicyRetriever:
 
     def search(self, question: str) -> list[PolicyPassage]:
         vector = as_pgvector(embed_query(self.embedder, question[:MAX_QUERY_CHARS]))
-        with self.connect() as connection:
-            rows = connection.execute(SEARCH, (vector, self.embedder.model, vector, self.k)).fetchall()
+        try:
+            with self.connect() as connection:
+                rows = connection.execute(SEARCH, (vector, self.embedder.model, vector, self.k)).fetchall()
+        except psycopg.OperationalError as exc:
+            # A dropped or refused connection is an outage, handled like a model
+            # outage: the run is requeued, not crashed and left marked running.
+            raise PolicySearchUnavailable(f"policy search could not reach the database: {exc}") from exc
         return [
             PolicyPassage(document=document, chunk_index=index, text=text, distance=float(distance))
             for document, index, text, distance in rows
