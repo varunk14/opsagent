@@ -105,21 +105,21 @@ def decided(update: AgentState) -> dict[str, Any]:
     """What a step decided, as span attributes. Values the model chose from our own lists, never free text."""
     found: dict[str, Any] = {}
     if "classification" in update:
-        found["opsagent.intent"] = update["classification"].intent.value
-        found["opsagent.confidence"] = str(update["classification"].confidence)
+        found[Attr.INTENT] = update["classification"].intent.value
+        found[Attr.CLASSIFICATION_CONFIDENCE] = str(update["classification"].confidence)
     if "extraction" in update:
         extraction = update["extraction"]
-        found["opsagent.order_id_found"] = extraction is not None and extraction.order_id is not None
-        found["opsagent.amount_found"] = extraction is not None and extraction.amount_paise is not None
+        found[Attr.ORDER_ID_FOUND] = extraction is not None and extraction.order_id is not None
+        found[Attr.AMOUNT_FOUND] = extraction is not None and extraction.amount_paise is not None
     if "policy_sources" in update:
-        found["opsagent.passages"] = len(update["policy_sources"])
-        found["opsagent.sources"] = list(update["policy_sources"])
+        found[Attr.PASSAGES] = len(update["policy_sources"])
+        found[Attr.SOURCES] = list(update["policy_sources"])
     if "proposal" in update:
-        found["opsagent.tool"] = update["proposal"].tool
-        found["opsagent.confidence"] = str(update["proposal"].confidence)
+        found[Attr.TOOL] = update["proposal"].tool
+        found[Attr.PROPOSAL_CONFIDENCE] = str(update["proposal"].confidence)
     if "failure" in update:
         # Built by the steps from fixed phrases ("classify: model output unusable"), not from the reply.
-        found["opsagent.failure"] = update["failure"]
+        found[Attr.FAILURE] = update["failure"]
     return found
 
 

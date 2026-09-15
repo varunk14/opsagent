@@ -81,7 +81,7 @@ from app.guardrails import judge
 from app.guardrails import load as load_guardrails
 from app.llm import Ollama, Reply, ServiceUnavailable
 from app.retrieval import PolicyRetriever
-from app.tracing import discard, record_spans, run_context, tracer
+from app.tracing import Attr, discard, record_spans, run_context, tracer
 
 MICRO_DOLLAR = Decimal("0.000001")  # matches runs.cost_usd numeric(10, 6)
 
@@ -181,12 +181,13 @@ RECENT_LOOKUPS = """
 
 # Every statement that records a tick's model work also records the prompt version
 # it was made under. Paying an approved action asks no model, so it passes NULL and
-# the run keeps the version it was planned under.
+# the run keeps the version it was planned under. Each also drops state.billing: the
+# totals it writes were counted on from billing's, so billing has nothing left to add.
 #
 # Busy is not a failure: the attempt the claim spent is given back.
 DEFER = """
     UPDATE runs
-       SET status = 'queued', attempt = attempt - 1, next_retry_at = %s + %s, state = state || %s,
+       SET status = 'queued', attempt = attempt - 1, next_retry_at = %s + %s, state = (state - 'billing') || %s,
            current_node = 'act', cost_usd = cost_usd + %s, prompt_version = coalesce(%s, prompt_version),
            locked_by = NULL, locked_at = NULL
      WHERE id = %s AND locked_by = %s
@@ -194,14 +195,14 @@ DEFER = """
 
 CONTINUE = """
     UPDATE runs
-       SET current_node = 'act', state = state || %s, cost_usd = cost_usd + %s,
+       SET current_node = 'act', state = (state - 'billing') || %s, cost_usd = cost_usd + %s,
            prompt_version = coalesce(%s, prompt_version), locked_at = now()
      WHERE id = %s AND locked_by = %s
 """
 
 PARK = """
     UPDATE runs
-       SET status = 'waiting_approval', current_node = %s, state = state || %s,
+       SET status = 'waiting_approval', current_node = %s, state = (state - 'billing') || %s,
            cost_usd = cost_usd + %s, prompt_version = coalesce(%s, prompt_version),
            locked_by = NULL, locked_at = NULL
      WHERE id = %s AND locked_by = %s
@@ -209,7 +210,7 @@ PARK = """
 
 FINISH = """
     UPDATE runs
-       SET status = 'done', current_node = 'act', state = state || %s,
+       SET status = 'done', current_node = 'act', state = (state - 'billing') || %s,
            cost_usd = cost_usd + %s, prompt_version = coalesce(%s, prompt_version),
            locked_by = NULL, locked_at = NULL
      WHERE id = %s AND locked_by = %s
@@ -535,7 +536,7 @@ def close_tick(
     connection: psycopg.Connection, run_id: UUID, tick_span: Span, outcome: str, failure_class: str | None = None
 ) -> None:
     """End the tick's span and write its spans, in the transaction that commits what the tick did."""
-    tick_span.set_attribute("opsagent.outcome", outcome)
+    tick_span.set_attribute(Attr.OUTCOME, outcome)
     if failure_class is not None:
         tick_span.set_status(StatusCode.ERROR, failure_class)
     tick_span.end()
@@ -544,7 +545,7 @@ def close_tick(
 
 def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_steps: int) -> RunOutcome:
     """Walk the graph from what the run holds, then act on one proposal in one transaction."""
-    with traced_tick(claimed.run_id, {"opsagent.attempt": claimed.attempt}) as tick_span:
+    with traced_tick(claimed.run_id, {Attr.ATTEMPT: claimed.attempt}) as tick_span:
         before = agent_of(connection, claimed.run_id)
         # Read before the walk: the version this tick's prompts were built from.
         version = run_prompt_version()
@@ -585,7 +586,7 @@ def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_st
                 raise LostClaim(f"run {claimed.run_id} was reclaimed before this worker could act on it")
 
             with failure_recorded("act", "tool") as act:
-                act.set_attribute("opsagent.tool", proposal.tool)
+                act.set_attribute(Attr.TOOL, proposal.tool)
                 if proposal.tool in RATE_LIMITED:
                     connection.execute(LOCK_SENDER, (claimed.run_id,))
                     recent = connection.execute(RECENT_LOOKUPS, (RATE_WINDOW, claimed.run_id)).fetchone()
@@ -596,7 +597,7 @@ def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_st
                                 f"deferred {deferrals} times by the rate limit",
                                 "The sender kept this case over the lookup limit; a person should look at it.",
                             )
-                            act.set_attribute("opsagent.tool", proposal.tool)
+                            act.set_attribute(Attr.TOOL, proposal.tool)
                         else:
                             # What this tick found is kept, so the next one plans from it and each
                             # model call is charged once. Nothing is executed and no attempt is spent.
@@ -614,7 +615,7 @@ def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_st
                                     claimed.worker,
                                 ),
                             )
-                            act.set_attribute("opsagent.result", "deferred by the rate limit")
+                            act.set_attribute(Attr.RESULT, "deferred by the rate limit")
 
                 if deferred is None:
                     if proposal.tool in RUNS_NOW:
@@ -628,13 +629,13 @@ def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_st
                             verdict = judge(proposal, limits, refunded_so_far(connection, claimed.run_id, proposal))
                             guard.set_attributes(
                                 {
-                                    "opsagent.verdict": "runs" if verdict.runs else "needs a person",
-                                    "opsagent.limit_paise": limits.auto_refund_limit_paise,
-                                    "opsagent.min_confidence": str(limits.min_confidence),
+                                    Attr.VERDICT: "runs" if verdict.runs else "needs a person",
+                                    Attr.LIMIT_PAISE: limits.auto_refund_limit_paise,
+                                    Attr.MIN_CONFIDENCE: str(limits.min_confidence),
                                 }
                             )
                             if verdict.reason:
-                                guard.set_attribute("opsagent.reason", verdict.reason)
+                                guard.set_attribute(Attr.REASON, verdict.reason)
                         if verdict.runs:
                             failure = pay(connection, claimed.run_id, steps, proposal)
 
@@ -648,7 +649,7 @@ def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_st
                         approval_id = open_approval(
                             connection, claimed.run_id, proposal, evidence_for(claimed, agent), verdict.reason or ""
                         )
-                        act.set_attribute("opsagent.approval_id", approval_id)
+                        act.set_attribute(Attr.APPROVAL_ID, approval_id)
                         connection.execute(PARK, ("approval", *stored))
                     elif verdict is not None and failure is None:
                         status, result = "done", "refunded"
@@ -659,7 +660,7 @@ def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_st
                         # A run that escalated early stopped at the step that failed.
                         node = failure.split(":", 1)[0] if failure else "plan"
                         connection.execute(PARK, (node, *stored))
-                    act.set_attribute("opsagent.result", result)
+                    act.set_attribute(Attr.RESULT, result)
 
             if deferred is not None:
                 close_tick(connection, claimed.run_id, tick_span, "queued")
@@ -679,7 +680,7 @@ def act_on_approval(connection: psycopg.Connection, claimed: ClaimedRun, approve
     applied again, since a person has already overruled it. The keyed executor, the
     sender's ownership of the order and the ledger cap all still apply.
     """
-    attributes = {"opsagent.attempt": claimed.attempt, "opsagent.approval_id": approved.id}
+    attributes = {Attr.ATTEMPT: claimed.attempt, Attr.APPROVAL_ID: approved.id}
     with traced_tick(claimed.run_id, attributes) as tick_span:
         before = agent_of(connection, claimed.run_id)
         steps = list(before.get("steps", []))
@@ -693,17 +694,17 @@ def act_on_approval(connection: psycopg.Connection, claimed: ClaimedRun, approve
                 raise ApprovalAlreadyExecuted(f"approval {approved.id} was already executed")
 
             with failure_recorded("act", "tool") as act:
-                act.set_attribute("opsagent.tool", tool)
+                act.set_attribute(Attr.TOOL, tool)
                 failure: str | None
                 try:
                     action = ProposedAction.model_validate(approved.action)
                 except ValidationError as unreadable:
                     # It was valid when proposed, so only a schema change since can land here.
                     failure = f"act: the approved action could not be read ({unreadable.error_count()} validation errors)"
-                    act.set_attribute("opsagent.result", "the approved action could not be read")
+                    act.set_attribute(Attr.RESULT, "the approved action could not be read")
                 else:
                     failure = pay(connection, claimed.run_id, steps, action)
-                    act.set_attribute("opsagent.result", "refunded" if failure is None else "refused by the ledger")
+                    act.set_attribute(Attr.RESULT, "refunded" if failure is None else "refused by the ledger")
                 stored = (
                     Jsonb({"agent": {**before, "steps": steps, "failure": failure}}),
                     Decimal(0),

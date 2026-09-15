@@ -100,6 +100,30 @@ class Attr:
     LATENCY_MS = "opsagent.latency_ms"
     # Why a span that asked to be a generation was written as a plain span.
     RECORDED_AS_SPAN = "opsagent.recorded_as_span"
+    # What a step decided: values chosen from our own lists, never text the customer wrote.
+    INTENT = "opsagent.intent"
+    CLASSIFICATION_CONFIDENCE = "opsagent.classification_confidence"
+    ORDER_ID_FOUND = "opsagent.order_id_found"
+    AMOUNT_FOUND = "opsagent.amount_found"
+    PASSAGES = "opsagent.passages"
+    SOURCES = "opsagent.sources"
+    TOOL = "opsagent.tool"
+    PROPOSAL_CONFIDENCE = "opsagent.proposal_confidence"
+    FAILURE = "opsagent.failure"
+    # Policy search.
+    COST_COUNTED = "opsagent.cost_counted"
+    K = "opsagent.k"
+    MAX_DISTANCE = "opsagent.max_distance"
+    TOP_DISTANCE = "opsagent.top_distance"
+    # A tick, and what its act step did.
+    ATTEMPT = "opsagent.attempt"
+    OUTCOME = "opsagent.outcome"
+    RESULT = "opsagent.result"
+    APPROVAL_ID = "opsagent.approval_id"
+    VERDICT = "opsagent.verdict"
+    LIMIT_PAISE = "opsagent.limit_paise"
+    MIN_CONFIDENCE = "opsagent.min_confidence"
+    REASON = "opsagent.reason"
 
 
 _current_run: ContextVar[UUID | None] = ContextVar("opsagent_current_run", default=None)

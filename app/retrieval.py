@@ -74,7 +74,7 @@ class PolicyRetriever:
 
     def search(self, question: str) -> list[PolicyPassage]:
         with tracer().start_as_current_span("embed_query", record_exception=False, set_status_on_exception=False) as span:
-            span.set_attributes({Attr.TYPE: "embedding", Attr.MODEL: self.embedder.model, "opsagent.cost_counted": False})
+            span.set_attributes({Attr.TYPE: "embedding", Attr.MODEL: self.embedder.model, Attr.COST_COUNTED: False})
             try:
                 vector = as_pgvector(embed_query(self.embedder, question[:MAX_QUERY_CHARS]))
             except ServiceUnavailable as outage:
@@ -82,7 +82,7 @@ class PolicyRetriever:
                 raise
 
         with tracer().start_as_current_span("vector_search", record_exception=False, set_status_on_exception=False) as span:
-            span.set_attributes({Attr.TYPE: "retriever", "opsagent.k": self.k, "opsagent.max_distance": self.max_distance})
+            span.set_attributes({Attr.TYPE: "retriever", Attr.K: self.k, Attr.MAX_DISTANCE: self.max_distance})
             try:
                 with self.connect() as connection:
                     rows = connection.execute(SEARCH, (vector, self.embedder.model, vector, self.k)).fetchall()
@@ -97,9 +97,9 @@ class PolicyRetriever:
                 for document, index, text, distance in rows
                 if distance <= self.max_distance
             ]
-            span.set_attribute("opsagent.passages", len(passages))
+            span.set_attribute(Attr.PASSAGES, len(passages))
             if passages:
                 span.set_attributes(
-                    {"opsagent.top_distance": passages[0].distance, "opsagent.sources": [p.source for p in passages]}
+                    {Attr.TOP_DISTANCE: passages[0].distance, Attr.SOURCES: [p.source for p in passages]}
                 )
         return passages
