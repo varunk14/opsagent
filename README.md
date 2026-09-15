@@ -39,7 +39,9 @@ to fail first, because the failure is the part worth seeing.
 | `app/embeddings.py`, `app/policies.py` | Policy documents chunked, embedded locally with `nomic-embed-text`, stored in pgvector. Reloading unchanged documents embeds nothing. |
 | `app/retrieval.py` | Search by meaning: nearest passages within a distance cutoff, same embedding model only. |
 | `app/executor.py` | Runs a tool for real, exactly once per operation: every call is keyed `run:step:tool`, and a repeat replays the stored result. An order is reachable only by the customer who placed it. |
-| `app/run_agent.py` | Claims a run with `FOR UPDATE SKIP LOCKED` and works it one committed step at a time. A lookup runs and the agent plans again with the result; a refund is recorded and waits for a person. A run whose worker died is reclaimed once its lock expires and continues from its last committed step. An outage is retried with backoff; one sender's lookups are rate limited; worker sessions carry timeouts so a hung connection cannot hold a run. |
+| `app/run_agent.py` | Claims a run with `FOR UPDATE SKIP LOCKED` and works it one committed step at a time. A lookup runs and the agent plans again with the result; a refund is judged by the guardrail, then paid once through the executor or put to a person with the reason, and an approved refund is paid exactly as approved. A run whose worker died is reclaimed once its lock expires and continues from its last committed step. An outage is retried with backoff; one sender's lookups are rate limited; worker sessions carry timeouts so a hung connection cannot hold a run. |
+| `app/guardrails.py` | Which refunds run without a person: under a limit on the order's total refunds, and at or above a confidence. Both are a row in Postgres, read at the moment of deciding, so `python -m app.guardrails set` changes behaviour with no code change; a limit of Rs 0 stops automatic refunds. |
+| `app/approvals.py`, `app/web.py` | The approval queue, and a local screen on `127.0.0.1:8055` to approve or reject with the evidence in front of you. It also lists every run waiting for a person with nothing to approve. Everything shown is escaped, every decision needs the page's token, and the screen cannot pay anything itself. |
 | `app/dead_letters.py` | Runs that ran out of attempts, and quarantined messages, each with the reason. `python -m app.dead_letters` lists them and requeues a run. |
 | `app/seed.py` | Loads a small fictional ledger: customers, orders, and the charges behind them. |
 | `app/baseline.py` | What a run costs before any optimisation, so week 9 has something to compare against. |
@@ -54,12 +56,19 @@ pay back more than an order was charged. `policies/` holds six short fictional s
     .venv/bin/python -m app.policies                      # migrate, then load policies
     .venv/bin/python -m app.seed                          # the fictional ledger
     .venv/bin/python -m app.poll fixtures/inbox.jsonl     # messages become runs
-    .venv/bin/python -m app.run_agent                     # work each run until it waits
+    .venv/bin/python -m app.run_agent                     # work each run until it is done or waits
+    .venv/bin/python -m app.guardrails show               # the limits in force
+    OPSAGENT_OPERATOR=yourname .venv/bin/python -m app.web  # approve or reject on http://127.0.0.1:8055/approvals
 
 Priya's email ("charged twice for order #4821") is classified `duplicate_charge` and retrieves the
 duplicate-payment policy -- which never uses the words "charged" or "twice". The agent then looks
-order 4821 up for real and plans again with what the ledger says. A refund it proposes is recorded
-and the run waits for a person: nothing pays out until the approval step in week 5.
+order 4821 up for real and plans again with what the ledger says. Its Rs 3,600 refund is under the
+default guardrail (Rs 5,000, confidence 0.85), so it is paid, once. Lower the limit and the same
+refund waits for a person instead, with no code change:
+
+    .venv/bin/python -m app.guardrails set --limit-rupees 1000 --by yourname
+
+Approved on the screen, the next worker pays exactly what was approved; rejected, nothing is paid.
 
 ### The experiments
 
@@ -76,7 +85,7 @@ and the run waits for a person: nothing pays out until the approval step in week
     docker compose up -d db
     .venv/bin/python -m pytest
 
-Over 300 tests with the run failing below 80% coverage. Tests that need Postgres are marked `db`
+Over 550 tests with the run failing below 80% coverage. Tests that need Postgres are marked `db`
 and **fail rather than skip** when it is absent, because a skipped test that reads as green is the
 failure this project is about. CI runs the same checks on every push to `main` and every pull
 request, and a pull request cannot merge into `main` until they pass.
@@ -122,10 +131,13 @@ failure modes are the interesting part, and each one is pinned by a test.
 * An outage waits 30 seconds, then twice as long each time up to an hour; a run out of attempts is
   dead-lettered with its reason in the same statement that marks it dead.
 * Two workers racing for a sender's last allowed lookup use it once.
+* A refund split in two, or two runs refunding one order at the same moment, is judged as the total.
+* An approval is paid once: a stale copy of it, a run requeued by hand, or a worker that lost its
+  claim pays nothing more.
 
 ## Planned
 
-A human approval queue and policy limits in code (week 5), tracing and a live deployment (week 6), an evaluation
+Tracing and a live deployment (week 6), an evaluation
 suite gating every pull request (week 7), a failure taxonomy (week 8), and cost routing measured
 against `BASELINE.md` (week 9).
 
