@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 import psycopg
 import pytest
 
+from app import run_agent as driver
 from app.approvals import approved_unexecuted, decide, list_pending
 from app.contracts import Channel, IncomingMessage
 from app.guardrails import set_limits
@@ -342,6 +343,26 @@ def test_an_approved_refund_is_not_judged_again(fresh_database):
 
     assert work(fresh_database, MustNotBeAsked()).status == "done"
     assert refunds(fresh_database) == [("4821", 720_000, run_id)]
+
+
+def prompt_version_of(dsn: str, run_id: str) -> str | None:
+    with psycopg.connect(dsn) as connection:
+        return connection.execute("SELECT prompt_version FROM runs WHERE id = %s", (run_id,)).fetchone()[0]
+
+
+def test_paying_an_approved_refund_keeps_the_version_the_run_was_planned_under(fresh_database, monkeypatch):
+    """No model is asked when paying, so a prompt change made in between is not this run's."""
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    work(fresh_database, refund_model(720_000))
+    planned_under = prompt_version_of(fresh_database, run_id)
+    decide_on(fresh_database, run_id, approved=True)
+    monkeypatch.setattr(driver, "run_prompt_version", lambda: "newer0000000")
+
+    assert work(fresh_database, MustNotBeAsked()).status == "done"
+
+    assert planned_under is not None
+    assert prompt_version_of(fresh_database, run_id) == planned_under
 
 
 def test_a_rejected_refund_is_never_paid(fresh_database):

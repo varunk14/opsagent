@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Run — OpsAgent{% endblock %}
+{% block content %}
+{% set run = trace.run %}
+<h1>{{ run.subject or "(no subject)" }}</h1>
+<dl>
+  <dt>From</dt><dd>{{ run.sender }}</dd>
+  <dt>Received</dt><dd>{{ run.received_at.strftime("%Y-%m-%d %H:%M") }}</dd>
+  <dt>Status</dt><dd>{{ run.status }}{% if run.failure_class %} ({{ run.failure_class }}){% endif %}</dd>
+  <dt>Steps</dt><dd>{{ run.steps }}</dd>
+  <dt>Prompts</dt><dd>{{ run.prompt_version or "" }}</dd>
+  <dt>Run</dt><dd>{{ run.id }}</dd>
+</dl>
+{% if langfuse_url %}
+<p><a href="{{ langfuse_url }}">The same trace in Langfuse</a></p>
+{% endif %}
+
+<h2>Trace</h2>
+{% if rows %}
+<p class="note">Costs are reference costs: tokens priced at one fixed, arbitrary rate so that runs can be compared. The models run on this machine and cost nothing.</p>
+<table class="trace">
+  <thead>
+    <tr><th>Step</th><th>ms</th><th>Model</th><th>Prompt</th><th>Tokens</th><th>Cost</th><th>What it did</th></tr>
+  </thead>
+  <tbody>
+  {% for row in rows %}
+    <tr class="span{% if row.error %} error{% endif %}" data-depth="{{ row.depth }}">
+      <td class="name">{{ row.name }}</td>
+      <td class="ms">{{ row.duration_ms }}</td>
+      <td class="model">{{ row.model }}</td>
+      <td class="version">{{ row.prompt_version }}</td>
+      <td class="tokens">{{ row.tokens }}</td>
+      <td class="cost">{{ row.cost }}</td>
+      <td class="did">{{ row.did | join(" · ") }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<dl class="totals">
+  <dt>Model calls, added up</dt><dd>{{ trace.calls_cost | money }}</dd>
+  <dt>Recorded on the run</dt><dd>{{ run.cost_usd | money }}</dd>
+</dl>
+{% else %}
+<p>Nothing has been traced for this run yet.</p>
+{% endif %}
+
+<h2>Approvals</h2>
+{% for approval in trace.approvals %}
+<section class="card">
+  <p class="reason">{{ approval.reason }}</p>
+  <dl>
+    <dt>Status</dt><dd>{{ approval.status }}</dd>
+    <dt>Asked</dt><dd>{{ approval.asked_at.strftime("%Y-%m-%d %H:%M") }}</dd>
+    {% if approval.decided_by %}
+    <dt>Decided by</dt><dd>{{ approval.decided_by }}</dd>
+    <dt>Decided</dt><dd>{{ approval.decided_at.strftime("%Y-%m-%d %H:%M") }}</dd>
+    {% endif %}
+    {% if approval.note %}<dt>Note</dt><dd>{{ approval.note }}</dd>{% endif %}
+    {% if approval.executed_at %}<dt>Paid</dt><dd>{{ approval.executed_at.strftime("%Y-%m-%d %H:%M") }}</dd>{% endif %}
+  </dl>
+</section>
+{% else %}
+<p>This run waited on no approval.</p>
+{% endfor %}
+{% endblock %}

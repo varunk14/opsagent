@@ -20,6 +20,7 @@ from psycopg import sql
 from app.baseline import REFERENCE_RATE, token_cost
 from app.contracts import Channel, IncomingMessage
 from app.graph.build import build_graph
+from app.graph.prompts import run_prompt_version
 from app.intake import accept
 from app.llm import ModelUnavailable, Reply
 from app.retrieval import PolicySearchUnavailable
@@ -629,3 +630,100 @@ def test_the_driver_reports_how_many_policy_passages_are_loaded(fresh_database):
 
     with psycopg.connect(fresh_database) as connection:
         assert prepare_database(connection) == 2
+
+
+# --- the prompt version a run was worked under ------------------------------------
+
+
+def prompt_version_of(dsn: str, run_id: str) -> str | None:
+    with psycopg.connect(dsn) as connection:
+        return connection.execute("SELECT prompt_version FROM runs WHERE id = %s", (run_id,)).fetchone()[0]
+
+
+def test_a_worked_run_records_the_prompt_version_it_was_planned_under(fresh_database):
+    """Which prompts produced an outcome is on the run, so a later change in behaviour is attributable."""
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    assert prompt_version_of(fresh_database, run_id) is None
+
+    with psycopg.connect(fresh_database) as connection:
+        work_next(connection, happy_graph())
+
+    assert prompt_version_of(fresh_database, run_id) == run_prompt_version()
+
+
+def test_a_run_handed_to_a_person_records_the_prompt_version(fresh_database):
+    run_id = queue(fresh_database)
+    model = ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=PROPOSED_ESCALATE)
+
+    with psycopg.connect(fresh_database) as connection:
+        outcome = work_next(connection, graph_of(model))
+
+    assert outcome.status == "waiting_approval"
+    assert prompt_version_of(fresh_database, run_id) == run_prompt_version()
+
+
+def test_a_run_that_hit_an_outage_records_the_prompt_version_it_was_tried_under(fresh_database):
+    run_id = queue(fresh_database)
+
+    with psycopg.connect(fresh_database) as connection, pytest.raises(ModelUnavailable):
+        work_next(connection, graph_of(ScriptedModel(classify=OUTAGE)))
+
+    assert row(fresh_database, run_id)["status"] == "failed"
+    assert prompt_version_of(fresh_database, run_id) == run_prompt_version()
+
+
+# --- what a run has been charged for, read back ---------------------------------------
+
+
+def test_the_charged_totals_are_the_larger_of_a_ticks_and_an_outages(fresh_database):
+    """An outage records what it charged under billing; the next tick must count on from it."""
+    from uuid import uuid4
+
+    from psycopg.types.json import Jsonb
+
+    from app.run_agent import agent_of
+
+    run_id = uuid4()
+    state = {
+        "agent": {"prompt_tokens": 5, "completion_tokens": 7, "steps": []},
+        "billing": {"prompt_tokens": 9, "model_calls": 2},
+    }
+    with psycopg.connect(fresh_database) as connection:
+        connection.execute(
+            "INSERT INTO runs (id, channel, status, current_node, state, idempotency_key) "
+            "VALUES (%s, 'email', 'queued', 'intake', %s, %s)",
+            (run_id, Jsonb(state), f"email_msg_{run_id.hex}"),
+        )
+        agent = agent_of(connection, run_id)
+
+    assert (agent["prompt_tokens"], agent["completion_tokens"], agent["model_calls"]) == (9, 7, 2)
+    assert agent["steps"] == []
+
+
+def test_a_run_that_is_not_there_has_recorded_nothing(fresh_database):
+    from uuid import uuid4
+
+    from app.run_agent import agent_of
+
+    with psycopg.connect(fresh_database) as connection:
+        assert agent_of(connection, uuid4()) == {}
+
+
+def test_outage_totals_are_folded_in_and_cleared_once_a_tick_records_its_own(fresh_database):
+    """Kept only until the run's own totals include them; left behind, they would read as current."""
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    with psycopg.connect(fresh_database) as connection, pytest.raises(ModelUnavailable):
+        work_next(connection, graph_of(ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=OUTAGE)))
+    assert row(fresh_database, run_id)["state"]["billing"] == {"prompt_tokens": 10, "completion_tokens": 5, "model_calls": 1}
+    with psycopg.connect(fresh_database) as connection:
+        connection.execute("UPDATE runs SET next_retry_at = now() WHERE id = %s", (run_id,))
+
+    with psycopg.connect(fresh_database) as connection:
+        work_next(connection, happy_graph())
+
+    state = row(fresh_database, run_id)["state"]
+    assert "billing" not in state
+    agent = state["agent"]
+    assert (agent["prompt_tokens"], agent["completion_tokens"], agent["model_calls"]) == (50, 25, 5)

@@ -19,6 +19,7 @@ import psycopg
 
 from app.graph.build import build_graph
 from app.run_agent import work_next
+from app.tracing import Tracing
 from tests.fakes import (
     CLASSIFIED_DUPLICATE,
     EXTRACTED_4821,
@@ -39,6 +40,8 @@ def main() -> int:
     model = ScriptedModel(
         classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=[PROPOSED_LOOKUP, PROPOSED_REFUND]
     )
+    # Traced like any worker, so the step that commits before the kill is recorded with its spans.
+    Tracing().install()
     with psycopg.connect(os.environ["OPSAGENT_CRASH_DSN"]) as connection:
         work_next(connection, build_graph(model, FakeRetriever()), worker=WORKER, after_step=die_now)
     return 0  # reached only if the kill did not happen, which the test reports

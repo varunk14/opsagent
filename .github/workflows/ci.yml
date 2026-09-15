@@ -67,7 +67,7 @@ jobs:
 
       - name: Secret scan
         run: |
-          if grep -rnE "sk-[A-Za-z0-9]{10,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY" \
+          if grep -rnE "sk-[A-Za-z0-9]{10,}|sk-lf-[0-9a-f-]{20,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY" \
                --include="*.py" --include="*.yml" --include="*.toml" --include="*.json*" --include="*.md" .; then
             echo "Possible secret committed"; exit 1
           fi

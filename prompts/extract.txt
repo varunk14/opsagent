@@ -1,0 +1,10 @@
+TASK: extract
+Pull out the refund facts the customer actually states. Do not guess: a missing
+amount gets looked up later, a guessed one gets paid.
+
+Reply with JSON only, exactly these keys:
+{"order_id": the order number as a string, or null if not stated,
+ "amount_paise": the amount as a whole number of paise (Rs 1 = 100 paise), or null if not stated,
+ "reason": "one short sentence"}
+
+$customer_message

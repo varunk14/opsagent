@@ -42,6 +42,7 @@ to fail first, because the failure is the part worth seeing.
 | `app/run_agent.py` | Claims a run with `FOR UPDATE SKIP LOCKED` and works it one committed step at a time. A lookup runs and the agent plans again with the result; a refund is judged by the guardrail, then paid once through the executor or put to a person with the reason, and an approved refund is paid exactly as approved. A run whose worker died is reclaimed once its lock expires and continues from its last committed step. An outage is retried with backoff; one sender's lookups are rate limited; worker sessions carry timeouts so a hung connection cannot hold a run. |
 | `app/guardrails.py` | Which refunds run without a person: under a limit on the order's total refunds, and at or above a confidence. Both are a row in Postgres, read at the moment of deciding, so `python -m app.guardrails set` changes behaviour with no code change; a limit of Rs 0 stops automatic refunds. |
 | `app/approvals.py`, `app/web.py` | The approval queue, and a local screen on `127.0.0.1:8055` to approve or reject with the evidence in front of you. It also lists every run waiting for a person with nothing to approve. Everything shown is escaped, every decision needs the page's token, and the screen cannot pay anything itself. |
+| `app/tracing.py`, `app/traces.py` | Every run as one OpenTelemetry trace: spans written with the steps they describe, read back as a tree for the `/runs` pages, and copied to a Langfuse on this machine when one is configured. `python -m app.tracing env` writes that Langfuse's secrets. |
 | `app/dead_letters.py` | Runs that ran out of attempts, and quarantined messages, each with the reason. `python -m app.dead_letters` lists them and requeues a run. |
 | `app/seed.py` | Loads a small fictional ledger: customers, orders, and the charges behind them. |
 | `app/baseline.py` | What a run costs before any optimisation, so later cost work has something to compare against. |
@@ -70,6 +71,36 @@ refund waits for a person instead, with no code change:
 
 Approved on the screen, the next worker pays exactly what was approved; rejected, nothing is paid.
 
+### Tracing
+
+Every run is one OpenTelemetry trace, and its trace id is the run's own id. However many ticks a run
+takes, by whichever workers, and however long it waits for an approval, it is one trace. Each tick,
+step, model call, policy search, guardrail decision and payment is a span. Spans are written to the
+`spans` table in the same transaction as the step they describe, so a step that never committed
+leaves no span.
+
+    OPSAGENT_OPERATOR=yourname .venv/bin/python -m app.web  # then open http://127.0.0.1:8055/runs
+
+`/runs` lists the newest runs. Each opens as its trace: every step under its tick, every model call
+under its step, each with its model, prompt version, tokens and cost. Below that, the calls' total
+sits beside the cost recorded on the run, then the approvals the run waited on. Prompts live in
+`prompts/`, and every run records the hash of the prompts it ran under.
+
+To read the same traces in Langfuse, self-hosted on this machine:
+
+    .venv/bin/python -m app.tracing env                  # fresh secrets into .env; prints none of them
+    docker compose -f compose.tracing.yml up -d          # Langfuse on http://127.0.0.1:3000
+    set -a; . ./.env; set +a                             # the worker's and the screen's settings
+    .venv/bin/python -m app.run_agent                    # spans now also go to Langfuse
+
+No login is seeded; create one in the Langfuse UI. Spans are only sent to 127.0.0.1 or localhost.
+A worker given any other endpoint refuses to start, and it ignores proxy settings and redirects.
+Langfuse takes about 2.3 GB of memory next to the local model.
+
+Costs are reference costs: tokens priced at the fixed rate in `BASELINE.md`, so runs can be
+compared. The models run locally and cost nothing. Embedding a search query is traced, but its
+tokens are not yet counted in a run's cost; the page says "not counted".
+
 ### The experiments
 
 | Script | Question it answers | Outcome |
@@ -85,7 +116,7 @@ Approved on the screen, the next worker pays exactly what was approved; rejected
     docker compose up -d db
     .venv/bin/python -m pytest
 
-Over 550 tests with the run failing below 80% coverage. Tests that need Postgres are marked `db`
+Over 750 tests with the run failing below 80% coverage. Tests that need Postgres are marked `db`
 and **fail rather than skip** when it is absent, because a skipped test that reads as green is the
 failure this project is about. CI runs the same checks on every push to `main` and every pull
 request, and a pull request cannot merge into `main` until they pass.
@@ -137,9 +168,8 @@ failure modes are the interesting part, and each one is pinned by a test.
 
 ## Planned
 
-Tracing and a live deployment, an evaluation
-suite gating every pull request, a failure taxonomy, and cost routing measured
-against `BASELINE.md`.
+A live deployment, an evaluation suite gating every pull request, a failure
+taxonomy, and cost routing measured against `BASELINE.md`.
 
 ## Running the experiments
 
