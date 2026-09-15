@@ -18,7 +18,12 @@ from app.llm import Reply
 from evals.__main__ import accept, gate, main, record, replay, scratch_database
 from evals.golden import GoldenCase, load_cases
 from tests.conftest import dsn_for
-from tests.fakes import CLASSIFIED_DUPLICATE, FakeEmbedder, ScriptedModel, proposed_refund
+from tests.fakes import (
+    CLASSIFIED_DUPLICATE,
+    FakeEmbedder,
+    ScriptedModel,
+    proposed_refund,
+)
 
 pytestmark = pytest.mark.db
 
