@@ -17,6 +17,10 @@ model has no way to guess which we meant.
 
 from dataclasses import dataclass
 
+# Rs 10,00,000. A sanity ceiling on what could ever be one refund, not a
+# refund policy -- policy limits need the order record and arrive in week 5.
+MAX_AMOUNT_PAISE = 100_000_000
+
 
 @dataclass(frozen=True)
 class ToolDescription:
@@ -38,7 +42,11 @@ TOOLS: tuple[ToolDescription, ...] = (
         parameters={
             "type": "object",
             "properties": {
-                "order_id": {"type": "string", "description": "The order number, e.g. 4821"}
+                "order_id": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "description": "The order number, e.g. 4821",
+                }
             },
             "required": ["order_id"],
         },
@@ -55,6 +63,7 @@ TOOLS: tuple[ToolDescription, ...] = (
             "properties": {
                 "question": {
                     "type": "string",
+                    "maxLength": 500,
                     "description": "What you need to know, e.g. 'customer charged twice'",
                 }
             },
@@ -71,15 +80,21 @@ TOOLS: tuple[ToolDescription, ...] = (
         parameters={
             "type": "object",
             "properties": {
-                "order_id": {"type": "string"},
+                "order_id": {"type": "string", "maxLength": 64},
                 "amount_paise": {
                     "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_AMOUNT_PAISE,
                     "description": (
                         "Whole paise, never rupees and never a decimal. "
                         "Rs 3,600 is 360000."
                     ),
                 },
-                "reason": {"type": "string", "description": "Why this refund is owed"},
+                "reason": {
+                    "type": "string",
+                    "maxLength": 1000,
+                    "description": "Why this refund is owed",
+                },
             },
             "required": ["order_id", "amount_paise", "reason"],
         },
@@ -95,7 +110,11 @@ TOOLS: tuple[ToolDescription, ...] = (
         parameters={
             "type": "object",
             "properties": {
-                "reason": {"type": "string", "description": "What a person needs to decide"}
+                "reason": {
+                    "type": "string",
+                    "maxLength": 1000,
+                    "description": "What a person needs to decide",
+                }
             },
             "required": ["reason"],
         },
