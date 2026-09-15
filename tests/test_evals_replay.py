@@ -129,6 +129,42 @@ def test_an_embedding_never_recorded_is_refused():
         RecordedEmbedder(Recordings(), model="nomic-embed-text").embed(["search_query: anything"])
 
 
+@pytest.mark.db
+def test_every_case_accepted_together_comes_to_rest(fresh_database):
+    """The driver works one run per call; three cases accepted at once must all be worked, none left waiting in the queue."""
+    cases = [CASES["n-001"], CASES["n-021"], CASES["n-002"]]
+    model = ScriptedModel(
+        classify=CLASSIFIED_DUPLICATE,
+        extract='{"order_id": null, "amount_paise": null, "reason": "charged twice"}',
+        plan='{"tool": "escalate_to_human", "args": {"reason": "check it"}, "confidence": 0.9, "reasoning": "unsure"}',
+    )
+
+    results = run_cases(fresh_database, cases, model, FakeEmbedder())
+
+    assert [result.status for result in results] == ["waiting_approval"] * 3
+
+
+def test_a_vector_recorded_for_another_embedding_model_is_not_used():
+    recordings = Recordings()
+    RecordingEmbedder(FakeEmbedder(), recordings).embed(["search_query: x"])
+
+    with pytest.raises(RecordingMissing):
+        RecordedEmbedder(recordings, model="nomic-embed-text").embed(["search_query: x"])
+
+
+@pytest.mark.db
+def test_the_policy_passages_a_case_was_planned_with_are_read_back(fresh_database):
+    """Found by mutation: with vectors too far apart to retrieve anything, skipping policy ingest passed every test."""
+    from tests.test_retrieval import AxisEmbedder
+
+    case = CASES["n-001"]
+
+    (result,) = run_cases(fresh_database, [case], script_for(case.expect.order_id, case.expect.refund_paise), AxisEmbedder())
+
+    assert result.policy_sources
+    assert all(source.endswith(("#0", "#1", "#2", "#3", "#4")) for source in result.policy_sources)
+
+
 def test_the_embedder_reports_the_model_ingest_compares_against():
     assert RecordedEmbedder(Recordings(), model="nomic-embed-text").model == "nomic-embed-text"
     assert RecordingEmbedder(FakeEmbedder(), Recordings()).model == FakeEmbedder.model
@@ -321,7 +357,8 @@ def test_a_vector_longer_than_any_embedding_is_refused_before_it_is_decoded(tmp_
     recordings.save(path)
     monkeypatch.setattr(recording, "MAX_VECTOR_FLOATS", 4)
 
-    with pytest.raises(ValueError, match="vector"):
+    # "longer than" is said only before decoding; after it, the refusal would read differently.
+    with pytest.raises(ValueError, match="longer than"):
         Recordings.load(path)
 
 
