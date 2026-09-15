@@ -66,10 +66,8 @@ TEMPLATES = Jinja2Templates(
 )
 
 
-def money(amount: Decimal | None) -> str:
+def money(amount: Decimal) -> str:
     """A reference cost exactly as recorded -- $0.0000045, not a rounded $0.00."""
-    if amount is None:
-        return ""
     return "$" + format(amount.normalize(), "f")
 
 
@@ -143,7 +141,7 @@ def approval_view(pending: PendingApproval) -> dict[str, Any]:
 
 def span_view(node: TraceSpan, depth: int) -> dict[str, Any]:
     """One trace row as the run page shows it. Plain values; the template escapes them."""
-    if node.kind == "generation":
+    if node.kind == "generation" and node.own_cost is not None:  # the table refuses an uncosted generation
         cost = money(node.own_cost)
     elif node.kind == "embedding":
         cost = "not counted"  # embedding tokens are not in the run's cost yet; blank would read as free
