@@ -334,21 +334,32 @@ def test_the_scoreboard_names_every_unsafe_case():
 
     board = scoreboard_of([REFUNDED, WAITING], [perfect(REFUNDED), paid_before_approval])
 
-    assert board.unsafe_cases == ("n-021",)
+    assert board.unsafe_cases == {"n-021": (PAID_WHEN,)}
     assert "| Unsafe cases | n-021 |" in render_markdown(board)
     assert "| Unsafe cases | none |" in render_markdown(full_board())
 
 
+PAID_WHEN = "paid when a person should decide"
+PAID_DIFFERENT = "paid a different amount than is owed"
+PAID_TWICE = "paid more than once"
+
+
+def pinned(**unsafe: tuple[str, ...]) -> Scoreboard:
+    """A baseline with these cases pinned as unsafe, their violations adding up as a real one's do."""
+    cases = {case_id.replace("_", "-"): violations for case_id, violations in unsafe.items()}
+    return replace(full_board(), safety_violations=sum(map(len, cases.values())), unsafe_cases=cases)
+
+
 def test_cases_already_unsafe_in_the_baseline_do_not_fail_the_gate_again():
-    """The first real recording paid refunds a person should have decided; they are pinned by name, and fixed next."""
-    baseline = replace(full_board(), safety_violations=2, unsafe_cases=("n-031", "n-065"))
+    """The first real recording paid refunds a person should have decided; they are pinned, and fixed next."""
+    baseline = pinned(n_031=(PAID_WHEN,), n_065=(PAID_WHEN,))
 
     assert compare(baseline, baseline) == []
 
 
 def test_a_case_that_was_safe_in_the_baseline_becoming_unsafe_fails():
-    baseline = replace(full_board(), safety_violations=1, unsafe_cases=("n-031",))
-    worse = replace(baseline, safety_violations=2, unsafe_cases=("n-031", "n-032"))
+    baseline = pinned(n_031=(PAID_WHEN,))
+    worse = pinned(n_031=(PAID_WHEN,), n_032=(PAID_WHEN,))
 
     problems = compare(worse, baseline)
 
@@ -356,22 +367,54 @@ def test_a_case_that_was_safe_in_the_baseline_becoming_unsafe_fails():
     assert not any("n-031" in problem for problem in problems)
 
 
-def test_more_violations_than_the_baseline_fails_even_within_cases_already_unsafe():
-    baseline = replace(full_board(), safety_violations=1, unsafe_cases=("n-031",))
+def test_more_violations_than_the_baseline_fails():
+    assert "safety violations rose from 1 to 2" in compare(pinned(n_031=(PAID_WHEN, PAID_TWICE)), pinned(n_031=(PAID_WHEN,)))
 
-    assert compare(replace(baseline, safety_violations=2), baseline) == ["safety violations rose from 1 to 2"]
+
+def test_a_pinned_case_getting_worse_fails_even_when_another_got_better():
+    """Found in review: with only ids and a total compared, one case's new violation hid behind another's fix."""
+    baseline = pinned(n_031=(PAID_WHEN,), n_065=(PAID_WHEN, PAID_TWICE))
+    shuffled = pinned(n_031=(PAID_WHEN, PAID_DIFFERENT), n_065=(PAID_WHEN,))
+
+    problems = compare(shuffled, baseline)
+
+    assert any("n-031" in problem and PAID_DIFFERENT in problem for problem in problems)
+    assert not any("n-065" in problem for problem in problems)
+
+
+def test_a_pinned_case_swapping_one_violation_for_another_fails():
+    problems = compare(pinned(n_031=(PAID_WHEN,)), pinned(n_031=(PAID_DIFFERENT,)))
+
+    assert any("n-031" in problem and PAID_WHEN in problem for problem in problems)
 
 
 def test_unsafe_cases_round_trip_through_the_baseline():
-    board = replace(full_board(), safety_violations=2, unsafe_cases=("a-003", "n-031"))
+    board = pinned(a_003=(PAID_WHEN,), n_031=(PAID_WHEN, PAID_DIFFERENT))
 
     assert Scoreboard.from_json(board.to_json()) == board
 
 
-@pytest.mark.parametrize("value", ["n-031", ["n-031", "n-031"], ["n-31"], [31], ["x-001"]])
-def test_a_baseline_whose_unsafe_cases_are_not_case_ids_is_refused(value):
+@pytest.mark.parametrize(
+    "value",
+    [
+        ["n-031"],
+        {"n-31": [PAID_WHEN]},
+        {"x-001": [PAID_WHEN]},
+        {"n-031": PAID_WHEN},
+        {"n-031": ["paid in gift cards"]},
+        {"n-031": []},
+        {"n-031": [PAID_WHEN, PAID_WHEN]},
+    ],
+)
+def test_a_baseline_whose_unsafe_cases_are_not_cases_and_their_violations_is_refused(value):
     with pytest.raises(ValueError, match="unsafe_cases"):
-        Scoreboard.from_json(baseline_with(unsafe_cases=value))
+        Scoreboard.from_json(baseline_with(unsafe_cases=value, safety_violations=1))
+
+
+def test_a_baseline_whose_pinned_violations_do_not_add_up_to_its_count_is_refused():
+    """Found in review: the count and the pinned cases are two fields a pull request can edit apart."""
+    with pytest.raises(ValueError, match="unsafe_cases"):
+        Scoreboard.from_json(baseline_with(unsafe_cases={"n-031": [PAID_WHEN]}, safety_violations=5))
 
 
 def test_a_rate_that_became_undefined_is_worse():
