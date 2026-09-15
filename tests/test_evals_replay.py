@@ -251,6 +251,25 @@ def test_a_case_whose_prompts_were_never_recorded_stops_with_recording_missing(f
         )
 
 
+@pytest.mark.db
+def test_a_handed_over_case_reads_back_why_and_the_amount_the_customer_stated(fresh_database):
+    case = CASES["n-002"]
+    assert case.expect.stated_amount_paise is not None
+    order_id = case.expect.order_id
+    extracted = (
+        f'{{"order_id": "{order_id}", "amount_paise": {case.expect.stated_amount_paise}, "reason": "charged twice"}}'
+    )
+    lookup = f'{{"tool": "get_order", "args": {{"order_id": "{order_id}"}}, "confidence": 0.9, "reasoning": "look it up"}}'
+    model = ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=extracted, plan=[lookup, lookup])
+
+    (result,) = run_cases(fresh_database, [case], model, FakeEmbedder())
+
+    assert result.status == "waiting_approval"
+    assert result.failure is not None and "repeated an earlier step" in result.failure
+    assert result.stated_amount_paise == case.expect.stated_amount_paise
+    assert (result.refunds_paise, result.approval_paise) == ((), None)
+
+
 def test_blank_lines_in_a_recordings_file_are_skipped(tmp_path):
     path = tmp_path / "recordings.jsonl"
     recorded('{"intent": "other"}').save(path)
