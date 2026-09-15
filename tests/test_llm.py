@@ -243,3 +243,22 @@ def test_the_client_defaults_to_the_local_model():
 
     assert client.model == "llama3.1:8b"
     assert client.endpoint.startswith("http://localhost:11434")
+
+
+def test_an_outage_mid_retry_still_reports_the_attempts_already_paid_for():
+    """The first attempt came back and was paid for; the outage on the second must not erase it."""
+
+    class AnswersOnceThenDown:
+        def __init__(self):
+            self.calls = 0
+
+        def generate(self, prompt: str) -> Reply:
+            self.calls += 1
+            if self.calls == 1:
+                return Reply(text="not json", prompt_tokens=10, completion_tokens=5, latency_ms=1)
+            raise ModelUnavailable("connection refused")
+
+    with pytest.raises(ModelUnavailable) as raised:
+        structured(AnswersOnceThenDown(), "extract it", Answer)
+
+    assert len(raised.value.replies) == 1

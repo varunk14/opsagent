@@ -59,7 +59,16 @@ class Model(Protocol):
 
 
 class ModelUnavailable(Exception):
-    """The model could not be reached at all."""
+    """
+    The model could not be reached.
+
+    Carries the replies that did come back before the outage: those calls were
+    paid for even though the run could not finish, and the run is charged for them.
+    """
+
+    def __init__(self, message: str, replies: list[Reply] | None = None):
+        super().__init__(message)
+        self.replies = list(replies or [])
 
 
 class ModelOutputInvalid(Exception):
@@ -124,7 +133,11 @@ def structured[T: BaseModel](
     asking = prompt
 
     for _ in range(attempts):
-        reply = model.generate(asking)
+        try:
+            reply = model.generate(asking)
+        except ModelUnavailable as outage:
+            outage.replies = replies + outage.replies
+            raise
         replies.append(reply)
 
         try:

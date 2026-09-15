@@ -21,6 +21,11 @@ from dataclasses import dataclass
 # refund policy -- policy limits need the order record and arrive in week 5.
 MAX_AMOUNT_PAISE = 100_000_000
 
+# An order number, not a sentence. Letters, digits and hyphens, starting with a
+# letter or digit. Body text copied into order_id fails this, and so does an
+# instruction planted there to reach the planning prompt.
+ORDER_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9-]{0,31}$"
+
 
 @dataclass(frozen=True)
 class ToolDescription:
@@ -44,7 +49,8 @@ TOOLS: tuple[ToolDescription, ...] = (
             "properties": {
                 "order_id": {
                     "type": "string",
-                    "maxLength": 64,
+                    "maxLength": 32,
+                    "pattern": ORDER_ID_PATTERN,
                     "description": "The order number, e.g. 4821",
                 }
             },
@@ -80,7 +86,7 @@ TOOLS: tuple[ToolDescription, ...] = (
         parameters={
             "type": "object",
             "properties": {
-                "order_id": {"type": "string", "maxLength": 64},
+                "order_id": {"type": "string", "maxLength": 32, "pattern": ORDER_ID_PATTERN},
                 "amount_paise": {
                     "type": "integer",
                     "minimum": 1,
