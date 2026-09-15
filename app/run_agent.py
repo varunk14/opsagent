@@ -81,7 +81,15 @@ from app.guardrails import Verdict, judge
 from app.guardrails import load as load_guardrails
 from app.llm import Ollama, Reply, ServiceUnavailable
 from app.retrieval import PolicyRetriever
-from app.tracing import Attr, discard, record_spans, run_context, tracer
+from app.tracing import (
+    Attr,
+    Tracing,
+    discard,
+    exporter_from_env,
+    record_spans,
+    run_context,
+    tracer,
+)
 
 MICRO_DOLLAR = Decimal("0.000001")  # matches runs.cost_usd numeric(10, 6)
 
@@ -815,28 +823,47 @@ def prepare_database(connection: psycopg.Connection) -> int:
     return int(row[0]) if row else 0
 
 
+def run_worker(graph: Any, *, limit: int, environ: Mapping[str, str]) -> int:  # pragma: no cover - runs in a worker process, see tests/test_worker_tracing.py
+    """
+    Work up to `limit` runs, traced: what the command line runs, with its model given.
+
+    Spans are always recorded with the steps; OPSAGENT_OTLP_ENDPOINT adds a copy to
+    Langfuse, sent before this returns. An endpoint off this machine is refused before
+    any run is claimed, with exit status 2.
+    """
+    try:
+        exporter = exporter_from_env(environ)
+    except ValueError as refused:
+        print(f"  not started: {refused}", file=sys.stderr)
+        return 2
+    tracing = Tracing(exporter).install()
+    try:
+        with connect() as connection:
+            if prepare_database(connection) == 0:
+                print("  warning: no policy passages loaded; run `python -m app.policies` first")
+            for _ in range(limit):
+                try:
+                    outcome = work_next(connection, graph)
+                except ServiceUnavailable as exc:
+                    print(f"  {exc.failure_class}, run returned to the queue: {exc}")
+                    return 1
+                if outcome is None:
+                    print("  queue empty")
+                    break
+                note = f"  ESCALATED ({outcome.failure})" if outcome.failure else ""
+                print(
+                    f"  {outcome.run_id}  {outcome.steps} step(s), now {outcome.status}, "
+                    f"proposes {outcome.tool:<18}{note}"
+                )
+        return 0
+    finally:
+        tracing.shutdown()
+
+
 def main(argv: list[str]) -> int:  # pragma: no cover - the interactive driver
     limit = int(argv[1]) if len(argv) > 1 else 10
     graph = build_graph(Ollama(), PolicyRetriever(connect, OllamaEmbedder()))
-
-    with connect() as connection:
-        if prepare_database(connection) == 0:
-            print("  warning: no policy passages loaded; run `python -m app.policies` first")
-        for _ in range(limit):
-            try:
-                outcome = work_next(connection, graph)
-            except ServiceUnavailable as exc:
-                print(f"  {exc.failure_class}, run returned to the queue: {exc}")
-                return 1
-            if outcome is None:
-                print("  queue empty")
-                break
-            note = f"  ESCALATED ({outcome.failure})" if outcome.failure else ""
-            print(
-                f"  {outcome.run_id}  {outcome.steps} step(s), now {outcome.status}, "
-                f"proposes {outcome.tool:<18}{note}"
-            )
-    return 0
+    return run_worker(graph, limit=limit, environ=os.environ)
 
 
 if __name__ == "__main__":  # pragma: no cover
