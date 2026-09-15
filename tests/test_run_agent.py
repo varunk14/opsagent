@@ -19,20 +19,27 @@ from app.contracts import Channel, IncomingMessage
 from app.graph.build import build_graph
 from app.intake import accept
 from app.llm import ModelUnavailable, Reply
+from app.retrieval import PolicySearchUnavailable
 from app.run_agent import LostClaim, claim_next, propose_next
 from tests.fakes import (
     CLASSIFIED_DUPLICATE,
     EXTRACTED_4821,
     OUTAGE,
     PROPOSED_LOOKUP,
+    FakeRetriever,
     ScriptedModel,
 )
 
 pytestmark = pytest.mark.db
 
 
+def graph_of(model):
+    """Every driver test gets the same fixed policy passages."""
+    return build_graph(model, FakeRetriever())
+
+
 def happy_graph():
-    return build_graph(
+    return graph_of(
         ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=PROPOSED_LOOKUP)
     )
 
@@ -93,6 +100,7 @@ def test_what_the_steps_found_is_stored_beside_the_untouched_message(fresh_datab
     assert state["agent"]["classification"]["intent"] == "duplicate_charge"
     assert state["agent"]["extraction"]["order_id"] == "4821"
     assert state["agent"]["policy"]
+    assert state["agent"]["policy_sources"] == ["duplicate-payments#1"]
     assert state["untrusted"]["body"].startswith("Hi, I think I was charged twice")
 
 
@@ -142,7 +150,7 @@ def test_an_empty_queue_asks_the_model_nothing(fresh_database):
     model = ScriptedModel()
 
     with psycopg.connect(fresh_database) as connection:
-        assert propose_next(connection, build_graph(model)) is None
+        assert propose_next(connection, graph_of(model)) is None
 
     assert model.prompts == []
 
@@ -212,7 +220,7 @@ def test_driving_on_a_connection_already_in_a_transaction_is_refused(fresh_datab
 
 def test_an_escalation_is_recorded_and_still_waits_for_a_person(fresh_database):
     run_id = queue(fresh_database)
-    graph = build_graph(ScriptedModel(classify="no idea at all"))
+    graph = graph_of(ScriptedModel(classify="no idea at all"))
 
     with psycopg.connect(fresh_database) as connection:
         propose_next(connection, graph)
@@ -235,7 +243,7 @@ def test_an_unreachable_model_puts_the_run_back_in_the_queue(fresh_database):
     run_id = queue(fresh_database)
 
     with psycopg.connect(fresh_database) as connection, pytest.raises(ModelUnavailable):
-        propose_next(connection, build_graph(Down()))
+        propose_next(connection, graph_of(Down()))
 
     stored = row(fresh_database, run_id)
     assert (stored["status"], stored["locked_by"], stored["locked_at"]) == ("queued", None, None)
@@ -261,7 +269,7 @@ def test_a_run_out_of_attempts_is_dead_not_requeued(fresh_database):
         connection.execute("UPDATE runs SET attempt = max_attempts - 1 WHERE id = %s", (run_id,))
 
     with psycopg.connect(fresh_database) as connection, pytest.raises(ModelUnavailable):
-        propose_next(connection, build_graph(Down()))
+        propose_next(connection, graph_of(Down()))
 
     with psycopg.connect(fresh_database) as connection:
         status, failure_class, locked_by = connection.execute(
@@ -313,7 +321,7 @@ def test_an_outage_partway_through_still_charges_for_finished_steps(fresh_databa
     run goes back to the queue, but the classify call was paid for and is charged.
     """
     run_id = queue(fresh_database)
-    graph = build_graph(ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=OUTAGE))
+    graph = graph_of(ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=OUTAGE))
 
     with psycopg.connect(fresh_database) as connection, pytest.raises(ModelUnavailable):
         propose_next(connection, graph)
@@ -321,3 +329,67 @@ def test_an_outage_partway_through_still_charges_for_finished_steps(fresh_databa
     stored = row(fresh_database, run_id)
     assert stored["status"] == "queued"
     assert stored["cost_usd"] == token_cost(10, 5, REFERENCE_RATE).quantize(Decimal("0.000001"))
+
+
+class PolicyStoreDown:
+    def search(self, question: str):
+        raise PolicySearchUnavailable("policy search could not reach the database")
+
+
+def test_a_policy_store_outage_puts_the_run_back_in_the_queue(fresh_database):
+    """classify and extract were paid for; the database then dropped during retrieval."""
+    run_id = queue(fresh_database)
+    graph = build_graph(ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821), PolicyStoreDown())
+
+    with psycopg.connect(fresh_database) as connection, pytest.raises(PolicySearchUnavailable):
+        propose_next(connection, graph)
+
+    stored = row(fresh_database, run_id)
+    assert (stored["status"], stored["locked_by"]) == ("queued", None)
+    assert stored["cost_usd"] == token_cost(20, 10, REFERENCE_RATE).quantize(Decimal("0.000001"))
+
+
+def test_a_policy_store_outage_on_the_last_attempt_says_what_failed(fresh_database):
+    run_id = queue(fresh_database)
+    with psycopg.connect(fresh_database) as connection:
+        connection.execute("UPDATE runs SET attempt = max_attempts - 1 WHERE id = %s", (run_id,))
+    graph = build_graph(ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821), PolicyStoreDown())
+
+    with psycopg.connect(fresh_database) as connection, pytest.raises(PolicySearchUnavailable):
+        propose_next(connection, graph)
+
+    with psycopg.connect(fresh_database) as connection:
+        status, failure_class = connection.execute(
+            "SELECT status, failure_class FROM runs WHERE id = %s", (run_id,)
+        ).fetchone()
+    assert (status, failure_class) == ("dead", "policy_search_unavailable")
+
+
+def test_the_driver_brings_an_unmigrated_database_up_to_date(empty_database):
+    """app.db promises migrations are safe on every start-up; the driver now relies on it."""
+    from app.run_agent import prepare_database
+
+    with psycopg.connect(empty_database) as connection:
+        passages = prepare_database(connection)
+        columns = {
+            row[0]
+            for row in connection.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'policy_chunks'"
+            ).fetchall()
+        }
+
+    assert passages == 0
+    assert "embedding_model" in columns
+
+
+def test_the_driver_reports_how_many_policy_passages_are_loaded(fresh_database):
+    """Zero means app.policies was never run, which the driver warns about."""
+    from app.policies import ingest
+    from app.run_agent import prepare_database
+    from tests.fakes import FakeEmbedder
+
+    with psycopg.connect(fresh_database) as connection:
+        ingest(connection, FakeEmbedder(), {"d": "# D\n\n## One\n\nfirst\n\n## Two\n\nsecond"})
+
+    with psycopg.connect(fresh_database) as connection:
+        assert prepare_database(connection) == 2

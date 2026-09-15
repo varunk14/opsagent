@@ -13,26 +13,10 @@ from pydantic import BaseModel
 
 from app.contracts import Classification, ExtractedRefund, Intent, ProposedAction
 from app.graph.prompts import classify_prompt, extract_prompt, plan_prompt
-from app.graph.state import AgentState
+from app.graph.state import AgentState, Retriever
 from app.llm import Model, ModelOutputInvalid, Reply, structured
 
 REFUND_INTENTS = {Intent.DUPLICATE_CHARGE, Intent.REFUND_REQUEST}
-
-# Week 3 replaces this with pgvector retrieval over the real policy documents.
-POLICY_STUB: dict[Intent, list[str]] = {
-    Intent.DUPLICATE_CHARGE: [
-        (
-            "[stub] A charge taken twice for one order is refunded in full once the "
-            "duplicate is confirmed on the order record."
-        ),
-    ],
-    Intent.REFUND_REQUEST: [
-        "[stub] Change-of-mind refunds are allowed within 30 days of delivery.",
-    ],
-    Intent.ORDER_STATUS: ["[stub] Delivery questions are answered by a person."],
-    Intent.OTHER: ["[stub] Anything outside refunds and delivery goes to a person."],
-}
-
 
 def escalation(step: str, reason: str, why: str, replies: list[Reply]) -> AgentState:
     """Hand the case to a person, saying which step stopped and why."""
@@ -101,12 +85,27 @@ def extract(state: AgentState, model: Model) -> AgentState:
     return update
 
 
-def retrieve(state: AgentState) -> AgentState:
-    """Policy passages for the intent. The week 3 seam: POLICY_STUB becomes pgvector search."""
+def retrieve(state: AgentState, retriever: Retriever) -> AgentState:
+    """
+    Policy passages nearest in meaning to what the customer wrote.
+
+    The customer's own words are the question: "charged twice" should find the
+    duplicate-payment policy even though the policy never uses those words.
+    The sources are kept, so a proposal can later be traced to the rule it cited.
+    """
     classification = state.get("classification")
     if classification is None:
         return missing_classification("retrieve")
-    return {"policy": POLICY_STUB[classification.intent]}
+
+    question = f"{state.get('subject') or ''}\n{state['body']}".strip()
+    if not question:
+        return {"policy": [], "policy_sources": []}
+
+    passages = retriever.search(question)
+    return {
+        "policy": [passage.text for passage in passages],
+        "policy_sources": [passage.source for passage in passages],
+    }
 
 
 def plan(state: AgentState, model: Model) -> AgentState:

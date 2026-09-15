@@ -6,6 +6,8 @@ markers = [
     # Needs the Postgres from docker-compose.yml. These FAIL rather than skip when
     # it is absent -- see tests/conftest.py for why.
     "db: requires a live database",
+    # Needs Ollama with real models. Skipped unless OPSAGENT_REAL_MODEL=1; CI has no Ollama.
+    "llm: requires a real local model",
 ]
 
 [tool.coverage.report]

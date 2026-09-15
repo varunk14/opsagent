@@ -58,17 +58,28 @@ class Model(Protocol):
     def generate(self, prompt: str) -> Reply: ...
 
 
-class ModelUnavailable(Exception):
+class ServiceUnavailable(Exception):
     """
-    The model could not be reached.
+    Something the agent depends on could not be reached: the model, or the
+    policy store. An outage is not a verdict on the case, so a run hitting one
+    goes back to the queue rather than being judged.
 
     Carries the replies that did come back before the outage: those calls were
-    paid for even though the run could not finish, and the run is charged for them.
+    paid for even though the run could not finish, and the run is charged for
+    them. failure_class is what gets recorded if the run's attempts run out.
     """
+
+    failure_class = "service_unavailable"
 
     def __init__(self, message: str, replies: list[Reply] | None = None):
         super().__init__(message)
         self.replies = list(replies or [])
+
+
+class ModelUnavailable(ServiceUnavailable):
+    """The model could not be reached."""
+
+    failure_class = "model_unavailable"
 
 
 class ModelOutputInvalid(Exception):
