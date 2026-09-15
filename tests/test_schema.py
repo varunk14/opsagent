@@ -327,7 +327,7 @@ def test_the_guardrail_row_cannot_be_deleted(db):
 )
 def test_a_guardrail_outside_its_range_is_refused(db, assignment):
     with pytest.raises(psycopg.errors.CheckViolation):
-        db.execute(f"UPDATE guardrails SET {assignment}")  # noqa: S608 - fixed test strings
+        db.execute(f"UPDATE guardrails SET {assignment}")
 
 
 def test_a_limit_of_zero_is_allowed(db):
@@ -343,7 +343,7 @@ def insert_approval(db, run_id: uuid.UUID, **columns) -> None:
     names = ", ".join(values)
     placeholders = ", ".join(["%s"] * len(values))
     db.execute(
-        f"INSERT INTO approvals (run_id, {names}) VALUES (%s, {placeholders})",  # noqa: S608 - test-owned names
+        f"INSERT INTO approvals (run_id, {names}) VALUES (%s, {placeholders})",
         (run_id, *values.values()),
     )
 

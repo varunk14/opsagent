@@ -1,0 +1,66 @@
+-- The guardrail, and an approvals table that can hold a whole decision.
+--
+-- Concept 2.10: which refunds run on their own is decided by numbers in the
+-- database, compared in code -- never by the prompt. One row, so "the limit" is
+-- never ambiguous; it cannot be deleted, because no row would mean no limit.
+-- Changing it is an UPDATE that records who made it, not a deploy.
+--
+-- The approvals table from 001 could say an action was approved but not why a
+-- person was asked, when, or whether the approved action has since run. Every
+-- column added here closes one of those, and the CHECKs make a half-recorded
+-- decision impossible rather than merely unusual.
+
+CREATE TABLE IF NOT EXISTS guardrails (
+    singleton               boolean PRIMARY KEY DEFAULT true
+                                CONSTRAINT guardrails_one_row CHECK (singleton),
+    -- A refund strictly under this runs on its own. 0 makes every refund manual.
+    auto_refund_limit_paise bigint NOT NULL
+                                CONSTRAINT guardrails_limit_not_negative CHECK (auto_refund_limit_paise >= 0),
+    min_confidence          numeric(3, 2) NOT NULL
+                                CONSTRAINT guardrails_confidence_in_range CHECK (min_confidence BETWEEN 0 AND 1),
+    updated_by              text NOT NULL
+                                CONSTRAINT guardrails_updated_by_named CHECK (btrim(updated_by) <> ''),
+    updated_at              timestamptz NOT NULL DEFAULT now()
+);
+
+-- The handbook's defaults: under Rs 5,000, at least 0.85 confident.
+INSERT INTO guardrails (auto_refund_limit_paise, min_confidence, updated_by)
+VALUES (500000, 0.85, 'migration 006')
+ON CONFLICT DO NOTHING;
+
+CREATE OR REPLACE FUNCTION guardrails_keep_the_row() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'the guardrails row cannot be deleted; set auto_refund_limit_paise = 0 to stop automatic refunds';
+END;
+$$;
+
+CREATE OR REPLACE TRIGGER guardrails_keep_the_row
+    BEFORE DELETE ON guardrails
+    FOR EACH ROW EXECUTE FUNCTION guardrails_keep_the_row();
+
+ALTER TABLE approvals
+    ADD COLUMN IF NOT EXISTS reason        text NOT NULL,          -- why a person is being asked
+    ADD COLUMN IF NOT EXISTS created_at    timestamptz NOT NULL DEFAULT now(),
+    ADD COLUMN IF NOT EXISTS decision_note text,
+    ADD COLUMN IF NOT EXISTS executed_at   timestamptz;           -- when the approved action ran
+
+-- Decided exactly when not pending: by someone with a name, at a time.
+ALTER TABLE approvals
+    ADD CONSTRAINT approvals_decided_by_whom CHECK ((status = 'pending') = (decided_by IS NULL)),
+    ADD CONSTRAINT approvals_decided_when CHECK ((status = 'pending') = (decided_at IS NULL)),
+    ADD CONSTRAINT approvals_decided_by_named CHECK (decided_by IS NULL OR btrim(decided_by) <> ''),
+    -- Only an approved action can have run.
+    ADD CONSTRAINT approvals_executed_only_if_approved CHECK (executed_at IS NULL OR status = 'approved');
+
+-- Two pending approvals for one run would let one refund be approved twice.
+CREATE UNIQUE INDEX IF NOT EXISTS approvals_one_pending_per_run
+    ON approvals (run_id) WHERE status = 'pending';
+
+-- And a run waits to execute at most one approved action.
+CREATE UNIQUE INDEX IF NOT EXISTS approvals_one_unexecuted_per_run
+    ON approvals (run_id) WHERE status = 'approved' AND executed_at IS NULL;
+
+-- The approvals screen lists pending approvals oldest first.
+CREATE INDEX IF NOT EXISTS approvals_pending_created_at_idx
+    ON approvals (created_at) WHERE status = 'pending';
