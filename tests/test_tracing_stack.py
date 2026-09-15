@@ -55,7 +55,7 @@ def services() -> dict:
 
 
 def settings(path: Path) -> dict[str, str]:
-    pairs = (line.split("=", 1) for line in path.read_text().splitlines() if line and not line.startswith("#"))
+    pairs = (line.split("=", 1) for line in path.read_text().splitlines() if "=" in line and not line.startswith("#"))
     return {name: value for name, value in pairs}
 
 
@@ -264,6 +264,16 @@ def test_a_last_line_without_a_newline_is_kept_whole(tmp_path):
 
     assert env.read_text().startswith("OPSAGENT_OPERATOR=asha\nLANGFUSE_")
     assert settings(env)["OPSAGENT_OPERATOR"] == "asha"
+
+
+def test_comments_blanks_and_stray_words_set_nothing(tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("# LANGFUSE_SALT=old\n#LANGFUSE_PUBLIC_KEY=pk-lf-old\n\njust some words\n")
+
+    added = write_env(env)
+
+    assert {"LANGFUSE_SALT", "LANGFUSE_PUBLIC_KEY"} <= set(added)
+    assert settings(env)["OPSAGENT_LANGFUSE_PUBLIC_KEY"] != "pk-lf-old"
 
 
 def test_exported_and_quoted_settings_count_as_already_there(tmp_path):
