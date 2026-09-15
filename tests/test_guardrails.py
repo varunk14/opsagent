@@ -64,6 +64,13 @@ def test_an_unsure_refund_needs_a_person_however_small():
     assert verdict.reason == "confidence 0.50 is below the 0.85 needed for automatic refunds"
 
 
+def test_a_confidence_just_under_the_threshold_is_shown_unrounded():
+    """Rounded, 0.849 would read "0.85 is below the 0.85 needed" and the person could not tell why."""
+    verdict = judge(refund(90_000, confidence="0.849"), DEFAULTS)
+
+    assert verdict.reason == "confidence 0.849 is below the 0.85 needed for automatic refunds"
+
+
 def test_confidence_exactly_at_the_threshold_is_enough():
     assert judge(refund(90_000, confidence="0.85"), DEFAULTS).runs is True
 

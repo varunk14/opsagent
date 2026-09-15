@@ -316,6 +316,12 @@ def test_the_guardrail_row_cannot_be_deleted(db):
         db.execute("DELETE FROM guardrails")
 
 
+def test_the_guardrail_row_cannot_be_truncated_away_either(db):
+    """TRUNCATE fires no row-level DELETE trigger; found in the Unit A database review."""
+    with pytest.raises(psycopg.errors.RaiseException):
+        db.execute("TRUNCATE guardrails")
+
+
 @pytest.mark.parametrize(
     "assignment",
     [
