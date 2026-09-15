@@ -23,9 +23,18 @@ import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any, Self
+from typing import Annotated, Any, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
+
+from app.tools import TOOLS
 
 
 class Channel(StrEnum):
@@ -170,3 +179,107 @@ class RunRecord(BaseModel):
                 "received_at": message.received_at.isoformat(),
             },
         )
+
+
+# --- what the model answers ---------------------------------------------------
+
+
+class Intent(StrEnum):
+    """What the customer wants. Anything else is OTHER, and OTHER escalates."""
+
+    DUPLICATE_CHARGE = "duplicate_charge"
+    REFUND_REQUEST = "refund_request"
+    ORDER_STATUS = "order_status"
+    OTHER = "other"
+
+
+def _exact_confidence(value: object) -> object:
+    """
+    The model sends confidence as a JSON number, so it arrives as a float.
+    Unlike cost it is never summed, only compared once against a threshold, so
+    it is converted through str -- 0.7 stays exactly 0.7 -- rather than refused.
+    """
+    if isinstance(value, float):
+        return Decimal(str(value))
+    return value
+
+
+Confidence = Annotated[Decimal, BeforeValidator(_exact_confidence), Field(ge=0, le=1)]
+
+
+class Classification(BaseModel):
+    """The model's reading of what a message is about."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    intent: Intent
+    confidence: Confidence
+    reasoning: str = Field(max_length=1000)
+
+
+class ExtractedRefund(BaseModel):
+    """
+    The refund facts the message actually states.
+
+    Anything the customer did not say is None. A guessed amount is worse than a
+    missing one, because a missing one gets looked up and a guess gets paid.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    order_id: str | None = Field(default=None, max_length=64)
+    # strict: 7200.0, "720000" and true are all refused rather than coerced.
+    amount_paise: int | None = Field(default=None, ge=0, strict=True)
+    reason: str = Field(max_length=1000)
+
+    @field_validator("order_id")
+    @classmethod
+    def order_id_is_missing_or_real(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("an order id is either absent or not blank")
+        return value
+
+
+_TOOL_PARAMETERS = {tool.name: tool.parameters for tool in TOOLS}
+_JSON_TYPES: dict[str, type] = {"string": str, "integer": int}
+
+
+class ProposedAction(BaseModel):
+    """
+    One tool call the agent would make, checked against that tool's schema.
+
+    Checked here rather than when the tool runs, so a malformed refund is
+    refused while it is still only a proposal.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    tool: str
+    args: dict[str, Any]
+    confidence: Confidence
+    reasoning: str = Field(max_length=1000)
+
+    @model_validator(mode="after")
+    def args_match_the_tool(self) -> Self:
+        parameters = _TOOL_PARAMETERS.get(self.tool)
+        if parameters is None:
+            raise ValueError(f"unknown tool {self.tool!r}; known: {sorted(_TOOL_PARAMETERS)}")
+
+        properties = parameters["properties"]
+        missing = [name for name in parameters.get("required", []) if name not in self.args]
+        if missing:
+            raise ValueError(f"{self.tool} is missing required argument(s): {', '.join(missing)}")
+
+        unexpected = sorted(set(self.args) - set(properties))
+        if unexpected:
+            raise ValueError(f"{self.tool} got unexpected argument(s): {', '.join(unexpected)}")
+
+        for name, value in self.args.items():
+            declared = properties[name]["type"]
+            # bool is a subclass of int, and True is not an amount of paise.
+            # ValueError, not TypeError: pydantic only wraps ValueError.
+            if isinstance(value, bool) or not isinstance(value, _JSON_TYPES[declared]):
+                raise ValueError(  # noqa: TRY004
+                    f"{self.tool} argument {name} must be {declared}, got {type(value).__name__}"
+                )
+        return self
