@@ -23,7 +23,7 @@ services:
   cache:
     # Nothing consumes this yet, and that is deliberate. It is here because the
     # caching and rate limiting it will hold are the difference between the cost
-    # figure in BASELINE.md and the one week 9 reports, and adding a service to a
+    # figure in BASELINE.md and the one cost work reports, and adding a service to a
     # stack people already have running is more disruptive than starting with it.
     image: redis:7-alpine
     container_name: opsagent-cache

@@ -1,7 +1,7 @@
 """
 What one run costs, before anything has been optimised.
 
-Week 9 is supposed to end with a sentence like "cost per 100 runs fell from A to
+Cost work is supposed to end with a sentence like "cost per 100 runs fell from A to
 B, with task completion unchanged". That sentence is worth nothing unless A was
 recorded before any of the work that produced B, using the same arithmetic. It
 cannot be reconstructed later, so it is taken now, at the naive settings: one
@@ -49,7 +49,7 @@ DETERMINISTIC = {"temperature": 0, "seed": 0}
 PASSES = 3
 
 # The prompt as it would be written by someone who has not yet been burned. No
-# schema, no constraint, no examples. Week 2 replaces it; this is what it is
+# schema, no constraint, no examples. The agent's prompts replace it; this is what it is
 # being replaced FROM.
 NAIVE_PROMPT = """You are a customer support agent. Read this email and work out
 what the customer wants. Say what you would do about it.
@@ -86,7 +86,7 @@ def token_cost(prompt_tokens: int, completion_tokens: int, rate: ReferenceRate) 
     """
     The one place tokens become dollars.
 
-    The baseline and every run are priced by this function, so week 9's
+    The baseline and every run are priced by this function, so the
     before-and-after comparison is the same arithmetic on both sides.
     """
     million = Decimal(1_000_000)
@@ -111,7 +111,7 @@ def read_token_counts(payload: dict) -> tuple[int, int]:
     wrong one. Any response that does not carry them -- an error body returned
     with a 200, a renamed field in a later Ollama, a proxy that drops them --
     would become a run that apparently used no tokens and cost nothing. Those
-    zeros fold into the totals and quietly deflate the number week 9 is measured
+    zeros fold into the totals and quietly deflate the number later work is measured
     against, which is the one thing this module exists to get right.
     """
     for field in ("prompt_eval_count", "eval_count"):
@@ -188,7 +188,7 @@ def summarise(measurements: Sequence[StepMeasurement], rate: ReferenceRate) -> B
     Add up what was observed.
 
     Refuses an empty sequence. A baseline of nothing reports zero cost and zero
-    latency, and week 9 would compare against it without complaint.
+    latency, and a later comparison would be made against it without complaint.
     """
     if not measurements:
         raise ValueError("cannot summarise no measurements")
@@ -238,7 +238,7 @@ def report(baseline: Baseline, inbox: Path, messages: int) -> str:
 **Settings:** one model for everything. No routing, no caching, no prompt
 trimming, no structured output. The naive version, deliberately.
 
-## The numbers week 9 will be compared against
+## The numbers later optimisation will be compared against
 
 | | |
 |---|---|
@@ -252,7 +252,7 @@ trimming, no structured output. The naive version, deliberately.
 Read the p95 with care. Percentiles here are nearest-rank: sort the
 {baseline.runs} runs from fastest to slowest and take the {rank}th. With a sample
 this small that is the slowest run observed, not an estimate of a tail. It is
-reported because week 9 needs the same statistic computed the same way, not
+reported because the later comparison needs the same statistic computed the same way, not
 because {baseline.runs} runs can characterise a distribution.
 
 A warm-up run is made and discarded before measuring, so a cold model load does
@@ -281,7 +281,7 @@ property of the prompt and should reproduce. Latency depends on the machine and
 will not.
 
 Every run behind the table above is in `baseline-measurements.json`, so a real
-price list can be substituted later and both ends of the week 9 comparison
+price list can be substituted later and both ends of the before-and-after comparison
 re-derived without measuring anything again.
 """
 

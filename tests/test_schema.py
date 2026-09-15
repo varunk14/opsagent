@@ -8,7 +8,7 @@ is standing in for a failure the agent would otherwise commit silently:
 
   UNIQUE on runs.idempotency_key   -> polling twice creates two runs
   CHECK on runs.status             -> a typo invents a seventh state nothing handles
-  numeric on runs.cost_usd         -> week 9's cost comparison drifts
+  numeric on runs.cost_usd         -> the cost comparison drifts
   bigint on orders.amount_paise    -> money stored as a float
   FK on orders.customer_email      -> an order belonging to nobody
 
@@ -229,7 +229,7 @@ def test_the_worker_can_find_expired_locks_without_a_sequential_scan(db):
     assert any("locked_at" in definition and "running" in definition for (definition,) in indexed)
 
 
-# --- week 4: dead letters -----------------------------------------------------
+# --- dead letters -----------------------------------------------------
 
 
 def insert_dead_letter(db, *, kind: str, run_id: uuid.UUID | None = None, key: str = "email_msg_dead") -> None:
@@ -281,10 +281,10 @@ def test_a_requeued_run_that_dies_again_gets_a_new_dead_letter(db):
     assert db.execute("SELECT count(*) FROM dead_letters WHERE run_id = %s", (run_id,)).fetchone()[0] == 2
 
 
-# --- week 5: guardrails --------------------------------------------------------
+# --- guardrails --------------------------------------------------------
 
 
-def test_the_guardrail_starts_at_the_handbook_defaults(db):
+def test_the_guardrail_starts_at_its_defaults(db):
     """Rs 5,000 and 0.85: a fresh database is safe before anyone configures it."""
     limit, confidence = db.execute(
         "SELECT auto_refund_limit_paise, min_confidence FROM guardrails"
@@ -341,7 +341,7 @@ def test_a_limit_of_zero_is_allowed(db):
     db.execute("UPDATE guardrails SET auto_refund_limit_paise = 0")
 
 
-# --- week 5: approvals --------------------------------------------------------
+# --- approvals --------------------------------------------------------
 
 
 def insert_approval(db, run_id: uuid.UUID, **columns) -> None:

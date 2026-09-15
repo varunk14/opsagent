@@ -49,7 +49,7 @@ def test_a_refund_over_the_limit_needs_a_person():
 
 
 def test_a_refund_of_exactly_the_limit_needs_a_person():
-    """The handbook says under Rs 5,000; the boundary belongs to the person, not the agent."""
+    """The rule says under Rs 5,000; the boundary belongs to the person, not the agent."""
     assert judge(refund(500_000), DEFAULTS).runs is False
 
 
@@ -157,7 +157,7 @@ def test_load_reads_the_defaults(db):
 
 @pytest.mark.db
 def test_a_changed_limit_is_what_the_next_load_sees(db):
-    """The handbook's second half: the behaviour changes with no code change."""
+    """The second half of the acceptance test: the behaviour changes with no code change."""
     assert judge(refund(720_000), load(db)).runs is False
 
     set_limits(db, limit_paise=1_000_000, by="asha")

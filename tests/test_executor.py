@@ -1,7 +1,7 @@
 """
 Tools that act for real, each call keyed so a repeat replays instead of re-running.
 
-The test the handbook asks for comes first: issue_refund twice with one key, one
+The test that matters most comes first: issue_refund twice with one key, one
 refund. The rest keep that guarantee honest -- two workers racing on the same
 key, a key reused for a different operation, and a ledger that cannot pay back
 more than was actually taken.
@@ -75,7 +75,7 @@ def refunds_for(connection: psycopg.Connection, order_id: str = "4821") -> list[
     ).fetchall()
 
 
-# --- the handbook's done-when ---------------------------------------------------
+# --- the acceptance test ---------------------------------------------------
 
 
 def test_refund_called_twice_with_one_key_refunds_once(db):

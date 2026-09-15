@@ -1,5 +1,5 @@
 """
-The handbook's done-when for week 4: kill the worker mid-run, and it resumes.
+Acceptance test for durability: kill the worker mid-run, and it resumes.
 
 A real process runs Priya's case and is killed by the operating system with
 SIGKILL the moment its first step -- the order lookup -- has committed. Nothing
@@ -65,7 +65,7 @@ def test_a_worker_killed_mid_run_is_resumed_by_another(fresh_database):
 
     assert str(outcome.run_id) == run_id
     assert resumed.tasks() == ["plan"], "classify and extract were already on record"
-    # Rs 3,600 is under the default guardrail, so from week 5 the rescuer pays it -- once.
+    # Rs 3,600 is under the default guardrail, so the rescuer pays it -- once.
     assert (outcome.status, outcome.tool) == ("done", "issue_refund")
     assert keys(fresh_database, run_id) == [
         f"{run_id}:step_1:get_order",

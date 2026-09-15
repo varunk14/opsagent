@@ -1,7 +1,7 @@
 """
-The measurement week 9 will be compared against.
+The measurement later cost work will be compared against.
 
-Week 9's claim is meant to be "cost per 100 runs fell from A to B". That claim is
+The eventual claim is meant to be "cost per 100 runs fell from A to B". That claim is
 only worth anything if A was recorded before anything was optimised, by the same
 arithmetic that will later produce B. It cannot be reconstructed afterwards, so
 it is taken now.
@@ -116,7 +116,7 @@ def test_the_summary_reports_both_percentiles():
 def test_summarising_nothing_is_refused():
     """
     An empty baseline would report a cost of zero and a latency of zero, and
-    week 9 would compare against it happily. Refuse instead.
+    a later comparison would accept it happily. Refuse instead.
     """
     with pytest.raises(ValueError, match="no measurements"):
         summarise([], REFERENCE_RATE)
@@ -155,7 +155,7 @@ def test_a_response_without_a_token_count_is_refused(missing):
     not carry it -- an error body returned as 200, a renamed field in a later
     Ollama, a proxy that strips it -- into a run that apparently used no tokens
     and cost nothing. Those zeros fold into the totals, quietly deflating the
-    figure week 9 will be measured against, and nothing anywhere says so.
+    figure later work will be measured against, and nothing anywhere says so.
     """
     payload = {"prompt_eval_count": 98, "eval_count": 225}
     del payload[missing]

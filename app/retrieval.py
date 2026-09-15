@@ -23,7 +23,7 @@ from app.llm import ServiceUnavailable
 
 DEFAULT_K = 3
 # Tuned on these policies with nomic-embed-text: relevant passages sat at
-# 0.32-0.36 cosine distance, the nearest unrelated ones from 0.41. Week 7's
+# 0.32-0.36 cosine distance, the nearest unrelated ones from 0.41. An evaluation
 # golden set is where this gets measured properly rather than eyeballed.
 DEFAULT_MAX_DISTANCE = 0.45
 # The question is the customer's message, which can be 200,000 characters. The

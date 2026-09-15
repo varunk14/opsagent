@@ -133,7 +133,7 @@ def test_cost_is_an_exact_decimal():
 def test_cost_given_as_a_float_is_rejected():
     """
     0.1 + 0.2 != 0.3 in binary floating point. A per-step cost accumulated as a
-    float drifts, and week 9 compares these numbers against a baseline. Reject
+    float drifts, and cost work compares these numbers against a baseline. Reject
     the float at the boundary rather than explaining the discrepancy later.
     """
     with pytest.raises(ValidationError):

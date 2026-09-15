@@ -1,7 +1,7 @@
 """
 Lock expiry: a run whose worker died is picked up by another.
 
-The handbook's picture (2.7): a worker claims a run, executes one step, commits,
+The picture: a worker claims a run, executes one step, commits,
 and dies. Its lock expires after five minutes, another worker claims the run and
 continues from the step that was committed. A worker that is merely slow keeps
 its run, because every committed step refreshes the lock; one that finds its
@@ -41,7 +41,7 @@ def expire(dsn: str, run_id: str) -> None:
 
 
 def test_the_lock_timeout_is_five_minutes():
-    """The handbook's figure: long enough for slow model calls, short enough for a customer."""
+    """Five minutes: long enough for slow model calls, short enough for a customer."""
     assert timedelta(minutes=5) == LOCK_TIMEOUT
 
 

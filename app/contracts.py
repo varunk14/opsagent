@@ -14,7 +14,7 @@ database refuses the duplicate. This is the same distinction that separated the
 real fix from the convincing fake one in experiments/prevent_duplicate_refunds.py.
 
 The second is that money is never a float. Cost is a Decimal and is stored in a
-numeric column, because week 9 compares a cost-per-run figure against a baseline
+numeric column, because cost work compares a cost-per-run figure against a baseline
 recorded now, and a comparison between two accumulated floats is not a
 measurement.
 """

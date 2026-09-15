@@ -106,7 +106,7 @@ def test_the_retrieved_policy_reaches_the_planner():
     assert state["policy_sources"] == ["duplicate-payments#1"]
 
 
-# --- week 4: resuming a run from what was already found --------------------------
+# --- resuming a run from what was already found --------------------------
 
 LOOKED_UP = {
     "step": 1,
