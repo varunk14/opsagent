@@ -50,9 +50,8 @@ def finished(exported: InMemorySpanExporter) -> dict[str, object]:
 
 
 def test_a_span_inside_a_run_takes_the_run_id_as_its_trace_id(exported):
-    with run_context(RUN), tracer().start_as_current_span("tick"):
-        with tracer().start_as_current_span("classify"):
-            pass
+    with run_context(RUN), tracer().start_as_current_span("tick"), tracer().start_as_current_span("classify"):
+        pass
 
     spans = finished(exported)
     assert spans["tick"].context.trace_id == RUN.int
@@ -185,9 +184,8 @@ def test_the_global_tracer_provider_is_the_installed_one(tracing):
 
 def test_rows_are_ordered_parents_first_by_start_time(exported):
     with run_context(RUN), tracer().start_as_current_span("tick"):
-        with tracer().start_as_current_span("classify"):
-            with tracer().start_as_current_span("generate"):
-                pass
+        with tracer().start_as_current_span("classify"), tracer().start_as_current_span("generate"):
+            pass
         with tracer().start_as_current_span("act"):
             pass
 
@@ -269,9 +267,8 @@ def stored(connection, run_id: UUID) -> list[tuple]:
 def test_record_spans_writes_the_buffer_in_the_callers_transaction(db, exported):
     run_id = uuid4()
     insert_run(db, run_id)
-    with run_context(run_id), tracer().start_as_current_span("tick"):
-        with tracer().start_as_current_span("classify"):
-            pass
+    with run_context(run_id), tracer().start_as_current_span("tick"), tracer().start_as_current_span("classify"):
+        pass
 
     written = record_spans(db, run_id)
 
@@ -328,9 +325,8 @@ def test_a_span_that_ends_after_the_write_waits_for_the_next_one(db, exported):
 def test_the_exported_copy_and_the_recorded_rows_are_the_same_spans(db, exported):
     run_id = uuid4()
     insert_run(db, run_id)
-    with run_context(run_id), tracer().start_as_current_span("tick"):
-        with tracer().start_as_current_span("plan"):
-            pass
+    with run_context(run_id), tracer().start_as_current_span("tick"), tracer().start_as_current_span("plan"):
+        pass
 
     record_spans(db, run_id)
 
