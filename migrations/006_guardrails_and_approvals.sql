@@ -39,6 +39,14 @@ CREATE OR REPLACE TRIGGER guardrails_keep_the_row
     BEFORE DELETE ON guardrails
     FOR EACH ROW EXECUTE FUNCTION guardrails_keep_the_row();
 
+-- TRUNCATE fires no row-level trigger, so it needs its own.
+CREATE OR REPLACE TRIGGER guardrails_keep_the_row_on_truncate
+    BEFORE TRUNCATE ON guardrails
+    FOR EACH STATEMENT EXECUTE FUNCTION guardrails_keep_the_row();
+
+-- reason has no default because there is no honest one to backfill. Nothing wrote
+-- approvals before this migration, so the table is empty when it runs; if it were
+-- not, this fails loudly rather than inventing a reason for a past decision.
 ALTER TABLE approvals
     ADD COLUMN IF NOT EXISTS reason        text NOT NULL,          -- why a person is being asked
     ADD COLUMN IF NOT EXISTS created_at    timestamptz NOT NULL DEFAULT now(),
