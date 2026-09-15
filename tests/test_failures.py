@@ -267,3 +267,42 @@ def test_backfill_classifies_runs_that_rested_before_the_column_existed_once(fre
         (category,) = connection.execute("SELECT failure_category FROM runs").fetchone()
 
     assert (first, second, category) == (1, 0, "loop")
+
+
+@pytest.mark.db
+def test_a_run_that_is_not_in_the_database_is_refused_by_id(fresh_database):
+    from uuid import uuid4
+
+    missing = uuid4()
+    with psycopg.connect(fresh_database) as connection, pytest.raises(LookupError, match=str(missing)):
+        rest_of(connection, missing)
+
+
+@pytest.mark.db
+def test_a_person_rejecting_what_the_agent_proposed_is_recorded_as_a_wrong_escalation(fresh_database):
+    """Through the real decision, not a hand-made rest: the rejection and the category land in one transaction."""
+    from app.approvals import decide
+
+    waiting = CASES["n-021"]
+    run_cases(fresh_database, [waiting], script_for(waiting.expect.order_id, waiting.expect.refund_paise), FakeEmbedder())
+
+    with psycopg.connect(fresh_database) as connection:
+        (approval_id,) = connection.execute("SELECT id FROM approvals").fetchone()
+        assert decide(connection, approval_id, approved=False, by="reviewer")
+        (status, category) = connection.execute("SELECT status, failure_category FROM runs").fetchone()
+
+    assert (status, category) == ("done", "wrong_escalation")
+
+
+@pytest.mark.db
+def test_the_mix_is_counted_per_week_and_category(fresh_database):
+    from app.failures import mix_by_week
+
+    looping, paying = CASES["n-002"], CASES["n-001"]
+    run_cases(fresh_database, [looping], looping_model(looping), FakeEmbedder())
+    run_cases(fresh_database, [paying], script_for(paying.expect.order_id, paying.expect.refund_paise), FakeEmbedder())
+
+    with psycopg.connect(fresh_database) as connection:
+        rows = mix_by_week(connection)
+
+    assert [(category, count) for _, category, count in rows] == [("loop", 1)]
