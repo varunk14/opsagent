@@ -30,10 +30,12 @@ from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
 
 from app.baseline import REFERENCE_RATE, token_cost
-from app.db import connect
+from app.db import apply_migrations, connect
+from app.embeddings import OllamaEmbedder
 from app.graph.build import build_graph, run_graph
 from app.graph.state import AgentState
-from app.llm import ModelUnavailable, Ollama, Reply
+from app.llm import Ollama, Reply, ServiceUnavailable
+from app.retrieval import PolicyRetriever
 
 MICRO_DOLLAR = Decimal("0.000001")  # matches runs.cost_usd numeric(10, 6)
 
@@ -62,8 +64,7 @@ RECORD = """
 RELEASE = """
     UPDATE runs
        SET status = CASE WHEN attempt >= max_attempts THEN 'dead' ELSE 'queued' END,
-           failure_class = CASE WHEN attempt >= max_attempts
-                                THEN 'model_unavailable' ELSE failure_class END,
+           failure_class = CASE WHEN attempt >= max_attempts THEN %s ELSE failure_class END,
            current_node = 'intake', locked_by = NULL, locked_at = NULL,
            cost_usd = cost_usd + %s
      WHERE id = %s AND status = 'running' AND locked_by = %s
@@ -137,6 +138,7 @@ def summarise_agent(state: AgentState) -> tuple[dict[str, Any], Decimal]:
         "classification": classification.model_dump(mode="json") if classification else None,
         "extraction": extraction.model_dump(mode="json") if extraction else None,
         "policy": state.get("policy", []),
+        "policy_sources": state.get("policy_sources", []),
         "proposal": state["proposal"].model_dump(mode="json"),
         "failure": state.get("failure"),
         "model_calls": len(replies),
@@ -157,10 +159,12 @@ def propose_next(
 
     try:
         state = run_graph(graph, claimed.subject, claimed.body)
-    except ModelUnavailable as outage:
+    except ServiceUnavailable as outage:
         # Back to the queue, but charged for the calls that did complete.
         with connection.transaction():
-            connection.execute(RELEASE, (cost_of(outage.replies), claimed.run_id, claimed.worker))
+            connection.execute(
+                RELEASE, (outage.failure_class, cost_of(outage.replies), claimed.run_id, claimed.worker)
+            )
         raise
 
     agent, cost = summarise_agent(state)
@@ -179,16 +183,32 @@ def propose_next(
     )
 
 
+def prepare_database(connection: psycopg.Connection) -> int:
+    """
+    Bring the schema up to date and report how many policy passages are loaded.
+
+    Migrations are safe to run on every start-up, and running them here means a
+    deploy that restarts only the driver cannot leave it querying columns that
+    do not exist yet. Zero passages means app.policies has not been run.
+    """
+    apply_migrations(connection)
+    with connection.transaction():
+        row = connection.execute("SELECT count(*) FROM policy_chunks").fetchone()
+    return int(row[0]) if row else 0
+
+
 def main(argv: list[str]) -> int:  # pragma: no cover - the interactive driver
     limit = int(argv[1]) if len(argv) > 1 else 10
-    graph = build_graph(Ollama())
+    graph = build_graph(Ollama(), PolicyRetriever(connect, OllamaEmbedder()))
 
     with connect() as connection:
+        if prepare_database(connection) == 0:
+            print("  warning: no policy passages loaded; run `python -m app.policies` first")
         for _ in range(limit):
             try:
                 outcome = propose_next(connection, graph)
-            except ModelUnavailable as exc:
-                print(f"  model unavailable, run returned to the queue: {exc}")
+            except ServiceUnavailable as exc:
+                print(f"  {exc.failure_class}, run returned to the queue: {exc}")
                 return 1
             if outcome is None:
                 print("  queue empty")

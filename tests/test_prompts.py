@@ -70,12 +70,34 @@ def plan() -> str:
     )
 
 
-def test_planning_shows_every_tool():
-    prompt = plan()
+def test_planning_shows_every_tool_when_no_policy_was_found():
+    prompt = plan_prompt(
+        subject=SUBJECT,
+        body=BODY,
+        classification=Classification(
+            intent=Intent.DUPLICATE_CHARGE, confidence=Decimal("0.9"), reasoning="x"
+        ),
+        extraction=None,
+        policy=[],
+    )
 
     assert prompt.startswith("TASK: plan\n")
     for tool in TOOLS:
         assert tool.name in prompt
+
+
+def test_policy_already_retrieved_is_not_offered_as_a_search():
+    """
+    Seen on the real model: with passages in the prompt and search_policy still
+    listed, every run proposed searching for the policy it had just been given.
+    """
+    prompt = plan()
+
+    assert "search_policy" not in prompt
+    assert "already" in prompt.lower()
+    for tool in TOOLS:
+        if tool.name != "search_policy":
+            assert tool.name in prompt
 
 
 def test_planning_shows_what_earlier_steps_found():
