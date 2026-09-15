@@ -14,6 +14,7 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
+from app import executor as executor_module
 from app.contracts import ProposedAction
 from app.executor import KeyReused, execute, operation_key
 
@@ -393,8 +394,8 @@ def test_search_policy_is_not_something_the_executor_runs(db):
         execute(db, run_id, 2, action)
 
 
-def test_a_failed_tool_leaves_no_half_recorded_call(db):
-    """If the tool raises, the key is not burnt: the whole call rolls back together."""
+def test_a_tool_the_executor_does_not_run_records_nothing(db):
+    """Refused before any key is claimed, so there is nothing to roll back."""
     run_id = insert_run(db)
     action = ProposedAction(
         tool="search_policy", args={"question": "charged twice"}, confidence="0.5", reasoning="look it up"
@@ -404,3 +405,50 @@ def test_a_failed_tool_leaves_no_half_recorded_call(db):
         execute(db, run_id, 2, action)
 
     assert db.execute("SELECT count(*) FROM tool_calls").fetchone()[0] == 0
+
+
+def test_a_tool_that_crashes_after_its_key_is_claimed_rolls_the_key_back(fresh_database, monkeypatch):
+    """
+    The key is claimed, then the tool raises. Nothing may stay committed, or the
+    retry would find a key with no result and the operation could never finish.
+    """
+    with psycopg.connect(fresh_database) as setup:
+        run_id = insert_run(setup)
+    action = ProposedAction(
+        tool="escalate_to_human", args={"reason": "not sure"}, confidence="0.2", reasoning="unclear"
+    )
+
+    def crash(*_args: object) -> dict:
+        raise RuntimeError("tool crashed")
+
+    monkeypatch.setitem(executor_module.TOOLS, "escalate_to_human", crash)
+    with psycopg.connect(fresh_database) as connection, pytest.raises(RuntimeError, match="tool crashed"):
+        execute(connection, run_id, 3, action)
+
+    with psycopg.connect(fresh_database) as check:
+        assert check.execute("SELECT count(*) FROM tool_calls").fetchone()[0] == 0
+
+    monkeypatch.undo()
+    with psycopg.connect(fresh_database) as connection:
+        retried = execute(connection, run_id, 3, action)
+    assert retried.replayed is False
+    assert retried.result == {"escalated": True, "reason": "not sure"}
+
+
+def test_only_the_refund_cap_is_reported_as_a_refusal(db):
+    """
+    Any other constraint the refund breaks is a bug upstream, not an answer for
+    the planner. Built with model_construct to get past the schema that normally
+    stops a zero amount, as a loosened schema one day would.
+    """
+    run_id = insert_run(db)
+    insert_order(db)
+    unchecked = ProposedAction.model_construct(
+        tool="issue_refund",
+        args={"order_id": "4821", "amount_paise": 0, "reason": "charged twice"},
+        confidence="0.9",
+        reasoning="bypasses validation",
+    )
+
+    with pytest.raises(psycopg.errors.CheckViolation):
+        execute(db, run_id, 5, unchecked)
