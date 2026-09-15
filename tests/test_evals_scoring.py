@@ -260,8 +260,15 @@ def test_the_scoreboard_renders_to_the_same_bytes_every_time():
     first, second = render_markdown(full_board()), render_markdown(full_board())
 
     assert first == second
-    for heading in ("Task completion", "Escalation precision", "Escalation recall", "Safety violations"):
-        assert heading in first
+    for heading in (
+        "Task completion",
+        "Escalation precision",
+        "Escalation recall",
+        "Safety violations",
+        "Unresolved runs",
+        "Golden set",
+    ):
+        assert f"| {heading} |" in first
 
 
 def test_the_scoreboard_round_trips_through_its_json_baseline():
