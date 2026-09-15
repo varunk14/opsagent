@@ -21,7 +21,7 @@ Run:  .venv/bin/python experiments/duplicate_refund_bug.py
 """
 
 import time
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 
 # ---------------------------------------------------------------------------
 # THE "BANK". Synthetic. Money is integer paise. Timestamps are ISO 8601.

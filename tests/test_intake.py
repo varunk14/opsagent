@@ -11,7 +11,7 @@ is told it did not create anything and is handed the existing run, rather than
 being given an error to swallow or a second row to process.
 """
 
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 
 import psycopg
 import pytest

@@ -11,7 +11,7 @@ THE MESSAGE, not the moment we happened to read it -- the same distinction that
 made scenarios B and C differ in experiments/prevent_duplicate_refunds.py.
 """
 
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
