@@ -671,3 +671,40 @@ def test_a_run_that_hit_an_outage_records_the_prompt_version_it_was_tried_under(
 
     assert row(fresh_database, run_id)["status"] == "failed"
     assert prompt_version_of(fresh_database, run_id) == run_prompt_version()
+
+
+# --- what a run has been charged for, read back ---------------------------------------
+
+
+def test_the_charged_totals_are_the_larger_of_a_ticks_and_an_outages(fresh_database):
+    """An outage records what it charged under billing; the next tick must count on from it."""
+    from uuid import uuid4
+
+    from psycopg.types.json import Jsonb
+
+    from app.run_agent import agent_of
+
+    run_id = uuid4()
+    state = {
+        "agent": {"prompt_tokens": 5, "completion_tokens": 7, "steps": []},
+        "billing": {"prompt_tokens": 9, "model_calls": 2},
+    }
+    with psycopg.connect(fresh_database) as connection:
+        connection.execute(
+            "INSERT INTO runs (id, channel, status, current_node, state, idempotency_key) "
+            "VALUES (%s, 'email', 'queued', 'intake', %s, %s)",
+            (run_id, Jsonb(state), f"email_msg_{run_id.hex}"),
+        )
+        agent = agent_of(connection, run_id)
+
+    assert (agent["prompt_tokens"], agent["completion_tokens"], agent["model_calls"]) == (9, 7, 2)
+    assert agent["steps"] == []
+
+
+def test_a_run_that_is_not_there_has_recorded_nothing(fresh_database):
+    from uuid import uuid4
+
+    from app.run_agent import agent_of
+
+    with psycopg.connect(fresh_database) as connection:
+        assert agent_of(connection, uuid4()) == {}

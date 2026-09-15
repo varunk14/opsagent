@@ -194,6 +194,24 @@ def test_an_outage_records_no_exception_text(exported):
             assert [event.name for event in span.events] == []
 
 
+def test_an_unexpected_error_is_recorded_by_its_type_and_nothing_it_said(exported):
+    """A bug is not an outage, but its message is no safer to copy into a trace than an outage's."""
+
+    class Broken(NamedModel):
+        def generate(self, prompt: str):
+            raise RuntimeError("the customer wrote: my card ends 4242")
+
+    with pytest.raises(RuntimeError):
+        walk(exported, Broken())
+
+    spans = {span.name: span for span in exported.get_finished_spans()}
+    rows = rows_for(exported.get_finished_spans())
+    for name in ("classify", "classify.generate"):
+        row = named(rows, name)
+        assert (row.status, row.status_message) == ("error", "RuntimeError")
+        assert [event.name for event in spans[name].events] == []
+
+
 def test_tracing_changes_nothing_the_graph_returns(exported):
     with run_context(RUN):
         traced = run_graph(build_graph(happy(), FakeRetriever()), SUBJECT, BODY)

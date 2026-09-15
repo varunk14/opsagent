@@ -46,7 +46,8 @@ import os
 import random
 import socket
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
@@ -54,6 +55,8 @@ from typing import Any
 from uuid import UUID
 
 import psycopg
+from opentelemetry import trace
+from opentelemetry.trace import Span, StatusCode
 from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
 from pydantic import ValidationError
@@ -70,7 +73,7 @@ from app.contracts import Classification, ExtractedRefund, ProposedAction, StepR
 from app.db import apply_migrations, connect
 from app.embeddings import OllamaEmbedder
 from app.executor import OWNED_ORDER, ToolOutcome, execute
-from app.graph.build import build_graph, run_graph
+from app.graph.build import build_graph, failure_recorded, run_graph
 from app.graph.nodes import escalation
 from app.graph.prompts import run_prompt_version
 from app.graph.state import AgentState
@@ -78,6 +81,7 @@ from app.guardrails import judge
 from app.guardrails import load as load_guardrails
 from app.llm import Ollama, Reply, ServiceUnavailable
 from app.retrieval import PolicyRetriever
+from app.tracing import discard, record_spans, run_context, tracer
 
 MICRO_DOLLAR = Decimal("0.000001")  # matches runs.cost_usd numeric(10, 6)
 
@@ -222,7 +226,10 @@ REFUNDED_SO_FAR = "SELECT coalesce(sum(amount_paise), 0)::bigint FROM refunds WH
 EVIDENCE_BODY_CHARS = EXCERPT_CHARS
 
 # One statement decides retry or dead, so nothing can change attempt in between,
-# and a run that dies is dead-lettered by that same statement.
+# and a run that dies is dead-lettered by that same statement. It returns the status
+# it set, and nothing when this worker no longer held the run. An outage's calls are
+# charged like any tick's, counting on from what the run was already charged, and the
+# new totals are kept under state.billing so the next tick counts on from them.
 RELEASE = """
     WITH released AS (
         UPDATE runs
@@ -230,14 +237,17 @@ RELEASE = """
                failure_class = %s,
                next_retry_at = CASE WHEN attempt >= max_attempts THEN NULL ELSE now() + %s END,
                current_node = 'intake', locked_by = NULL, locked_at = NULL,
-               cost_usd = cost_usd + %s, prompt_version = coalesce(%s, prompt_version)
+               cost_usd = cost_usd + %s, prompt_version = coalesce(%s, prompt_version),
+               state = state || %s
          WHERE id = %s AND status = 'running' AND locked_by = %s
         RETURNING id, status, idempotency_key, state, failure_class
+    ), lettered AS (
+        INSERT INTO dead_letters (kind, run_id, idempotency_key, payload, reason, failure_class)
+        SELECT 'run', id, idempotency_key, state, 'out of attempts', failure_class
+          FROM released
+         WHERE status = 'dead'
     )
-    INSERT INTO dead_letters (kind, run_id, idempotency_key, payload, reason, failure_class)
-    SELECT 'run', id, idempotency_key, state, 'out of attempts', failure_class
-      FROM released
-     WHERE status = 'dead'
+    SELECT status FROM released
 """
 
 
@@ -344,13 +354,6 @@ def retry_delay(attempt: int, jitter: Callable[[], float] = random.random) -> ti
     return delay * (0.5 + jitter() / 2)
 
 
-def cost_of(replies: list[Reply]) -> Decimal:
-    """Every reply priced once, at the baseline rate, to the column's precision."""
-    prompt_tokens = sum(reply.prompt_tokens for reply in replies)
-    completion_tokens = sum(reply.completion_tokens for reply in replies)
-    return token_cost(prompt_tokens, completion_tokens, REFERENCE_RATE).quantize(MICRO_DOLLAR)
-
-
 def prior_from(agent: Mapping[str, Any]) -> AgentState:
     """What earlier ticks of this run found, rebuilt from its row. Empty before the first."""
     prior: AgentState = {}
@@ -436,10 +439,28 @@ def summarise_agent(
     return agent, cost
 
 
+# What a run has been charged for so far. A tick records these with its agent state; an
+# outage has no agent state to record, so it records them alone, under state.billing.
+CHARGED = ("prompt_tokens", "completion_tokens", "model_calls")
+
+
 def agent_of(connection: psycopg.Connection, run_id: UUID) -> dict[str, Any]:
+    """
+    What earlier ticks of the run recorded, with its charged totals the larger of the
+    agent's and an outage's: totals only grow, and the next charge counts on from all of it.
+    """
     with connection.transaction():
-        row = connection.execute("SELECT state -> 'agent' FROM runs WHERE id = %s", (run_id,)).fetchone()
-    return dict(row[0]) if row and row[0] else {}
+        row = connection.execute(
+            "SELECT state -> 'agent', state -> 'billing' FROM runs WHERE id = %s", (run_id,)
+        ).fetchone()
+    if row is None:
+        return {}
+    agent = dict(row[0]) if row[0] else {}
+    billing = dict(row[1]) if row[1] else {}
+    for key in CHARGED:
+        if key in billing:
+            agent[key] = max(agent.get(key, 0), billing[key])
+    return agent
 
 
 def record_step(
@@ -490,99 +511,162 @@ def evidence_for(claimed: ClaimedRun, agent: Mapping[str, Any]) -> dict[str, Any
     }
 
 
+@contextmanager
+def traced_tick(run_id: UUID, attributes: dict[str, Any]) -> Iterator[Span]:
+    """
+    A tick's root span, current for everything the tick does, in its run's trace.
+
+    A tick that commits closes this span and writes its spans in that transaction
+    (close_tick). Leaving any other way -- a lost claim, an approval already paid, an
+    error -- commits nothing, so what the tick traced is dropped with it.
+    """
+    with run_context(run_id):
+        span = tracer().start_span("tick", attributes=attributes)
+        try:
+            with trace.use_span(span, end_on_exit=False, record_exception=False, set_status_on_exception=False):
+                yield span
+        finally:
+            if span.is_recording():
+                span.end()
+            discard(run_id)
+
+
+def close_tick(
+    connection: psycopg.Connection, run_id: UUID, tick_span: Span, outcome: str, failure_class: str | None = None
+) -> None:
+    """End the tick's span and write its spans, in the transaction that commits what the tick did."""
+    tick_span.set_attribute("opsagent.outcome", outcome)
+    if failure_class is not None:
+        tick_span.set_status(StatusCode.ERROR, failure_class)
+    tick_span.end()
+    record_spans(connection, run_id)
+
+
 def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_steps: int) -> RunOutcome:
     """Walk the graph from what the run holds, then act on one proposal in one transaction."""
-    before = agent_of(connection, claimed.run_id)
-    # Read before the walk: the version this tick's prompts were built from.
-    version = run_prompt_version()
-    try:
-        state = run_graph(graph, claimed.subject, claimed.body, prior_from(before))
-    except ServiceUnavailable as outage:
-        # Failed, to be tried again later: charged for the calls that did complete, steps kept.
+    with traced_tick(claimed.run_id, {"opsagent.attempt": claimed.attempt}) as tick_span:
+        before = agent_of(connection, claimed.run_id)
+        # Read before the walk: the version this tick's prompts were built from.
+        version = run_prompt_version()
+        try:
+            state = run_graph(graph, claimed.subject, claimed.body, prior_from(before))
+        except ServiceUnavailable as outage:
+            # Failed, to be tried again later: charged for the calls that did complete, steps kept.
+            with connection.transaction():
+                # Rounded as part of the run's running total, not on its own: charged apart,
+                # fractions of a micro-dollar here and on the next tick would each round away.
+                cost, prompt_tokens, completion_tokens = charge(before, outage.replies)
+                billing = {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "model_calls": before.get("model_calls", 0) + len(outage.replies),
+                }
+                released = connection.execute(
+                    RELEASE,
+                    (
+                        outage.failure_class,
+                        retry_delay(claimed.attempt),
+                        cost,
+                        version,
+                        Jsonb({"billing": billing}),
+                        claimed.run_id,
+                        claimed.worker,
+                    ),
+                ).fetchone()
+                if released is not None:
+                    close_tick(connection, claimed.run_id, tick_span, released[0], outage.failure_class)
+            raise
+
+        steps = list(before.get("steps", []))
+        proposal, failure = decide(state, steps, max_steps)
+        deferred: dict[str, Any] | None = None
         with connection.transaction():
-            connection.execute(
-                RELEASE,
-                (
-                    outage.failure_class,
-                    retry_delay(claimed.attempt),
-                    cost_of(outage.replies),
-                    version,
-                    claimed.run_id,
-                    claimed.worker,
-                ),
-            )
-        raise
+            if connection.execute(HOLD_CLAIM, (claimed.run_id, claimed.worker)).fetchone() is None:
+                raise LostClaim(f"run {claimed.run_id} was reclaimed before this worker could act on it")
 
-    steps = list(before.get("steps", []))
-    proposal, failure = decide(state, steps, max_steps)
-    with connection.transaction():
-        if connection.execute(HOLD_CLAIM, (claimed.run_id, claimed.worker)).fetchone() is None:
-            raise LostClaim(f"run {claimed.run_id} was reclaimed before this worker could act on it")
+            with failure_recorded("act", "tool") as act:
+                act.set_attribute("opsagent.tool", proposal.tool)
+                if proposal.tool in RATE_LIMITED:
+                    connection.execute(LOCK_SENDER, (claimed.run_id,))
+                    recent = connection.execute(RECENT_LOOKUPS, (RATE_WINDOW, claimed.run_id)).fetchone()
+                    if recent is not None and recent[0] >= RATE_LIMIT:
+                        deferrals = before.get("deferrals", 0)
+                        if deferrals >= MAX_DEFERRALS:
+                            proposal, failure = hand_over(
+                                f"deferred {deferrals} times by the rate limit",
+                                "The sender kept this case over the lookup limit; a person should look at it.",
+                            )
+                            act.set_attribute("opsagent.tool", proposal.tool)
+                        else:
+                            # What this tick found is kept, so the next one plans from it and each
+                            # model call is charged once. Nothing is executed and no attempt is spent.
+                            deferred, cost = summarise_agent(state, before, proposal, None, steps)
+                            deferred["deferrals"] = deferrals + 1
+                            connection.execute(
+                                DEFER,
+                                (
+                                    recent[1],
+                                    RATE_WINDOW,
+                                    Jsonb({"agent": deferred}),
+                                    cost,
+                                    version,
+                                    claimed.run_id,
+                                    claimed.worker,
+                                ),
+                            )
+                            act.set_attribute("opsagent.result", "deferred by the rate limit")
 
-        if proposal.tool in RATE_LIMITED:
-            connection.execute(LOCK_SENDER, (claimed.run_id,))
-            recent = connection.execute(RECENT_LOOKUPS, (RATE_WINDOW, claimed.run_id)).fetchone()
-            if recent is not None and recent[0] >= RATE_LIMIT:
-                deferrals = before.get("deferrals", 0)
-                if deferrals >= MAX_DEFERRALS:
-                    proposal, failure = hand_over(
-                        f"deferred {deferrals} times by the rate limit",
-                        "The sender kept this case over the lookup limit; a person should look at it.",
-                    )
-                else:
-                    # What this tick found is kept, so the next one plans from it and each
-                    # model call is charged once. Nothing is executed and no attempt is spent.
-                    deferred, cost = summarise_agent(state, before, proposal, None, steps)
-                    deferred["deferrals"] = deferrals + 1
-                    connection.execute(
-                        DEFER,
-                        (
-                            recent[1],
-                            RATE_WINDOW,
-                            Jsonb({"agent": deferred}),
-                            cost,
-                            version,
-                            claimed.run_id,
-                            claimed.worker,
-                        ),
-                    )
-                    return RunOutcome(
-                        run_id=claimed.run_id,
-                        status="queued",
-                        tool=proposal.tool,
-                        steps=len(steps),
-                        failure=None,
-                        cost_usd=cost,
-                    )
+                if deferred is None:
+                    if proposal.tool in RUNS_NOW:
+                        record_step(connection, claimed.run_id, steps, proposal)
 
-        if proposal.tool in RUNS_NOW:
-            record_step(connection, claimed.run_id, steps, proposal)
+                    verdict = None
+                    if proposal.tool in GUARDED:
+                        with failure_recorded("guardrail", "guardrail") as guard:
+                            # Read now, inside this transaction: a limit changed a second ago applies.
+                            limits = load_guardrails(connection)
+                            verdict = judge(proposal, limits, refunded_so_far(connection, claimed.run_id, proposal))
+                            guard.set_attributes(
+                                {
+                                    "opsagent.verdict": "runs" if verdict.runs else "needs a person",
+                                    "opsagent.limit_paise": limits.auto_refund_limit_paise,
+                                    "opsagent.min_confidence": str(limits.min_confidence),
+                                }
+                            )
+                            if verdict.reason:
+                                guard.set_attribute("opsagent.reason", verdict.reason)
+                        if verdict.runs:
+                            failure = pay(connection, claimed.run_id, steps, proposal)
 
-        verdict = None
-        if proposal.tool in GUARDED:
-            # Read now, inside this transaction: a limit changed a second ago applies.
-            limits = load_guardrails(connection)
-            verdict = judge(proposal, limits, refunded_so_far(connection, claimed.run_id, proposal))
-            if verdict.runs:
-                failure = pay(connection, claimed.run_id, steps, proposal)
+                    agent, cost = summarise_agent(state, before, proposal, failure, steps)
+                    stored = (Jsonb({"agent": agent}), cost, version, claimed.run_id, claimed.worker)
+                    if proposal.tool == "get_order":
+                        status, result = "running", "looked up"
+                        connection.execute(CONTINUE, stored)
+                    elif verdict is not None and not verdict.runs:
+                        status, result = "waiting_approval", "approval opened"
+                        approval_id = open_approval(
+                            connection, claimed.run_id, proposal, evidence_for(claimed, agent), verdict.reason or ""
+                        )
+                        act.set_attribute("opsagent.approval_id", approval_id)
+                        connection.execute(PARK, ("approval", *stored))
+                    elif verdict is not None and failure is None:
+                        status, result = "done", "refunded"
+                        connection.execute(FINISH, stored)
+                    else:
+                        status = "waiting_approval"
+                        result = "refused by the ledger" if verdict is not None else "handed to a person"
+                        # A run that escalated early stopped at the step that failed.
+                        node = failure.split(":", 1)[0] if failure else "plan"
+                        connection.execute(PARK, (node, *stored))
+                    act.set_attribute("opsagent.result", result)
 
-        agent, cost = summarise_agent(state, before, proposal, failure, steps)
-        stored = (Jsonb({"agent": agent}), cost, version, claimed.run_id, claimed.worker)
-        if proposal.tool == "get_order":
-            status = "running"
-            connection.execute(CONTINUE, stored)
-        elif verdict is not None and not verdict.runs:
-            status = "waiting_approval"
-            open_approval(connection, claimed.run_id, proposal, evidence_for(claimed, agent), verdict.reason or "")
-            connection.execute(PARK, ("approval", *stored))
-        elif verdict is not None and failure is None:
-            status = "done"
-            connection.execute(FINISH, stored)
-        else:
-            status = "waiting_approval"
-            # A run that escalated early stopped at the step that failed.
-            node = failure.split(":", 1)[0] if failure else "plan"
-            connection.execute(PARK, (node, *stored))
+            if deferred is not None:
+                close_tick(connection, claimed.run_id, tick_span, "queued")
+                return RunOutcome(
+                    run_id=claimed.run_id, status="queued", tool=proposal.tool, steps=len(steps), failure=None, cost_usd=cost
+                )
+            close_tick(connection, claimed.run_id, tick_span, status)
 
     return RunOutcome(
         run_id=claimed.run_id, status=status, tool=proposal.tool, steps=len(steps), failure=failure, cost_usd=cost
@@ -595,38 +679,45 @@ def act_on_approval(connection: psycopg.Connection, claimed: ClaimedRun, approve
     applied again, since a person has already overruled it. The keyed executor, the
     sender's ownership of the order and the ledger cap all still apply.
     """
-    before = agent_of(connection, claimed.run_id)
-    steps = list(before.get("steps", []))
-    tool = str(approved.action.get("tool", "unknown"))
-    with connection.transaction():
-        if connection.execute(HOLD_CLAIM, (claimed.run_id, claimed.worker)).fetchone() is None:
-            raise LostClaim(f"run {claimed.run_id} was reclaimed before this worker could act on it")
-        # Stamped first, in the transaction that pays: a copy of an approval that has
-        # since been executed pays nothing and records nothing.
-        if not mark_executed(connection, approved.id):
-            raise ApprovalAlreadyExecuted(f"approval {approved.id} was already executed")
+    attributes = {"opsagent.attempt": claimed.attempt, "opsagent.approval_id": approved.id}
+    with traced_tick(claimed.run_id, attributes) as tick_span:
+        before = agent_of(connection, claimed.run_id)
+        steps = list(before.get("steps", []))
+        tool = str(approved.action.get("tool", "unknown"))
+        with connection.transaction():
+            if connection.execute(HOLD_CLAIM, (claimed.run_id, claimed.worker)).fetchone() is None:
+                raise LostClaim(f"run {claimed.run_id} was reclaimed before this worker could act on it")
+            # Stamped first, in the transaction that pays: a copy of an approval that has
+            # since been executed pays nothing and records nothing.
+            if not mark_executed(connection, approved.id):
+                raise ApprovalAlreadyExecuted(f"approval {approved.id} was already executed")
 
-        failure: str | None
-        try:
-            action = ProposedAction.model_validate(approved.action)
-        except ValidationError as unreadable:
-            # It was valid when proposed, so only a schema change since can land here.
-            failure = f"act: the approved action could not be read ({unreadable.error_count()} validation errors)"
-        else:
-            failure = pay(connection, claimed.run_id, steps, action)
-        stored = (
-            Jsonb({"agent": {**before, "steps": steps, "failure": failure}}),
-            Decimal(0),
-            None,  # no model was asked, so the version the run was planned under stands
-            claimed.run_id,
-            claimed.worker,
-        )
-        if failure is None:
-            status = "done"
-            connection.execute(FINISH, stored)
-        else:
-            status = "waiting_approval"
-            connection.execute(PARK, ("act", *stored))
+            with failure_recorded("act", "tool") as act:
+                act.set_attribute("opsagent.tool", tool)
+                failure: str | None
+                try:
+                    action = ProposedAction.model_validate(approved.action)
+                except ValidationError as unreadable:
+                    # It was valid when proposed, so only a schema change since can land here.
+                    failure = f"act: the approved action could not be read ({unreadable.error_count()} validation errors)"
+                    act.set_attribute("opsagent.result", "the approved action could not be read")
+                else:
+                    failure = pay(connection, claimed.run_id, steps, action)
+                    act.set_attribute("opsagent.result", "refunded" if failure is None else "refused by the ledger")
+                stored = (
+                    Jsonb({"agent": {**before, "steps": steps, "failure": failure}}),
+                    Decimal(0),
+                    None,  # no model was asked, so the version the run was planned under stands
+                    claimed.run_id,
+                    claimed.worker,
+                )
+                if failure is None:
+                    status = "done"
+                    connection.execute(FINISH, stored)
+                else:
+                    status = "waiting_approval"
+                    connection.execute(PARK, ("act", *stored))
+            close_tick(connection, claimed.run_id, tick_span, status)
 
     return RunOutcome(
         run_id=claimed.run_id,

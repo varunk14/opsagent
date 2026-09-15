@@ -632,3 +632,8 @@ def test_record_spans_writes_nothing_when_tracing_is_not_installed(monkeypatch):
     monkeypatch.setattr(module, "_installed", None)
 
     assert record_spans(object(), uuid4()) == 0
+
+
+def test_flushing_has_nothing_to_wait_for_in_the_database_buffer(tracing):
+    """Held spans are written by the driver in its transaction, never flushed; a provider flush must not wait on them."""
+    assert tracing.recorder.force_flush() is True
