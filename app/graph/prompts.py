@@ -49,13 +49,39 @@ INTENT_DEFINITIONS = {
 }
 
 
+# What each template fills, exactly. A template naming one more or one fewer is
+# refused when it loads, rather than found out when a prompt comes out wrong.
+PLACEHOLDERS = {
+    "classify": frozenset({"intents", "customer_message"}),
+    "extract": frozenset({"customer_message"}),
+    "plan": frozenset({"tools", "prior", "observations", "policy_heading", "passages", "customer_message"}),
+}
+
+
 def load_template(task: str) -> str:
-    """The fixed text of one prompt, from prompts/<task>.txt. A missing file is named, not guessed at."""
+    """
+    The fixed text of one prompt, from prompts/<task>.txt, checked before anything uses it.
+
+    These files are prose that people edit, so the mistakes that invites are refused
+    here, naming the file: a '$' that is not a placeholder, a placeholder missing or
+    extra, and a blank line at the end that the model would read.
+    """
     path = PROMPTS_DIR / f"{task}.txt"
     if not path.is_file():
         raise FileNotFoundError(f"no prompt template at {path}")
+    text = path.read_text(encoding="utf-8")
+    if text.endswith("\n\n"):
+        raise ValueError(f"{path} ends with a blank line, which the model would read; end it with one newline")
     # Editors end a file with a newline; the prompt itself ends with the fence.
-    return path.read_text(encoding="utf-8").removesuffix("\n")
+    text = text.removesuffix("\n")
+    template = Template(text)
+    if not template.is_valid():
+        raise ValueError(f"{path} has a '$' that is not a placeholder; write $$ for a dollar sign")
+    found = frozenset(template.get_identifiers())
+    expected = PLACEHOLDERS.get(task, found)
+    if found != expected:
+        raise ValueError(f"{path} has placeholders {sorted(found)}, expected {sorted(expected)}")
+    return text
 
 
 def version_of(text: str) -> str:
