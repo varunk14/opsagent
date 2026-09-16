@@ -383,3 +383,86 @@ def test_an_order_with_two_different_duplicates_is_a_persons_decision():
 def test_one_duplicate_among_single_charges_is_still_decided_here():
     """Only the repeated amounts count, so other charges on the order do not make it ambiguous."""
     assert justified(refund(50_000), duplicate(10_000, 50_000, 50_000, 70_000)).runs is True
+
+
+# --- what one run may spend -------------------------------------------------------------------
+
+
+def test_the_row_carries_ceilings_a_run_may_not_pass():
+    """Measured before any of this: 3,037 tokens and 19.7s for a median run, 31.9s at p95."""
+    from app.guardrails import Budgets
+
+    assert Budgets(max_tokens_per_run=10_000, max_cost_usd_per_run=Decimal("0.002"), max_seconds_per_run=180)
+
+
+def test_a_run_inside_every_ceiling_is_not_stopped():
+    from app.guardrails import Budgets, over_budget
+
+    ceilings = Budgets(max_tokens_per_run=10_000, max_cost_usd_per_run=Decimal("0.002"), max_seconds_per_run=180)
+
+    assert over_budget(ceilings, tokens=3_000, cost_usd=Decimal("0.0005"), seconds=20) is None
+
+
+def test_a_run_past_the_token_ceiling_says_which_ceiling_and_by_how_much():
+    from app.guardrails import Budgets, over_budget
+
+    ceilings = Budgets(max_tokens_per_run=10_000, max_cost_usd_per_run=Decimal("0.002"), max_seconds_per_run=180)
+
+    reason = over_budget(ceilings, tokens=10_001, cost_usd=Decimal("0.0005"), seconds=20)
+
+    assert reason is not None
+    assert "10,001" in reason and "10,000" in reason and "token" in reason
+
+
+def test_a_run_past_the_cost_ceiling_is_stopped_even_when_its_tokens_are_cheap():
+    from app.guardrails import Budgets, over_budget
+
+    ceilings = Budgets(max_tokens_per_run=10_000, max_cost_usd_per_run=Decimal("0.002"), max_seconds_per_run=180)
+
+    reason = over_budget(ceilings, tokens=100, cost_usd=Decimal("0.003"), seconds=20)
+
+    assert reason is not None and "$0.003" in reason
+
+
+def test_a_run_past_the_time_ceiling_is_stopped():
+    from app.guardrails import Budgets, over_budget
+
+    ceilings = Budgets(max_tokens_per_run=10_000, max_cost_usd_per_run=Decimal("0.002"), max_seconds_per_run=180)
+
+    reason = over_budget(ceilings, tokens=100, cost_usd=Decimal("0.0001"), seconds=181)
+
+    assert reason is not None and "181" in reason and "second" in reason
+
+
+def test_exactly_at_a_ceiling_is_still_inside_it():
+    """The ceiling is what a run may spend, not the first amount it may not."""
+    from app.guardrails import Budgets, over_budget
+
+    ceilings = Budgets(max_tokens_per_run=10_000, max_cost_usd_per_run=Decimal("0.002"), max_seconds_per_run=180)
+
+    assert over_budget(ceilings, tokens=10_000, cost_usd=Decimal("0.002"), seconds=180) is None
+
+
+def test_a_ceiling_of_zero_stops_nothing_so_it_can_be_switched_off():
+    """
+    Unlike the refund limit, where zero is the kill switch, a budget of zero means no budget.
+
+    A ceiling that stopped every run the moment it was set to zero would make the safe way to
+    disable a budget indistinguishable from the most aggressive setting possible.
+    """
+    from app.guardrails import Budgets, over_budget
+
+    off = Budgets(max_tokens_per_run=0, max_cost_usd_per_run=Decimal(0), max_seconds_per_run=0)
+
+    assert over_budget(off, tokens=10_000_000, cost_usd=Decimal("9.99"), seconds=99_999) is None
+
+
+@pytest.mark.db
+def test_the_ceilings_are_read_from_the_row_an_operator_can_change(db):
+    from app.guardrails import load, set_limits
+
+    assert load(db).budgets.max_tokens_per_run > 0
+
+    set_limits(db, max_tokens_per_run=2_000, by="an operator")
+
+    assert load(db).budgets.max_tokens_per_run == 2_000
