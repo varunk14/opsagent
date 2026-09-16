@@ -6,8 +6,10 @@
 {% if not days %}
 <p>No runs yet.</p>
 {% else %}
-<p>Cost per run, by the day it ran. A bar is that day&rsquo;s run against the dearest run on the chart, so a
-busy day does not look like a dear one.</p>
+<p>Cost per run, by the day it ran, over the last 30 days. A bar is that day&rsquo;s run against the dearest run
+on the chart, so a busy day does not look like a dear one. A run that has not finished is counted at no
+cost, which pulls its day down.</p>
+{# Not the `money` filter: it normalises away trailing zeros, and these columns are read down. #}
 <table>
   <tr><th>day</th><th></th><th>per run</th><th>runs</th><th>spent</th></tr>
 {% for day in days %}

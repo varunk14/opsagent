@@ -77,7 +77,15 @@ def test_the_page_says_what_the_cost_leaves_out(fresh_database):
     assert "embedding" in page
 
 
-def test_no_customer_text_reaches_the_burn_down(fresh_database):
+def test_the_burn_down_never_asks_for_the_customer_s_text(fresh_database):
+    """
+    Not an escaping test, and it would pass with escaping switched off.
+
+    What it pins is narrower and worth pinning on its own: the page's queries select `cost_usd` and
+    `tokens_by_model` and nothing else, so the customer's words are never fetched and have no render
+    path to be escaped on. If someone later widens a query to `SELECT state`, this fails.
+    The escaping itself is held up by the model-name test below, which renders a real field.
+    """
     a_run(fresh_database, cost="0.001000", tokens={"llama3.1:8b": [10, 2]})
 
     page = client_for(fresh_database).get("/costs").text
