@@ -6,6 +6,15 @@
   <dt>Refunds paid without a person</dt><dd>when the order's refunds stay under {{ limit }}</dd>
   <dt>Confidence needed</dt><dd>at least {{ min_confidence }}</dd>
 </dl>
+
+<h2>What one run may spend</h2>
+<dl>
+{% for what, ceiling in budgets %}
+  <dt>{{ what }}</dt><dd>{{ ceiling }}</dd>
+{% endfor %}
+</dl>
+<p>A run that passes one of these is handed to a person with the reason, having paid nothing.
+Seconds are the run's own model time, not how long it waited for someone to look at it.</p>
 <p>Everything else waits for a decision. Change these with
 <code>python -m app.guardrails set --limit-rupees N --by NAME</code>; a limit of Rs 0 stops automatic refunds.</p>
 {% endblock %}

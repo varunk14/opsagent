@@ -46,7 +46,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from app.approvals import PendingApproval, decide, list_handed_over, list_pending
 from app.db import connect
 from app.failures import FIXES, GOLDEN_HISTORY, failure_chart, golden_trend, mix_by_week
-from app.guardrails import load, rupees
+from app.guardrails import Budgets, load, rupees
 from app.traces import TraceSpan, list_runs, trace_of
 from app.tracing import LOOPBACK_HOSTS, Attr
 
@@ -189,6 +189,30 @@ def langfuse_link_base(url: str | None) -> str | None:
     return url.strip().rstrip("/")
 
 
+NO_CEILING = "no ceiling"
+
+
+def spending(budgets: Budgets) -> list[tuple[str, str]]:
+    """
+    What one run may spend, ready to read. Zero is said in words, never shown as a number.
+
+    Zero means no ceiling here, the opposite of the refund limit where zero stops everything, and
+    "0 tokens" on the page would read as the harshest setting there is rather than the absence of
+    one.
+    """
+    return [
+        ("Tokens one run may spend", f"{budgets.max_tokens_per_run:,}" if budgets.max_tokens_per_run else NO_CEILING),
+        (
+            "Reference cost one run may reach",
+            f"${budgets.max_cost_usd_per_run:f}" if budgets.max_cost_usd_per_run else NO_CEILING,
+        ),
+        (
+            "Seconds of model time one run may take",
+            f"{budgets.max_seconds_per_run} seconds" if budgets.max_seconds_per_run else NO_CEILING,
+        ),
+    ]
+
+
 def create_app(
     dsn: str | None = None,
     operator: str | None = None,
@@ -265,7 +289,11 @@ def create_app(
         return page(
             request,
             "guardrails.html",
-            {"limit": rupees(limits.auto_refund_limit_paise), "min_confidence": str(limits.min_confidence)},
+            {
+                "limit": rupees(limits.auto_refund_limit_paise),
+                "min_confidence": str(limits.min_confidence),
+                "budgets": spending(limits.budgets),
+            },
         )
 
     @app.get("/failures", response_class=HTMLResponse)

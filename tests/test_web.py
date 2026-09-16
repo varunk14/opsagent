@@ -26,6 +26,7 @@ from psycopg.types.json import Jsonb
 
 from app.approvals import open_approval
 from app.contracts import ProposedAction
+from app.guardrails import set_limits
 from app.web import HOST, create_app
 
 pytestmark = pytest.mark.db
@@ -437,3 +438,23 @@ def test_a_missing_detail_reads_as_missing_not_as_none(fresh_database):
 
     assert "None" not in page
     assert "not recorded" in page
+
+
+def test_the_guardrails_page_shows_what_one_run_may_spend(fresh_database):
+    """An operator changing a ceiling has to be able to see the one in force first."""
+    page = client_for(fresh_database).get("/guardrails").text
+
+    assert "10,000" in page and "token" in page.lower()
+    assert "0.002" in page
+    assert "180" in page and "second" in page.lower()
+
+
+def test_a_ceiling_switched_off_says_so_rather_than_showing_zero(fresh_database):
+    """Zero means no ceiling here, and "0 tokens" reads like the harshest setting there is."""
+    with psycopg.connect(fresh_database) as connection:
+        set_limits(connection, max_tokens_per_run=0, by="an operator")
+        connection.commit()
+
+    page = client_for(fresh_database).get("/guardrails").text
+
+    assert "no ceiling" in page.lower()

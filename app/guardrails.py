@@ -22,9 +22,14 @@ ledger cannot be talked round either.
 
 Nothing here commits; the caller owns the transaction.
 
+A run also has ceilings on what it may spend reaching a decision -- tokens, reference
+dollars, and seconds of its own model time. Zero means no ceiling there, the opposite of
+the refund limit, so switching a budget off never looks like the harshest setting there is.
+
 Run:  .venv/bin/python -m app.guardrails show
       .venv/bin/python -m app.guardrails set --limit-rupees 10000 --by asha
       .venv/bin/python -m app.guardrails set --min-confidence 0.90 --by asha
+      .venv/bin/python -m app.guardrails set --max-tokens-per-run 20000 --by asha
 """
 
 import argparse
@@ -357,6 +362,11 @@ def main(argv: list[str]) -> int:  # pragma: no cover - the operator's command l
     change = commands.add_parser("set", help="change a limit")
     change.add_argument("--limit-rupees", type=Decimal, help="refunds strictly under this run on their own; 0 stops them")
     change.add_argument("--min-confidence", type=Decimal, help="refunds below this confidence need a person")
+    change.add_argument("--max-tokens-per-run", type=int, help="tokens one run may spend; 0 means no ceiling")
+    change.add_argument("--max-cost-per-run", type=Decimal, help="reference dollars one run may reach; 0 means no ceiling")
+    change.add_argument(
+        "--max-seconds-per-run", type=int, help="seconds of model time one run may take; 0 means no ceiling"
+    )
     change.add_argument("--by", required=True, help="who is making the change")
     arguments = parser.parse_args(argv[1:])
 
@@ -371,7 +381,13 @@ def main(argv: list[str]) -> int:  # pragma: no cover - the operator's command l
                 limit = int(paise)
             try:
                 guardrails = set_limits(
-                    connection, limit_paise=limit, min_confidence=arguments.min_confidence, by=arguments.by
+                    connection,
+                    limit_paise=limit,
+                    min_confidence=arguments.min_confidence,
+                    max_tokens_per_run=arguments.max_tokens_per_run,
+                    max_cost_usd_per_run=arguments.max_cost_per_run,
+                    max_seconds_per_run=arguments.max_seconds_per_run,
+                    by=arguments.by,
                 )
             except ValueError as refused:
                 print(f"  refused: {refused}")
@@ -382,6 +398,12 @@ def main(argv: list[str]) -> int:  # pragma: no cover - the operator's command l
 
     print(f"  refunds under {rupees(guardrails.auto_refund_limit_paise)} run on their own")
     print(f"  refunds below confidence {_shown(guardrails.min_confidence)} need a person")
+    for what, ceiling in (
+        ("tokens", guardrails.budgets.max_tokens_per_run),
+        ("reference dollars", guardrails.budgets.max_cost_usd_per_run),
+        ("seconds of model time", guardrails.budgets.max_seconds_per_run),
+    ):
+        print(f"  {what} one run may spend: {ceiling or 'no ceiling'}")
     return 0
 
 
