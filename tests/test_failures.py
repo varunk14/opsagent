@@ -462,12 +462,12 @@ def test_a_missing_category_counts_zero_and_bars_scale_to_the_largest_anywhere(t
 
     first, second = golden_trend(path)
 
-    assert dict((category, count) for category, count, _ in first.mix) == {
+    assert {category: count for category, count, _ in first.mix} == {
         "hallucinated_field": 0, "tool_misuse": 0, "loop": 20, "context_overflow": 0, "wrong_escalation": 40, "drift": 0
     }
-    assert dict((category, width) for category, _, width in first.mix)["wrong_escalation"] == 100  # 40 of 40
-    assert dict((category, width) for category, _, width in first.mix)["loop"] == 50  # 20 of 40
-    assert dict((category, width) for category, _, width in second.mix)["loop"] == 25  # 10 of 40, the largest anywhere
+    assert {category: width for category, _, width in first.mix}["wrong_escalation"] == 100  # 40 of 40
+    assert {category: width for category, _, width in first.mix}["loop"] == 50  # 20 of 40
+    assert {category: width for category, _, width in second.mix}["loop"] == 25  # 10 of 40, the largest anywhere
 
 
 def test_a_line_that_is_not_an_accepted_baseline_is_skipped_rather_than_read(tmp_path):

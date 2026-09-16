@@ -45,7 +45,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.approvals import PendingApproval, decide, list_handed_over, list_pending
 from app.db import connect
-from app.failures import FIXES, failure_chart, mix_by_week
+from app.failures import FIXES, GOLDEN_HISTORY, failure_chart, golden_trend, mix_by_week
 from app.guardrails import load, rupees
 from app.traces import TraceSpan, list_runs, trace_of
 from app.tracing import LOOPBACK_HOSTS, Attr
@@ -189,8 +189,14 @@ def langfuse_link_base(url: str | None) -> str | None:
     return url.strip().rstrip("/")
 
 
-def create_app(dsn: str | None = None, operator: str | None = None, langfuse_project_url: str | None = None) -> FastAPI:
+def create_app(
+    dsn: str | None = None,
+    operator: str | None = None,
+    langfuse_project_url: str | None = None,
+    history_path: Path | None = None,
+) -> FastAPI:
     """The screen, with a token of its own. `dsn` defaults to OPSAGENT_DATABASE_URL."""
+    history = history_path or GOLDEN_HISTORY
     langfuse = langfuse_link_base(langfuse_project_url)
     token = secrets.token_urlsafe(32)
     name = (operator or "").strip() or None
@@ -269,7 +275,12 @@ def create_app(dsn: str | None = None, operator: str | None = None, langfuse_pro
         return page(
             request,
             "failures.html",
-            {"weeks": failure_chart(rows), "total": sum(count for _, _, count in rows), "fixes": FIXES},
+            {
+                "weeks": failure_chart(rows),
+                "total": sum(count for _, _, count in rows),
+                "trend": golden_trend(history),
+                "fixes": FIXES,
+            },
         )
 
     @app.get("/runs", response_class=HTMLResponse)

@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -277,6 +278,63 @@ def failure_chart(rows: Sequence[tuple[date, str, int]]) -> list[tuple[date, lis
     for week, category, count in rows:
         weeks.setdefault(week, []).append((category, count, round(100 * count / largest)))
     return list(weeks.items())
+
+
+GOLDEN_HISTORY = Path(__file__).resolve().parent.parent / "evals" / "history.jsonl"
+
+
+@dataclass(frozen=True)
+class Accepted:
+    """One accepted baseline of the golden set, as the trend draws it."""
+
+    on: str
+    code: str
+    completed: int
+    cases: int
+    mix: list[tuple[str, int, int]]
+
+
+def golden_trend(path: Path = GOLDEN_HISTORY) -> list[Accepted]:
+    """
+    The failure mix of every accepted baseline, oldest first, as bars.
+
+    Live runs say what is failing here and now; this says what the golden set does with each
+    version of the agent, so a category that a change made worse is visible before a deploy.
+    The file is the append-only history `python -m evals accept` writes. It is read as
+    evidence, never trusted: a line that is not an accepted baseline is skipped, and a missing
+    file is simply no trend -- the screen must not fall over because the history is absent or
+    half-written.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    accepted: list[tuple[dict[str, Any], dict[str, int]]] = []
+    for line in lines:
+        try:
+            found = json.loads(line)
+        except ValueError:
+            continue
+        mix = found.get("failure_mix") if isinstance(found, dict) else None
+        if isinstance(mix, dict):
+            accepted.append((found, mix))
+    largest = max((count for _, mix in accepted for count in mix.values() if isinstance(count, int)), default=0)
+    return [
+        Accepted(
+            on=str(found.get("accepted_on", "")),
+            code=str(found.get("code", "")),
+            completed=int(found.get("completed", 0)),
+            cases=int(found.get("cases", 0)),
+            mix=[(category.value, count, round(100 * count / largest) if largest else 0) for category, count in
+                 ((category, _count(mix.get(category.value))) for category in FailureCategory)],
+        )
+        for found, mix in accepted
+    ]
+
+
+def _count(value: Any) -> int:
+    """A category's count from a history line: anything that is not a whole number counts as none."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
 def main(argv: list[str]) -> int:  # pragma: no cover - the operator's command line

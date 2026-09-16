@@ -16,6 +16,21 @@
 {% endfor %}
 </table>
 {% endif %}
+<h2>The golden set, per accepted baseline</h2>
+{% if not trend %}
+<p>No accepted baseline yet.</p>
+{% else %}
+<p>What the same {{ trend[-1].cases }} cases do on each version of the agent, oldest first.</p>
+<table>
+{% for accepted in trend %}
+  <tr><th colspan="3">{{ accepted.on }} &middot; {{ accepted.code }} &middot; {{ accepted.completed }} of {{ accepted.cases }} complete</th></tr>
+  {% for category, count, width in accepted.mix %}
+  <tr><td>{{ category }}</td><td><div class="bar" style="width: {{ width }}%"></div></td><td>{{ count }}</td></tr>
+  {% endfor %}
+{% endfor %}
+</table>
+{% endif %}
+
 <h2>What we would fix</h2>
 <dl>
 {% for category, fix in fixes %}
