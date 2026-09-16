@@ -105,10 +105,27 @@ def test_a_generation_carries_model_tokens_cost_version_and_latency(exported):
     assert Decimal(str(json.loads(call.attributes[Attr.COST_DETAILS])["total"])) == call.cost_usd
 
 
-def test_a_model_that_does_not_name_itself_is_recorded_by_its_class(exported):
-    rows = walk(exported, ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=PROPOSED_LOOKUP))
+def test_a_call_by_a_model_nobody_priced_is_recorded_with_its_tokens_and_no_cost(exported):
+    """
+    A missing rate is a gap in the accounting, not a reason to fail a customer's run.
 
-    assert named(rows, "classify.generate").model == "ScriptedModel"
+    The call is recorded with everything that was observed, and the cost is left out rather than
+    filled in at some other model's rate, so whoever reads the trace can see the hole.
+    """
+
+    class Unpriced(ScriptedModel):
+        def generate(self, prompt: str):
+            from dataclasses import replace
+
+            return replace(super().generate(prompt), model="nobody-priced-this")
+
+    rows = walk(exported, Unpriced(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=PROPOSED_LOOKUP))
+
+    call = named(rows, "classify.generate")
+    assert (call.model, call.input_tokens, call.output_tokens) == ("nobody-priced-this", IN, OUT)
+    assert Attr.COST_USD not in call.attributes
+    assert json.loads(call.attributes[Attr.COST_DETAILS]) == {"unpriced": "nobody-priced-this"}
+    assert call.prompt_version == prompt_version("classify"), "still a generation in every other way"
 
 
 def test_every_retry_is_its_own_costed_generation(exported):
@@ -225,7 +242,10 @@ def test_a_model_name_is_cut_to_a_bounded_length(exported):
     """Set by whoever runs the worker, not by a customer; bounded anyway, since every call's span copies it."""
 
     class LongNamed(ScriptedModel):
-        model = "m" * 500
+        def generate(self, prompt: str):
+            from dataclasses import replace
+
+            return replace(super().generate(prompt), model="m" * 500)
 
     rows = walk(exported, LongNamed(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=PROPOSED_LOOKUP))
 

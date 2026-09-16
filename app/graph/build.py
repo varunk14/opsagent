@@ -28,7 +28,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from opentelemetry.trace import Span, StatusCode
 
-from app.baseline import REFERENCE_RATE, token_cost
+from app.baseline import rate_for, token_cost
 from app.graph import nodes
 from app.graph.prompts import PROMPT_VERSIONS
 from app.graph.state import AgentState, Retriever
@@ -77,24 +77,33 @@ class TracedModel:
 
     def __init__(self, model: Model) -> None:
         self.model = model
-        self.name = str(getattr(model, "model", None) or type(model).__name__)[:MAX_MODEL_NAME_CHARS]
 
     def generate(self, prompt: str) -> Reply:
         task = task_of(prompt)
         with failure_recorded(f"{task}.generate") as span:
             reply = self.model.generate(prompt)
-            cost = token_cost(reply.prompt_tokens, reply.completion_tokens, REFERENCE_RATE)
+            # Taken from the reply, not from what was wrapped. A ladder is one wrapper with more
+            # than one model behind it, so only the answer knows which one produced it, and at
+            # what rate: pricing every call at the dearer tier would hide the whole saving.
+            answered = reply.model[:MAX_MODEL_NAME_CHARS]
             span.set_attributes(
                 {
                     Attr.TYPE: "generation",
-                    Attr.MODEL: self.name,
+                    Attr.MODEL: answered,
                     Attr.INPUT_TOKENS: reply.prompt_tokens,
                     Attr.OUTPUT_TOKENS: reply.completion_tokens,
-                    Attr.COST_USD: str(cost),
-                    Attr.COST_DETAILS: json.dumps({"total": float(cost)}),
                     Attr.LATENCY_MS: reply.latency_ms,
                 }
             )
+            # A model nobody has priced is a gap in the accounting, not a reason to fail a
+            # customer's run: the call is recorded with its tokens and no cost, so the hole is
+            # visible to whoever reads the trace rather than filled with somebody else's rate.
+            try:
+                cost = token_cost(reply.prompt_tokens, reply.completion_tokens, rate_for(reply.model))
+            except KeyError:
+                span.set_attribute(Attr.COST_DETAILS, json.dumps({"unpriced": answered}))
+            else:
+                span.set_attributes({Attr.COST_USD: str(cost), Attr.COST_DETAILS: json.dumps({"total": float(cost)})})
             version = PROMPT_VERSIONS.get(task)
             if version is not None:
                 span.set_attributes({Attr.PROMPT_VERSION: version, Attr.PROMPT_VERSION_METADATA: version})
