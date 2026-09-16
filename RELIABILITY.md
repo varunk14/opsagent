@@ -41,23 +41,29 @@ python -m evals verify     # live re-run, reports drift against the recordings
 | Measure | Value |
 |---|---|
 | Cases | 150 |
-| Task completion | 0.7467 (112 of 150) |
+| Task completion | 0.9733 (146 of 150) |
 | Intent accuracy | 0.8600 |
 | Extraction accuracy | 0.7800 |
-| Escalation precision | 0.9118 |
+| Escalation precision | 0.9688 |
 | Escalation recall | 1.0000 |
-| False-positive rate | 0.4615 |
+| False-positive rate | 0.1538 |
 | Safety violations | 0 |
 | Unresolved runs | 0 |
-| Model calls | 644 |
-| Reference cost | $0.077111 |
+| Model calls | 639 |
+| Reference cost | $0.066294 |
 
-Completion is 75 %, and nothing unsafe is paid.
+Completion is 97 %, and nothing unsafe is paid.
 
-Weakest categories, from `evals/scoreboard.md`: `inflated_amount` 0.00, `change_of_mind` 0.42,
-`damaged_item` 0.50, `duplicate_over_limit` 0.50. Strongest: `confidence_pressure`,
-`duplicate_not_confirmed`, `multiple_orders`, `order_status`, `payment_question`,
-`unknown_order`, `wrong_owner`, `garbled`, `general`, all 1.00.
+**Every one of the four remaining failures is the same category.** `inflated_amount` sits at 0.00;
+all eighteen other categories are at 1.00. Those four are customers asking for more than the order
+was ever charged, and the agent proposes the inflated figure rather than the real one. The ledger
+refuses to pay it and the case goes to a person, so no money is lost — but the agent is wrong before
+the ledger catches it, and that is a specific next thing to fix rather than anything diffuse about
+accuracy.
+
+Intent and extraction accuracy have not moved, and that is worth saying plainly: completion rose
+because cases already destined for a person now reach them the right way, not because the model
+reads messages any better than it did.
 
 ### The nineteen unsafe payments, and how they were closed
 
@@ -104,6 +110,39 @@ four of the seventeen looping runs recovered, and the other thirteen asked for t
 twice. The price is honest too — model calls rose from 560 to 644 and the reference cost from
 $0.0627 to $0.0771 for the set, because runs that used to stop now carry on.
 
+### The guard that only ran on refunds about to pay themselves
+
+The largest single gain, thirty-four cases, came from a change that was not planned and was found by
+the gate refusing a release.
+
+Shortening the planning prompt made the model more decisive. Every looping run disappeared and
+duplicate-charge cases went to 1.00 — but ten cases got *worse* in a very specific way: the agent now
+proposed a refund where it used to escalate, and each of those proposals was queued as a **human
+approval** instead of the case being **handed over**. The per-category gate caught it even though the
+headline completion had gone up.
+
+Both outcomes end with a person, so nothing unsafe was paid either way, and it would have been easy
+to wave through. They are not the same thing though. Handing over gives someone the case to decide;
+an approval gives them a filled-in refund and one button — and people approve what is put in front
+of them far more readily than they would have proposed it. For a customer citing a policy that does
+not exist, that difference is the whole control.
+
+The cause was that the conditions guard ran **only** where a refund would otherwise have paid itself.
+A refund already bound for a person skipped it, on the reasoning that one going to a person is a
+person's to judge. Asking one of those conditions — *was this read as a duplicate charge at all?* —
+of every refund recovered the ten regressions and eighteen more that had been arriving as approvals
+since long before this work. It refuses only: it can take a payment away, never grant one, or
+satisfying it would become a route around the confidence floor rather than a check on top of it.
+
+Measured: task completion 0.7467 → 0.9733, `wrong_escalation` 25 → 4, `loop` 13 → 0, false-positive
+rate 0.4615 → 0.1538, safety violations 0 → 0, and the reference cost *down* from $0.077111 to
+$0.066294 because fewer runs go round again.
+
+A wider version of the same fix — applying every condition to every refund — was written first and
+thrown away: it broke twenty-four tests across eight files, including the acceptance test that a
+refund over the limit pauses for approval. It was quietly redefining the over-limit approval path,
+which is a different decision from the one being made here.
+
 ## The failure taxonomy
 
 Every failed run is classified into exactly one of six fixed categories, by deterministic rules
@@ -114,8 +153,8 @@ outage or an expired lock — those are already named by `failure_class` and the
 
 | Category | Cases | What it means | What we would fix |
 |---|---|---|---|
-| `wrong_escalation` | 25 | A person rejected what the agent proposed, or it paid where a person should decide | Decide from policy conditions in code, not from confidence: a duplicate needs two ledger charges; change-of-mind and damaged items go to a person. |
-| `loop` | 13 | The planner repeated a step, spent the whole step budget, or was deferred until a person had to take it | Give the planner a way to decide: when it repeats a lookup whose result is shown, ask once more with that result marked, then hand over. |
+| `wrong_escalation` | 4 | A person rejected what the agent proposed, or it paid where a person should decide | Refuse an amount larger than the order was charged at extraction, not at the ledger: all four are a customer asking for more than they paid. |
+| `loop` | 0 | The planner repeated a step, spent the whole step budget, or was deferred until a person had to take it | Closed. A repeated lookup is now asked once more with the result marked, and a shorter planning prompt stopped the rest. |
 | `tool_misuse` | 0 | A tool that does not run here, arguments the ledger refused, a lookup of an unknown order, a refund for an order never looked up | Check arguments before proposing: a refund must be for an order this run looked up; the ledger already refuses more than was charged. |
 | `hallucinated_field` | 0 | An order id or amount in neither the message, the policy it was shown, nor any tool result | Tighten extraction: an order id or amount must be quoted from the message or a lookup; refuse the proposal otherwise. |
 | `context_overflow` | 0 | The customer's text was too long for the prompt and was cut | Chunk or summarise a long message before the prompt; today anything over the cap is cut. |
@@ -144,6 +183,7 @@ that a change made worse is visible before anything is deployed.
 | 2026-09-16 | `cb9dd23` | 108 / 150 | 0 | 3 | 17 | 0 | 22 | 0 |
 | 2026-09-16 | `34ac5fe` | 112 / 150 | 0 | 3 | 13 | 0 | 22 | 0 |
 | 2026-09-16 | `4551a40` | 112 / 150 | 0 | 0 | 13 | 0 | 25 | 0 |
+| 2026-09-16 | `3ed692f` | 146 / 150 | 0 | 0 | 0 | 0 | 4 | 0 |
 
 ## The judge
 
