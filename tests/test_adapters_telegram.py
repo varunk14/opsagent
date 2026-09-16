@@ -342,6 +342,61 @@ def test_a_reply_too_large_to_read_is_refused_as_this_channels_problem():
     assert read_capped(io.BytesIO(b"{}"), MAX_RESPONSE_BYTES) == b"{}"
 
 
+def test_a_reply_nested_too_deep_to_parse_is_refused_not_a_crash():
+    """
+    Found by a security review, and the same shape of hole as the header bomb on the mailbox.
+
+    Python's JSON parser recurses, so a reply nested a few thousand levels deep raises
+    RecursionError. That is not a ValueError, so nothing in the pass catches it; the pass dies
+    before the cursor moves, the same reply is offered again, and the channel stalls for good. It
+    took 40 KB -- a two-hundredth of the size cap -- which is why the cap alone does not cover it.
+    """
+    from app.adapters.telegram import updates_from_payload
+
+    deep = b'{"ok":true,"result":[{"update_id":1,"message":' + b"[" * 20_000 + b"]" * 20_000 + b"}]}"
+
+    with pytest.raises(ValueError, match="nested"):
+        updates_from_payload(deep)
+
+
+def test_a_reply_too_large_leaves_no_trace_of_the_request_behind(monkeypatch):
+    """
+    Every failure out of a request is rebuilt outside the handler, including this one.
+
+    The refusal for an oversized reply used to leave the request function directly, so its traceback
+    frame still held the request -- whose full URL is the token. Nothing here reads frame locals, but
+    crash reporters and post-mortem debuggers do, and "every error path" should mean every one.
+    """
+    from app.adapters import telegram
+    from app.adapters.telegram import TelegramBot
+
+    class Huge:
+        def read(self, n):
+            return b"x" * n
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(telegram.urllib.request, "urlopen", lambda *a, **k: Huge())
+    bot = TelegramBot(settings_from_env({TOKEN_VAR: SECRET}))
+
+    with pytest.raises(ValueError) as refused:
+        bot.get_updates(offset=None, limit=1)
+
+    assert refused.value.__context__ is None
+    frames = []
+    tb = refused.value.__traceback__
+    while tb is not None:
+        frames.append(tb.tb_frame)
+        tb = tb.tb_next
+    for frame in frames:
+        for value in frame.f_locals.values():
+            assert SECRET not in repr(getattr(value, "full_url", "")), f"token held in {frame.f_code.co_name}"
+
+
 def test_the_bot_api_saying_no_is_not_a_crash():
     """`{"ok": false}` is how the Bot API reports a revoked token; it arrives as a normal reply."""
     from app.adapters.telegram import updates_from_payload

@@ -112,11 +112,17 @@ class TelegramBot:
         try:
             with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
                 body = read_capped(response, MAX_RESPONSE_BYTES)
-        except (OSError, urllib.error.HTTPError, TimeoutError) as exc:
+        except ValueError as exc:
+            # The size refusal carries no token in its message, but left to propagate from here its
+            # traceback would keep this frame -- and `request`, whose URL is the token -- alive for
+            # anything that reads frame locals. So it is rebuilt outside, like every other failure.
+            failed_with = str(exc)
+        except (OSError, TimeoutError) as exc:  # HTTPError and URLError are both OSErrors
             failed_with = type(exc).__name__
         else:
             return body
 
+        del request
         raise ValueError(f"could not reach the Telegram API for {self.settings!r}: {failed_with}")
 
 
@@ -167,10 +173,18 @@ def updates_from_payload(raw: bytes) -> list[dict]:
     otherwise be read as "no updates", and a bot that had been switched off would look exactly like
     a bot nobody had messaged.
     """
+    failed: str | None = None
     try:
         payload = json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise ValueError(f"the Telegram API sent something that is not JSON: {exc}") from None
+        failed = f"the Telegram API sent something that is not JSON: {exc}"
+    except RecursionError:
+        # The JSON parser recurses, so a reply nested a few thousand levels deep raises this rather
+        # than anything a pass catches. It took 40 KB -- far under the size cap -- to end a pass,
+        # and the same reply would have ended every pass after it.
+        failed = "the Telegram API sent a reply nested too deeply to read"
+    if failed is not None:
+        raise ValueError(failed)
 
     reply = _mapping(payload)
     if reply is None:
