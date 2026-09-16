@@ -942,3 +942,16 @@ def test_what_each_model_spent_is_kept_on_the_run_so_a_later_tick_counts_on_from
     assert first == {SMALL_MODEL: [10, 1]}
     assert second == {SMALL_MODEL: [10, 1], DEFAULT_MODEL: [20, 2]}
     assert charge({"tokens_by_model": first}, []) [0] == Decimal("0.000000"), "no new replies, no new charge"
+
+
+def test_the_larger_count_per_model_wins_whichever_side_holds_it():
+    """
+    Billing counts on from what the last successful tick recorded, so it should never be behind --
+    but the fold says so rather than assuming it, exactly as the other charged totals do, and a
+    model only one side has seen is kept either way.
+    """
+    from app.run_agent import most_spent
+
+    assert most_spent({"a": [10, 2]}, {"a": [4, 5]}) == {"a": [10, 5]}
+    assert most_spent({"a": [1, 1]}, {"b": [2, 2]}) == {"a": [1, 1], "b": [2, 2]}
+    assert most_spent({}, {"a": [3, 4]}) == {"a": [3, 4]}
