@@ -22,6 +22,7 @@ from app.baseline import REFERENCE_RATE, token_cost
 from app.contracts import Channel, IncomingMessage, ProposedAction
 from app.graph.build import build_graph
 from app.graph.prompts import run_prompt_version
+from app.guardrails import set_limits
 from app.intake import accept
 from app.llm import DEFAULT_MODEL, ModelUnavailable, Reply
 from app.retrieval import PolicySearchUnavailable
@@ -1031,3 +1032,59 @@ def test_a_model_name_is_bounded_before_it_becomes_a_key_on_the_run():
     spent = tokens_by_model({}, [Reply(text="{}", prompt_tokens=1, completion_tokens=1, latency_ms=1, model=long_name)])
 
     assert list(spent) == ["m" * MAX_MODEL_NAME_CHARS]
+
+
+# --- what one run may spend -------------------------------------------------------------------
+
+
+def test_the_seconds_a_run_spent_working_are_kept_on_it():
+    """Its own model calls, added up. Not the hours it waited for somebody to approve a refund."""
+    from app.llm import Reply
+    from app.run_agent import model_ms
+
+    replies = [
+        Reply(text="{}", prompt_tokens=1, completion_tokens=1, latency_ms=1_500),
+        Reply(text="{}", prompt_tokens=1, completion_tokens=1, latency_ms=2_500),
+    ]
+
+    assert model_ms({}, replies) == 4_000
+    assert model_ms({"model_ms": 4_000}, replies) == 8_000
+
+
+@pytest.mark.db
+def test_a_run_past_its_token_budget_goes_to_a_person_with_nothing_paid(fresh_database):
+    """
+    MAX_STEPS bounded a run indirectly, by counting tools. This bounds what it may actually spend.
+
+    The run is stopped where every other stop happens -- handed to a person, with the reason they
+    need to pick it up -- rather than abandoned or retried into the same wall.
+    """
+    from tests.test_approval_path import refund_model, work
+
+    ledger(fresh_database)
+    queue(fresh_database)
+    with psycopg.connect(fresh_database) as connection:
+        set_limits(connection, max_tokens_per_run=20, by="a tight budget")
+        connection.commit()
+
+    outcome = work(fresh_database, refund_model(360_000))
+
+    assert outcome.status == "waiting_approval"
+    assert outcome.failure is not None and "tokens spent" in outcome.failure
+    assert count(fresh_database, "refunds") == 0
+
+
+@pytest.mark.db
+def test_a_run_inside_its_budget_is_untouched(fresh_database):
+    from tests.test_approval_path import refund_model, refunds, work
+
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    with psycopg.connect(fresh_database) as connection:
+        set_limits(connection, max_tokens_per_run=10_000, by="the usual budget")
+        connection.commit()
+
+    outcome = work(fresh_database, refund_model(360_000))
+
+    assert outcome.status == "done"
+    assert refunds(fresh_database) == [("4821", 360_000, run_id)]

@@ -18,6 +18,7 @@ import pytest
 
 from app.contracts import Intent, ProposedAction
 from app.guardrails import (
+    Budgets,
     Evidence,
     Guardrails,
     evidence_of,
@@ -27,7 +28,13 @@ from app.guardrails import (
     set_limits,
 )
 
-DEFAULTS = Guardrails(auto_refund_limit_paise=500_000, min_confidence=Decimal("0.85"))
+# What migration 009 puts in the row: roughly three times a measured run.
+DEFAULT_BUDGETS = Budgets(
+    max_tokens_per_run=10_000, max_cost_usd_per_run=Decimal("0.002000"), max_seconds_per_run=180
+)
+DEFAULTS = Guardrails(
+    auto_refund_limit_paise=500_000, min_confidence=Decimal("0.85"), budgets=DEFAULT_BUDGETS
+)
 
 
 def refund(amount_paise: int, confidence: str = "0.90") -> ProposedAction:
@@ -95,7 +102,7 @@ def test_both_reasons_are_given_when_both_apply():
 
 def test_a_limit_of_zero_makes_every_refund_manual():
     """The kill switch: no amount is under zero."""
-    switched_off = Guardrails(auto_refund_limit_paise=0, min_confidence=Decimal("0.00"))
+    switched_off = Guardrails(auto_refund_limit_paise=0, min_confidence=Decimal("0.00"), budgets=DEFAULT_BUDGETS)
 
     verdict = judge(refund(1, confidence="1.00"), switched_off)
 
@@ -195,7 +202,7 @@ def test_a_change_records_who_made_it_and_when(db):
 @pytest.mark.db
 def test_set_limits_returns_what_is_now_in_force(db):
     assert set_limits(db, limit_paise=250_000, by="asha") == Guardrails(
-        auto_refund_limit_paise=250_000, min_confidence=Decimal("0.85")
+        auto_refund_limit_paise=250_000, min_confidence=Decimal("0.85"), budgets=DEFAULT_BUDGETS
     )
 
 
@@ -466,3 +473,33 @@ def test_the_ceilings_are_read_from_the_row_an_operator_can_change(db):
     set_limits(db, max_tokens_per_run=2_000, by="an operator")
 
     assert load(db).budgets.max_tokens_per_run == 2_000
+
+
+@pytest.mark.db
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"max_tokens_per_run": True}, "whole number"),
+        ({"max_tokens_per_run": 1.5}, "whole number"),
+        ({"max_seconds_per_run": -1}, "at least 0"),
+        ({"max_cost_usd_per_run": 0.002}, "Decimal"),
+        ({"max_cost_usd_per_run": Decimal("nan")}, "at least 0"),
+        ({"max_cost_usd_per_run": Decimal("-0.001")}, "at least 0"),
+    ],
+    ids=["tokens true", "tokens fractional", "seconds negative", "cost float", "cost nan", "cost negative"],
+)
+def test_a_budget_that_is_not_a_budget_is_refused_before_it_reaches_the_database(db, change, message):
+    """
+    The database would take some of these. numeric(10,6) rounds a float happily, and a ceiling
+    silently rounded is a ceiling nobody chose.
+    """
+    with pytest.raises(ValueError, match=message):
+        set_limits(db, by="asha", **change)
+
+    assert load(db).budgets == DEFAULT_BUDGETS
+
+
+@pytest.mark.db
+def test_a_change_must_change_something(db):
+    with pytest.raises(ValueError, match="nothing to change"):
+        set_limits(db, by="asha")
