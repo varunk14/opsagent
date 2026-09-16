@@ -43,6 +43,7 @@ to fail first, because the failure is the part worth seeing.
 | `app/guardrails.py` | Which refunds run without a person: under a limit on the order's total refunds, and at or above a confidence. Both are a row in Postgres, read at the moment of deciding, so `python -m app.guardrails set` changes behaviour with no code change; a limit of Rs 0 stops automatic refunds. |
 | `app/approvals.py`, `app/web.py` | The approval queue, and a local screen on `127.0.0.1:8055` to approve or reject with the evidence in front of you. It also lists every run waiting for a person with nothing to approve. Everything shown is escaped, every decision needs the page's token, and the screen cannot pay anything itself. |
 | `app/tracing.py`, `app/traces.py` | Every run as one OpenTelemetry trace: spans written with the steps they describe, read back as a tree for the `/runs` pages, and copied to a Langfuse on this machine when one is configured. `python -m app.tracing env` writes that Langfuse's secrets. |
+| `app/failures.py` | Why a failed run failed, in one of six fixed categories, decided by rules over what the run left behind rather than by a model. Written when the run rests; `python -m app.failures show` charts the mix, `backfill` names runs that rested before the column existed. |
 | `app/dead_letters.py` | Runs that ran out of attempts, and quarantined messages, each with the reason. `python -m app.dead_letters` lists them and requeues a run. |
 | `app/seed.py` | Loads a small fictional ledger: customers, orders, and the charges behind them. |
 | `app/baseline.py` | What a run costs before any optimisation, so later cost work has something to compare against. |
@@ -60,6 +61,7 @@ pay back more than an order was charged. `policies/` holds six short fictional s
     .venv/bin/python -m app.poll fixtures/inbox.jsonl     # messages become runs
     .venv/bin/python -m app.run_agent                     # work each run until it is done or waits
     .venv/bin/python -m app.guardrails show               # the limits in force
+    .venv/bin/python -m app.failures show                 # how the failed runs failed, per week
     OPSAGENT_OPERATOR=yourname .venv/bin/python -m app.web  # approve or reject on http://127.0.0.1:8055/approvals
 
 Priya's email ("charged twice for order #4821") is classified `duplicate_charge` and retrieves the

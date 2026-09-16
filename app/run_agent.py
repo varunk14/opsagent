@@ -20,9 +20,11 @@ with the limits in force at that moment: allowed, it is paid through the keyed
 executor and the run is done; not allowed, an approval is opened and the run
 waits for a person. Once a person approves, the next worker to claim the run
 pays exactly what was approved, asking no model and judging nothing again. A
-refund the ledger refuses, however it was allowed, goes to a person. A proposal that
-repeats an earlier step, a run past its step budget, or a tool this worker does
-not run are all handed to a person instead of executed. A sender who has caused
+refund the ledger refuses, however it was allowed, goes to a person. A run past
+its step budget, or one proposing a tool this worker does not run, is handed to a
+person instead of executed. A proposal repeating an earlier step is not, yet: the
+planner is asked once more with the result it repeated pointed at, and only a
+second repeat is handed over. A sender who has caused
 RATE_LIMIT lookups within RATE_WINDOW has further lookups deferred: the run goes
 back to the queue until the window frees, executing nothing and spending no
 attempt.

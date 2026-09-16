@@ -146,9 +146,9 @@ that a change made worse is visible before anything is deployed.
 | Cases judged | 25 (0 unjudged) |
 | Judged grounded | 0.0800 |
 | Judged appropriate | 0.0000 |
-| Agreement with layer 1 | 0.2000 |
+| Agreement with layer 1 | 0.1600 |
 
-A local model scoring another local model's work agrees with exact scoring on a fifth of cases
+A local model scoring another local model's work agrees with exact scoring on a sixth of cases
 and calls nothing appropriate. It is published because the number is the finding: **this
 judge is not fit to gate on**, and a gate built on it would have been a gate built on noise. It
 stays in the harness, unwired from the gate, so the next model can be measured against the same

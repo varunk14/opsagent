@@ -11,6 +11,15 @@ refund with no code change and no restart.
 "Under Rs 5,000" is strict: exactly the limit needs a person, and a limit of zero
 makes every refund manual. That is the kill switch.
 
+Being small enough is not reason enough to pay. A refund that would run on its own
+must also be owed, which `justified` decides from what the run established rather
+than from what the model says about itself: the message read as a duplicate charge,
+and the ledger showing two charges of the same amount on that order. A refund that
+fails those conditions is refused outright and goes to a person with nothing to
+approve, since there is no payment the agent can stand behind. Confidence is the
+model's opinion of its own work, and an email it is reading can change it; the
+ledger cannot be talked round either.
+
 Nothing here commits; the caller owns the transaction.
 
 Run:  .venv/bin/python -m app.guardrails show
