@@ -503,3 +503,27 @@ def test_a_budget_that_is_not_a_budget_is_refused_before_it_reaches_the_database
 def test_a_change_must_change_something(db):
     with pytest.raises(ValueError, match="nothing to change"):
         set_limits(db, by="asha")
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("asked", [Decimal("0.0000003"), Decimal("0.0000006"), Decimal("0.00123456789")])
+def test_a_cost_ceiling_finer_than_the_column_is_refused(db, asked):
+    """
+    numeric(10,6) would round it, and here rounding is not a rounding error.
+
+    Zero means no ceiling, so an operator asking for the strictest cost limit there is would have
+    it quietly rounded away to the one setting that stops nothing -- and both the page and the
+    command line would then say "no ceiling", which is exactly what they would say if that had
+    been asked for.
+    """
+    with pytest.raises(ValueError, match="six decimal places"):
+        set_limits(db, max_cost_usd_per_run=asked, by="asha")
+
+    assert load(db).budgets == DEFAULT_BUDGETS
+
+
+@pytest.mark.db
+def test_a_cost_ceiling_the_column_can_hold_exactly_is_taken(db):
+    assert set_limits(db, max_cost_usd_per_run=Decimal("0.000001"), by="asha").budgets.max_cost_usd_per_run == Decimal(
+        "0.000001"
+    )

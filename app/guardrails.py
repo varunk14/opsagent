@@ -76,6 +76,8 @@ SET_LIMITS = """
 """
 
 TWO_PLACES = Decimal("0.01")
+# What numeric(10, 6) can hold exactly. Anything finer would be rounded on the way in.
+SIX_PLACES = Decimal("0.000001")
 
 
 @dataclass(frozen=True)
@@ -338,6 +340,11 @@ def set_limits(
             raise ValueError("max_cost_usd_per_run must be a Decimal such as Decimal('0.002'), so it stays exact")
         if not max_cost_usd_per_run.is_finite() or max_cost_usd_per_run < 0:
             raise ValueError("max_cost_usd_per_run must be at least 0, where 0 means no ceiling")
+        if max_cost_usd_per_run != max_cost_usd_per_run.quantize(SIX_PLACES):
+            # The column would round it, and here rounding is not a rounding error: the strictest
+            # ceiling anyone could ask for rounds to zero, which is the one setting that stops
+            # nothing. Refused, rather than quietly turned into its own opposite.
+            raise ValueError("max_cost_usd_per_run has at most six decimal places")
 
     row = connection.execute(
         SET_LIMITS,
