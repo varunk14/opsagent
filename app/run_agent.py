@@ -78,7 +78,7 @@ from app.graph.build import build_graph, failure_recorded, run_graph
 from app.graph.nodes import escalation
 from app.graph.prompts import run_prompt_version
 from app.graph.state import AgentState
-from app.guardrails import Verdict, judge
+from app.guardrails import Evidence, Verdict, evidence_of, judge, justified
 from app.guardrails import load as load_guardrails
 from app.llm import Ollama, Reply, ServiceUnavailable
 from app.retrieval import PolicyRetriever
@@ -592,12 +592,28 @@ def defer(
     return cost
 
 
-def judged(connection: psycopg.Connection, run_id: UUID, proposal: ProposedAction) -> Verdict:
+def evidence_in(state: AgentState, steps: list[dict[str, Any]], proposal: ProposedAction) -> Evidence:
+    """What this run established about the order it proposes to refund: how it read the message, and what it looked up."""
+    classification = state.get("classification")
+    return evidence_of(classification.intent if classification else None, steps, str(proposal.args["order_id"]))
+
+
+def judged(
+    connection: psycopg.Connection,
+    run_id: UUID,
+    proposal: ProposedAction,
+    evidence: Evidence,
+) -> Verdict:
     """The guardrail's verdict on a refund, recorded as the act's guardrail span."""
     with failure_recorded("guardrail", "guardrail") as span:
         # Read now, inside this transaction: a limit changed a second ago applies.
         limits = load_guardrails(connection)
         verdict = judge(proposal, limits, refunded_so_far(connection, run_id, proposal))
+        # The limit and the confidence decide whether a person is asked; the conditions decide
+        # whether there is anything to ask about. Only a payment that would otherwise have run on
+        # its own is checked against them: one already going to a person is a person's to judge.
+        if verdict.runs:
+            verdict = justified(proposal, evidence)
         span.set_attributes(
             {
                 Attr.VERDICT: "runs" if verdict.runs else "needs a person",
@@ -645,7 +661,12 @@ def act(
         if proposal.tool in RUNS_NOW:
             record_step(connection, claimed.run_id, steps, proposal)
 
-        verdict = judged(connection, claimed.run_id, proposal) if proposal.tool in GUARDED else None
+        verdict = judged(connection, claimed.run_id, proposal, evidence_in(state, steps, proposal)) if proposal.tool in GUARDED else None
+        if verdict is not None and verdict.refused:
+            # Nothing to approve: the agent cannot say this refund is owed, so the case goes to a person.
+            proposal, failure = hand_over("the conditions for paying it were not met", verdict.reason or "")
+            span.set_attribute(Attr.TOOL, proposal.tool)
+            verdict = None
         if verdict is not None and verdict.runs:
             failure = pay(connection, claimed.run_id, steps, proposal)
 

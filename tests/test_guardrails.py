@@ -17,7 +17,15 @@ import psycopg
 import pytest
 
 from app.contracts import ProposedAction
-from app.guardrails import Guardrails, judge, load, set_limits
+from app.guardrails import (
+    Evidence,
+    Guardrails,
+    evidence_of,
+    judge,
+    justified,
+    load,
+    set_limits,
+)
 
 DEFAULTS = Guardrails(auto_refund_limit_paise=500_000, min_confidence=Decimal("0.85"))
 
@@ -240,21 +248,17 @@ def test_a_bad_change_is_refused_before_it_reaches_the_database(db, changes, mes
 # --- justified: is this refund owed at all? --------------------------------------
 
 
-def duplicate(*charges_paise: int, intent: str = "duplicate_charge") -> "Evidence":
+def duplicate(*charges_paise: int, intent: str = "duplicate_charge") -> Evidence:
     """What a run established about order 4821 before proposing to pay."""
-    from app.guardrails import Evidence
-
     return Evidence(intent=intent, charges_paise=charges_paise)
 
 
 def test_a_confirmed_duplicate_refunded_at_one_of_its_charges_is_owed():
-    from app.guardrails import justified
 
     assert justified(refund(360_000), duplicate(360_000, 360_000)).runs is True
 
 
 def test_a_refund_for_anything_but_a_duplicate_is_a_persons_decision():
-    from app.guardrails import justified
 
     verdict = justified(refund(90_000), duplicate(360_000, 360_000, intent="refund_request"))
 
@@ -263,7 +267,6 @@ def test_a_refund_for_anything_but_a_duplicate_is_a_persons_decision():
 
 
 def test_an_order_charged_once_has_no_duplicate_to_refund():
-    from app.guardrails import justified
 
     verdict = justified(refund(360_000), duplicate(360_000))
 
@@ -272,7 +275,6 @@ def test_an_order_charged_once_has_no_duplicate_to_refund():
 
 
 def test_a_refund_proposed_before_any_lookup_is_not_owed_by_anything():
-    from app.guardrails import justified
 
     verdict = justified(refund(360_000), duplicate())
 
@@ -287,13 +289,11 @@ def test_part_of_a_confirmed_duplicate_is_still_owed():
     split into parts is judged as the total it adds up to -- so requiring the amount to equal
     a charge exactly would refuse legitimate partial refunds while adding no safety.
     """
-    from app.guardrails import justified
 
     assert justified(refund(90_000), duplicate(360_000, 360_000)).runs is True
 
 
 def test_the_charges_are_read_from_the_lookup_of_that_order_only():
-    from app.guardrails import evidence_of
 
     steps = [
         {"tool": "get_order", "args": {"order_id": "9999"}, "result": {"order_id": "9999", "charges_paise": [10, 10]}},
@@ -307,8 +307,15 @@ def test_the_charges_are_read_from_the_lookup_of_that_order_only():
 
 
 def test_a_lookup_that_returned_nothing_leaves_no_charges():
-    from app.guardrails import evidence_of
 
     steps = [{"tool": "get_order", "args": {"order_id": "4821"}, "result": None}]
+
+    assert evidence_of("duplicate_charge", steps, "4821").charges_paise == ()
+
+
+def test_a_refund_step_is_not_a_lookup_and_confirms_nothing():
+    steps = [
+        {"tool": "issue_refund", "args": {"order_id": "4821"}, "result": {"order_id": "4821", "refunded": True}},
+    ]
 
     assert evidence_of("duplicate_charge", steps, "4821").charges_paise == ()

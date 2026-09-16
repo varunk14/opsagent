@@ -20,15 +20,19 @@ Run:  .venv/bin/python -m app.guardrails show
 
 import argparse
 import sys
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any
 
 import psycopg
 
-from app.contracts import ProposedAction
+from app.contracts import Intent, ProposedAction
 from app.db import connect
 
 JUDGED = "issue_refund"
+LOOKUP = "get_order"
+DUPLICATE_CHARGE = Intent.DUPLICATE_CHARGE.value
 
 LOAD = "SELECT auto_refund_limit_paise, min_confidence FROM guardrails WHERE singleton"
 
@@ -53,10 +57,79 @@ class Guardrails:
 
 @dataclass(frozen=True)
 class Verdict:
-    """Whether an action may run without a person, and if not, what to tell them."""
+    """
+    Whether an action may run without a person, and if not, what to tell them.
+
+    `refused` means the guardrail refuses the proposal itself: a person takes the case and there
+    is nothing to approve. A refund that is merely large is still one the agent stands behind, so
+    it goes to the approval queue for someone to say yes or no to. A refund whose conditions were
+    never established is different in kind -- there is no payment to approve, only a case to look
+    at -- so it is handed over instead of queued.
+    """
 
     runs: bool
     reason: str | None
+    refused: bool = False
+
+
+@dataclass(frozen=True)
+class Evidence:
+    """What the run established about the order before it proposed to pay: the reading, and the ledger."""
+
+    intent: str | None
+    charges_paise: tuple[int, ...] = ()
+
+
+def evidence_of(intent: str | None, steps: Sequence[Mapping[str, Any]], order_id: str) -> Evidence:
+    """The evidence a run's own steps give about one order. A lookup of any other order says nothing about it."""
+    charges: list[int] = []
+    for step in steps:
+        if step.get("tool") != LOOKUP:
+            continue
+        result = step.get("result") or {}
+        if str(result.get("order_id", "")) == order_id:
+            charges += [amount for amount in result.get("charges_paise") or [] if isinstance(amount, int)]
+    return Evidence(intent=intent, charges_paise=tuple(charges))
+
+
+def justified(action: ProposedAction, evidence: Evidence) -> Verdict:
+    """
+    Whether the conditions for paying this refund without a person hold in the ledger.
+
+    This is the check the guardrail was missing. Judging a refund on its amount and the model's
+    own confidence means a confident model can have any small refund paid by asserting it is
+    owed -- and a model reading a customer's email is exactly the thing an email can talk round.
+    Confidence is not evidence. An automatic payment needs the duplicate to be real: the message
+    read as a duplicate charge, and the order charged at least twice in the ledger.
+
+    The amount is deliberately not a condition. The ledger refuses a refund larger than the order
+    was charged, the limit bounds what runs without a person, and refunds split into parts are
+    judged as the total they add up to, so requiring the amount to equal one charge exactly would
+    refuse legitimate partial refunds and add no safety.
+
+    Nothing established here is forbidden -- it is a person's to decide.
+    """
+    order_id = action.args["order_id"]
+    if evidence.intent != DUPLICATE_CHARGE:
+        return Verdict(
+            runs=False,
+            reason=f"this reads as {evidence.intent or 'no refund at all'}, not a duplicate charge, "
+            "so a person decides whether it is owed",
+            refused=True,
+        )
+    if not evidence.charges_paise:
+        return Verdict(
+            runs=False,
+            reason=f"order {order_id} was never looked up, so nothing confirms a duplicate charge",
+            refused=True,
+        )
+    if len(evidence.charges_paise) < 2:
+        return Verdict(
+            runs=False,
+            reason=f"order {order_id} was charged once, so there is no duplicate to refund",
+            refused=True,
+        )
+    return Verdict(runs=True, reason=None)
 
 
 def rupees(paise: int) -> str:

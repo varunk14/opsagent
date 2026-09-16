@@ -298,7 +298,14 @@ def test_a_refund_the_ledger_refuses_goes_to_a_person(fresh_database):
 
 
 def test_a_refund_on_someone_elses_order_is_refused_not_paid(fresh_database):
-    """Order 3310 is Dev's. Priya's run counts nothing against it, and the executor answers as if it were missing."""
+    """
+    Order 3310 is Dev's. Priya's run looked up 4821 and asks to refund 3310 instead.
+
+    Two things refuse it now, and the earlier one wins: nothing this run looked up says 3310 was
+    charged at all, so the refund never reaches the ledger. Were it to, the executor answers as
+    if the order were missing -- which the approved path still proves, since a person can push a
+    refund past the conditions and the ledger refuses it there.
+    """
     ledger(fresh_database)
     queue(fresh_database)
     model = ScriptedModel(
@@ -310,7 +317,7 @@ def test_a_refund_on_someone_elses_order_is_refused_not_paid(fresh_database):
     outcome = work(fresh_database, model)
 
     assert outcome.status == "waiting_approval"
-    assert outcome.failure == "act: the ledger refused the refund: no order 3310"
+    assert outcome.failure == "plan: the conditions for paying it were not met"
     assert refunds(fresh_database) == []
 
 
