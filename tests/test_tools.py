@@ -66,3 +66,49 @@ def test_a_tool_can_be_left_out_of_the_description():
 
     assert "search_policy" not in described
     assert "get_order" in described
+
+
+# --- what the tool list costs to send ---------------------------------------------------------
+
+
+def test_the_tool_list_says_what_a_tool_does_and_what_it_takes():
+    """Everything the model needs to choose a tool and call it correctly."""
+    described = describe_tools()
+
+    for tool in TOOLS:
+        assert tool.name in described
+        assert tool.description in described, "the guidance is the part that earns its tokens"
+        for argument in tool.parameters["properties"]:
+            assert argument in described
+    assert "required" in described.lower()
+
+
+def test_the_tool_list_keeps_the_hints_the_model_cannot_guess():
+    """Paise against rupees is a factor of a hundred, and an example order id shows the shape."""
+    described = describe_tools()
+
+    assert "360000" in described and "paise" in described.lower()
+    assert "4821" in described
+
+
+def test_the_tool_list_does_not_carry_the_validation_the_code_enforces():
+    """
+    maxLength, pattern, minimum and maximum are checked in app/contracts.py whatever the prompt
+    says, so sending them buys nothing. They were 45% of the plan prompt, and the plan prompt is
+    82% of everything this agent reads.
+    """
+    described = describe_tools()
+
+    for noise in ("maxLength", "pattern", "minimum", "maximum", "'type': 'object'", "properties"):
+        assert noise not in described, f"{noise} is enforced in code, not by asking nicely"
+
+
+def test_the_tool_list_is_materially_smaller_than_the_schema_it_replaces():
+    described = describe_tools()
+    raw = "\n\n".join(f"- {tool.name}: {tool.description}\n  arguments: {tool.parameters}" for tool in TOOLS)
+
+    assert len(described) < len(raw) * 0.7, f"{len(described)} against {len(raw)}"
+
+
+def test_a_tool_left_out_is_left_out():
+    assert "search_policy" not in describe_tools(exclude={"search_policy"})
