@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 
 from app.graph.build import build_graph
 from app.graph.prompts import PROMPT_VERSIONS
-from app.llm import ModelUnavailable
+from app.llm import DEFAULT_MODEL, ModelUnavailable
 from app.run_agent import work_next
 from app.web import SECURITY_HEADERS, create_app, langfuse_link_base, span_view
 from tests.fakes import CLASSIFIED_DUPLICATE, OUTAGE, FakeRetriever, ScriptedModel
@@ -103,7 +103,7 @@ def test_each_model_call_shows_its_model_version_tokens_and_cost(fresh_database,
 
     html = client_for(fresh_database).get(f"/runs/{run_id}").text
 
-    assert "ScriptedModel" in html
+    assert DEFAULT_MODEL in html, "the model that answered, which a stand-in stands in for"
     assert PROMPT_VERSIONS["classify"] in html
     assert PROMPT_VERSIONS["plan"] in html
     assert "$0.0000045" in html, "each call: 10 tokens in, 5 out, at the reference rate"

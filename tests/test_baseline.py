@@ -205,3 +205,63 @@ def test_tokens_per_run_is_the_exact_mean():
     )
 
     assert summary.tokens_per_run == Decimal("343.5")
+
+
+# --- a rate per model ------------------------------------------------------------------------
+
+
+def test_every_model_the_agent_runs_has_a_rate():
+    """A model with no rate cannot be priced, and a run that cannot be priced is not measured."""
+    from app.baseline import RATES
+    from app.llm import DEFAULT_MODEL, SMALL_MODEL
+
+    assert {DEFAULT_MODEL, SMALL_MODEL} <= set(RATES)
+
+
+def test_the_small_model_is_cheaper_than_the_large_one():
+    """Routing work to a smaller model is only worth measuring if the rates differ."""
+    from app.baseline import RATES
+    from app.llm import DEFAULT_MODEL, SMALL_MODEL
+
+    small, large = RATES[SMALL_MODEL], RATES[DEFAULT_MODEL]
+
+    assert small.input_per_million < large.input_per_million
+    assert small.output_per_million < large.output_per_million
+
+
+def test_a_model_with_no_rate_is_refused_rather_than_priced_at_someone_elses():
+    """
+    Pricing an unknown model at a default would quietly bill the wrong rate, and the number
+    would look fine. The same reasoning as refusing a response that carries no token counts.
+    """
+    from app.baseline import rate_for
+
+    with pytest.raises(KeyError, match="gpt-9"):
+        rate_for("gpt-9")
+
+
+def test_tokens_are_priced_at_the_rate_of_the_model_that_produced_them():
+    from app.baseline import cost_of
+    from app.llm import DEFAULT_MODEL, SMALL_MODEL
+
+    same_tokens = {DEFAULT_MODEL: (1_000_000, 0)}
+    on_the_small_one = {SMALL_MODEL: (1_000_000, 0)}
+
+    assert cost_of(same_tokens) > cost_of(on_the_small_one)
+
+
+def test_a_run_split_across_models_is_priced_as_the_sum_of_its_parts():
+    from app.baseline import RATES, cost_of, token_cost
+    from app.llm import DEFAULT_MODEL, SMALL_MODEL
+
+    split = {DEFAULT_MODEL: (2_000, 500), SMALL_MODEL: (8_000, 300)}
+
+    assert cost_of(split) == token_cost(2_000, 500, RATES[DEFAULT_MODEL]) + token_cost(
+        8_000, 300, RATES[SMALL_MODEL]
+    )
+
+
+def test_nothing_spent_costs_nothing():
+    from app.baseline import cost_of
+
+    assert cost_of({}) == Decimal(0)

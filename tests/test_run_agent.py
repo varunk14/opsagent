@@ -23,9 +23,16 @@ from app.contracts import Channel, IncomingMessage, ProposedAction
 from app.graph.build import build_graph
 from app.graph.prompts import run_prompt_version
 from app.intake import accept
-from app.llm import ModelUnavailable, Reply
+from app.llm import DEFAULT_MODEL, ModelUnavailable, Reply
 from app.retrieval import PolicySearchUnavailable
-from app.run_agent import ALREADY_SHOWN, LostClaim, claim_next, work_next
+from app.run_agent import (
+    ALREADY_SHOWN,
+    MICRO_DOLLAR,
+    LostClaim,
+    claim_next,
+    tokens_by_model,
+    work_next,
+)
 from app.seed import load_ledger
 from tests.fakes import (
     CLASSIFIED_DUPLICATE,
@@ -717,7 +724,12 @@ def test_outage_totals_are_folded_in_and_cleared_once_a_tick_records_its_own(fre
     run_id = queue(fresh_database)
     with psycopg.connect(fresh_database) as connection, pytest.raises(ModelUnavailable):
         work_next(connection, graph_of(ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=OUTAGE)))
-    assert row(fresh_database, run_id)["state"]["billing"] == {"prompt_tokens": 10, "completion_tokens": 5, "model_calls": 1}
+    assert row(fresh_database, run_id)["state"]["billing"] == {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "model_calls": 1,
+        "tokens_by_model": {DEFAULT_MODEL: [10, 5]},
+    }
     with psycopg.connect(fresh_database) as connection:
         connection.execute("UPDATE runs SET next_retry_at = now() WHERE id = %s", (run_id,))
 
@@ -887,3 +899,135 @@ def test_a_step_is_the_same_step_only_when_the_tool_is_the_same_too():
     assert repeats(lookup, {"tool": "get_order", "args": arguments, "result": {}}) is True
     assert repeats(lookup, {"tool": "issue_refund", "args": arguments, "result": {}}) is False
     assert repeats(lookup, {"tool": "get_order", "args": {"order_id": "3310"}, "result": {}}) is False
+
+
+# --- a run is charged at the rate of each model that worked on it -----------------------------
+
+
+def test_a_reply_says_which_model_produced_it():
+    """Without it, the run cannot be priced: tokens alone do not say what they cost."""
+    from app.llm import DEFAULT_MODEL, Reply
+
+    assert Reply(text="{}", prompt_tokens=1, completion_tokens=1, latency_ms=1).model == DEFAULT_MODEL
+
+
+def test_a_run_worked_by_two_models_is_charged_at_both_rates():
+    from app.baseline import cost_of
+    from app.llm import DEFAULT_MODEL, SMALL_MODEL, Reply
+    from app.run_agent import charge
+
+    replies = [
+        Reply(text="{}", prompt_tokens=1_000, completion_tokens=100, latency_ms=1, model=SMALL_MODEL),
+        Reply(text="{}", prompt_tokens=2_000, completion_tokens=200, latency_ms=1, model=DEFAULT_MODEL),
+    ]
+
+    cost, _, _ = charge({}, replies)
+
+    assert cost == cost_of({SMALL_MODEL: (1_000, 100), DEFAULT_MODEL: (2_000, 200)}).quantize(MICRO_DOLLAR)
+
+
+def test_the_same_tokens_cost_less_on_the_small_model():
+    from app.llm import DEFAULT_MODEL, SMALL_MODEL, Reply
+    from app.run_agent import charge
+
+    def cost_on(model: str):
+        return charge({}, [Reply(text="{}", prompt_tokens=100_000, completion_tokens=0, latency_ms=1, model=model)])[0]
+
+    assert cost_on(SMALL_MODEL) < cost_on(DEFAULT_MODEL)
+
+
+def test_what_each_model_spent_is_kept_on_the_run_so_a_later_tick_counts_on_from_it():
+    from app.llm import DEFAULT_MODEL, SMALL_MODEL, Reply
+    from app.run_agent import charge, tokens_by_model
+
+    first = tokens_by_model({}, [Reply(text="{}", prompt_tokens=10, completion_tokens=1, latency_ms=1, model=SMALL_MODEL)])
+    second = tokens_by_model(
+        {"tokens_by_model": first},
+        [Reply(text="{}", prompt_tokens=20, completion_tokens=2, latency_ms=1, model=DEFAULT_MODEL)],
+    )
+
+    assert first == {SMALL_MODEL: [10, 1]}
+    assert second == {SMALL_MODEL: [10, 1], DEFAULT_MODEL: [20, 2]}
+    assert charge({"tokens_by_model": first}, []) [0] == Decimal("0.000000"), "no new replies, no new charge"
+
+
+def test_the_larger_count_per_model_wins_whichever_side_holds_it():
+    """
+    Billing counts on from what the last successful tick recorded, so it should never be behind --
+    but the fold says so rather than assuming it, exactly as the other charged totals do, and a
+    model only one side has seen is kept either way.
+    """
+    from app.run_agent import most_spent
+
+    assert most_spent({"a": [10, 2]}, {"a": [4, 5]}) == {"a": [10, 5]}
+    assert most_spent({"a": [1, 1]}, {"b": [2, 2]}) == {"a": [1, 1], "b": [2, 2]}
+    assert most_spent({}, {"a": [3, 4]}) == {"a": [3, 4]}
+
+
+def test_a_model_nobody_priced_costs_nothing_rather_than_failing_the_run(fresh_database):
+    """
+    The span records an unpriced call and omits its cost; the billing must agree.
+
+    Refusing to price is right. Refusing to finish a customer's refund because an accounting
+    convention is missing is not: the tokens are still recorded against the model, so the gap is
+    visible, and the run goes on.
+    """
+    from app.llm import Reply
+    from app.run_agent import charge
+
+    replies = [Reply(text="{}", prompt_tokens=1_000, completion_tokens=100, latency_ms=1, model="nobody-priced-this")]
+
+    cost, prompt_tokens, completion_tokens = charge({}, replies)
+
+    assert cost == Decimal("0.000000")
+    assert (prompt_tokens, completion_tokens) == (1_000, 100), "the tokens are still counted"
+    assert tokens_by_model({}, replies) == {"nobody-priced-this": [1_000, 100]}, "and still attributed"
+
+
+def test_a_run_that_started_before_the_split_keeps_what_it_had_spent():
+    """
+    A run mid-flight when this landed has totals but no per-model split.
+
+    Only one model had ever run, so its totals are that model's. Starting the split from nothing
+    would quietly throw away everything the run had already been charged for.
+    """
+    from app.llm import DEFAULT_MODEL, Reply
+    from app.run_agent import tokens_by_model
+
+    before = {"prompt_tokens": 5_000, "completion_tokens": 400, "model_calls": 4}
+    reply = Reply(text="{}", prompt_tokens=10, completion_tokens=1, latency_ms=1)
+
+    assert tokens_by_model(before, [reply]) == {DEFAULT_MODEL: [5_010, 401]}
+
+
+def test_a_replayed_reply_says_which_model_was_recorded():
+    """
+    A recording knows which model produced it -- it is half the key it is stored under.
+
+    Dropping it on the way back means every replayed call is priced as the default model, which
+    would erase exactly the saving this work exists to measure.
+    """
+    from app.llm import SMALL_MODEL
+    from evals.recording import RecordedReply, replayed
+
+    found = RecordedReply(model=SMALL_MODEL, task="classify", text="{}", prompt_tokens=10, completion_tokens=2)
+
+    assert replayed(found).model == SMALL_MODEL
+
+
+def test_a_model_name_is_bounded_before_it_becomes_a_key_on_the_run():
+    """
+    The span bounds the name it records; what is stored on the run must agree.
+
+    A name is set by whoever runs the worker, not by a customer, so this is not a live hole --
+    but it is the only value in the codebase that reached stored state uncapped, and the ladder
+    is about to make model names vary per call.
+    """
+    from app.graph.build import MAX_MODEL_NAME_CHARS
+    from app.llm import Reply
+    from app.run_agent import tokens_by_model
+
+    long_name = "m" * 500
+    spent = tokens_by_model({}, [Reply(text="{}", prompt_tokens=1, completion_tokens=1, latency_ms=1, model=long_name)])
+
+    assert list(spent) == ["m" * MAX_MODEL_NAME_CHARS]
