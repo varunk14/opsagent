@@ -519,3 +519,16 @@ def test_counts_that_are_not_counts_scale_no_bar(tmp_path):
     assert {category: count for category, count, _ in second.mix} == dict.fromkeys(
         [category.value for category in FailureCategory], 0
     )
+
+
+def test_a_history_too_big_to_be_a_history_is_not_read_at_all(tmp_path, caplog):
+    import logging
+
+    from app.failures import HISTORY_LIMIT_BYTES, golden_trend
+
+    path = history_file(tmp_path / "history.jsonl", accepted("2026-09-16", "c12eee8", {"loop": 1}))
+    path.write_text(path.read_text(encoding="utf-8") + " " * HISTORY_LIMIT_BYTES, encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        assert golden_trend(path) == []
+    assert "history" in caplog.text

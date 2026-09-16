@@ -281,6 +281,8 @@ def failure_chart(rows: Sequence[tuple[date, str, int]]) -> list[tuple[date, lis
 
 
 GOLDEN_HISTORY = Path(__file__).resolve().parent.parent / "evals" / "history.jsonl"
+# One accepted baseline is well under a kilobyte, so this is thousands of them: past it the file is not a history.
+HISTORY_LIMIT_BYTES = 1_000_000
 
 
 @dataclass(frozen=True)
@@ -306,6 +308,9 @@ def golden_trend(path: Path = GOLDEN_HISTORY) -> list[Accepted]:
     half-written, or not text at all.
     """
     try:
+        if path.stat().st_size > HISTORY_LIMIT_BYTES:
+            log.warning("the history at %s is larger than a history can be; the trend is left empty", path)
+            return []
         lines = path.read_text(encoding="utf-8").splitlines()
     except (OSError, ValueError):  # unreadable, or bytes that are not UTF-8: no trend, not a broken page
         return []
