@@ -322,22 +322,22 @@ def golden_trend(path: Path = GOLDEN_HISTORY) -> list[Accepted]:
             continue
         mix = found.get("failure_mix") if isinstance(found, dict) else None
         if isinstance(mix, dict):
-            accepted.append((found, [(category.value, _count(mix.get(category.value))) for category in FailureCategory]))
+            accepted.append((found, [(category.value, counted(mix.get(category.value))) for category in FailureCategory]))
     # The widths are scaled to the largest count the trend actually shows, so every bar on the page means the same thing.
     largest = max((count for _, mix in accepted for _, count in mix), default=0)
     return [
         Accepted(
             on=str(found.get("accepted_on", "")),
             code=str(found.get("code", "")),
-            completed=_count(found.get("completed")),
-            cases=_count(found.get("cases")),
+            completed=counted(found.get("completed")),
+            cases=counted(found.get("cases")),
             mix=[(category, count, round(100 * count / largest) if largest else 0) for category, count in mix],
         )
         for found, mix in accepted
     ]
 
 
-def _count(value: Any) -> int:
+def counted(value: Any) -> int:
     """A count read from a history line: anything that is not a whole number of things counts as none."""
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
