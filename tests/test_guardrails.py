@@ -271,7 +271,7 @@ def test_an_order_charged_once_has_no_duplicate_to_refund():
     verdict = justified(refund(360_000), duplicate(360_000))
 
     assert verdict.runs is False
-    assert "4821" in (verdict.reason or "")
+    assert verdict.reason == "order 4821 was charged once, so there is no duplicate to refund"
 
 
 def test_a_refund_proposed_before_any_lookup_is_not_owed_by_anything():
@@ -314,8 +314,13 @@ def test_a_lookup_that_returned_nothing_leaves_no_charges():
 
 
 def test_a_refund_step_is_not_a_lookup_and_confirms_nothing():
+    """Only a lookup reports what the ledger holds. Any other step saying so is not asked."""
     steps = [
-        {"tool": "issue_refund", "args": {"order_id": "4821"}, "result": {"order_id": "4821", "refunded": True}},
+        {
+            "tool": "issue_refund",
+            "args": {"order_id": "4821"},
+            "result": {"order_id": "4821", "refunded": True, "charges_paise": [360_000, 360_000]},
+        },
     ]
 
     assert evidence_of(Intent.DUPLICATE_CHARGE, steps, "4821").charges_paise == ()
