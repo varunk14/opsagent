@@ -195,14 +195,16 @@ what survives.
 ## Reliability
 
 `RELIABILITY.md` holds what the agent gets right and wrong, measured over 150 labelled cases:
-task completion, escalation precision and recall, the nineteen refunds it pays that a person
-should have decided, and the failure mix across six fixed categories. The model's replies are
-recorded on a machine with a GPU and replayed in CI, so the gate runs without one;
-`python -m evals verify` re-runs the set live and reports what has changed since.
+task completion, escalation precision and recall, the failure mix across six fixed categories,
+and the nineteen refunds an earlier version paid that a person should have decided — how they
+were found, and how they were closed. The model's replies are recorded on a machine with a GPU
+and replayed in CI, so the gate runs without one; `python -m evals verify` re-runs the set live
+and reports what has changed since.
 
-Completion is 59 %, the judge is too weak to gate on, and both numbers are published rather than
-buried. `/failures` on the local screen charts the mix of real runs per week beside the mix of
-every accepted baseline, so a category a change made worse is visible before anything ships.
+Completion is 72 % with nothing unsafe paid, and the judge is too weak to gate on; both numbers
+are published rather than buried. `/failures` on the local screen charts the mix of real runs per
+week beside the mix of every accepted baseline, so a category a change made worse is visible
+before anything ships.
 
 ## Why the durability is hand-rolled
 

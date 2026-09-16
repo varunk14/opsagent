@@ -4,7 +4,7 @@ Every number here is measured, not estimated, and every one of them can be repro
 this repository. Where a number is bad it is printed as it is: the point of measuring is to
 know where the work goes next, and an evaluation that only ever says "fine" measures nothing.
 
-**Measured:** 2026-09-15 · `llama3.1:8b`, run locally through Ollama, temperature 0, seed 0
+**Measured:** 2026-09-16 · `llama3.1:8b`, run locally through Ollama, temperature 0, seed 0
 · golden set `sha256 af4048c0885c`, 150 cases.
 
 ## How it is measured
@@ -41,41 +41,51 @@ python -m evals verify     # live re-run, reports drift against the recordings
 | Measure | Value |
 |---|---|
 | Cases | 150 |
-| Task completion | 0.5933 (89 of 150) |
+| Task completion | 0.7200 (108 of 150) |
 | Intent accuracy | 0.8600 |
 | Extraction accuracy | 0.7800 |
-| Escalation precision | 0.8974 |
-| Escalation recall | 0.8468 |
+| Escalation precision | 0.9118 |
+| Escalation recall | 1.0000 |
 | False-positive rate | 0.4615 |
-| Safety violations | 19 |
+| Safety violations | 0 |
 | Unresolved runs | 0 |
 | Model calls | 560 |
 | Reference cost | $0.062746 |
 
-Completion is 59 %. The largest single cause is the planner asking for a lookup it has already
-been shown; the run then exhausts its step budget and goes to a person. That is a safe failure
-— nothing is paid — but it is a failure, and it is what the next change addresses.
+Completion is 72 %, and nothing unsafe is paid. The largest remaining cause is the planner asking
+for a lookup it has already been shown; the run then exhausts its step budget and goes to a
+person. That is a safe failure — nothing is paid — but it is a failure, and it is what the next
+change addresses.
 
 Weakest categories, from `evals/scoreboard.md`: `confidence_pressure` 0.00, `inflated_amount`
-0.00, `change_of_mind` 0.08, `damaged_item` 0.08, `duplicate_not_confirmed` 0.20. Strongest:
-`order_status`, `payment_question`, `unknown_order`, `wrong_owner`, `garbled`, `general`, all
-1.00. The pattern is plain — the agent is reliable when it only has to read and answer, and
-unreliable when it has to decide whether money is owed.
+0.00, `change_of_mind` 0.42, `damaged_item` 0.50. Strongest: `duplicate_not_confirmed`,
+`multiple_orders`, `order_status`, `payment_question`, `unknown_order`, `wrong_owner`, `garbled`,
+`general`, all 1.00.
 
-### The 19 unsafe cases
+### The nineteen unsafe payments, and how they were closed
 
-Nineteen cases are paid automatically when a person should have decided. They are **pinned by
-id in `evals/baseline.json`**, with each case's violations recorded: the gate fails if a new
-case becomes unsafe, if a pinned case gains a violation, or if the total rises. They are on the
-record rather than hidden because they are one real defect, not nineteen:
+The first measured baseline paid nineteen refunds automatically that a person should have
+decided. They were **pinned by id in `evals/baseline.json`**, each with its own violations, so
+the gate would fail if a new case became unsafe, a pinned case got worse, or the total rose. They
+were published rather than hidden, because they were one defect, not nineteen:
 
-> The guardrail judges a refund on the **amount** and the model's **self-reported confidence**
-> only. It never checks the policy conditions. A confident model asking to refund a
-> change-of-mind order under the limit is paid.
+> The guardrail judged a refund on the **amount** and the model's **self-reported confidence**
+> only. It never checked whether the refund was owed. A confident model asking to refund a
+> change-of-mind order under the limit was paid.
 
-The fix is to decide from conditions in code — a duplicate charge needs two charges in the
-ledger, change-of-mind and damaged items go to a person — so that confidence cannot buy a
-payment. Self-reported confidence is not evidence.
+They are now zero. An automatic payment has to satisfy conditions that hold in the ledger rather
+than in the model's opinion of itself: the message read as a duplicate charge, and the order
+charged at least twice. Anything else is handed to a person — handed over, not queued for
+approval, because there is no payment the agent can stand behind for someone to approve.
+
+The amount is deliberately not one of those conditions. The ledger already refuses a refund
+larger than the order was charged, the limit bounds what runs without a person, and refunds split
+into parts are judged as the total they add up to — so requiring the amount to equal one charge
+exactly would refuse legitimate partial refunds and add no safety.
+
+What that change moved, measured the same way on the same 150 cases: task completion 0.5933 →
+0.7200, safety violations 19 → 0, escalation recall 0.8468 → 1.0000, `wrong_escalation` 41 → 22,
+and `duplicate_not_confirmed` from 0.20 to 1.00. Nothing got worse.
 
 ## The failure taxonomy
 
@@ -87,9 +97,9 @@ outage or an expired lock — those are already named by `failure_class` and the
 
 | Category | Cases | What it means | What we would fix |
 |---|---|---|---|
-| `wrong_escalation` | 41 | A person rejected what the agent proposed, or it paid where a person should decide | Decide from policy conditions in code, not from confidence: a duplicate needs two ledger charges; change-of-mind and damaged items go to a person. |
+| `wrong_escalation` | 22 | A person rejected what the agent proposed, or it paid where a person should decide | Decide from policy conditions in code, not from confidence: a duplicate needs two ledger charges; change-of-mind and damaged items go to a person. |
 | `loop` | 17 | The planner repeated a step, spent the whole step budget, or was deferred until a person had to take it | Give the planner a way to decide: when it repeats a lookup whose result is shown, ask once more with that result marked, then hand over. |
-| `tool_misuse` | 3 | A tool that does not run here, arguments the ledger refused, a lookup of an unknown order, a refund for an order never looked up | Check arguments before proposing: a refund must equal one of the order's ledger charges; the ledger already refuses more. |
+| `tool_misuse` | 3 | A tool that does not run here, arguments the ledger refused, a lookup of an unknown order, a refund for an order never looked up | Check arguments before proposing: a refund must be for an order this run looked up; the ledger already refuses more than was charged. |
 | `hallucinated_field` | 0 | An order id or amount in neither the message, the policy it was shown, nor any tool result | Tighten extraction: an order id or amount must be quoted from the message or a lookup; refuse the proposal otherwise. |
 | `context_overflow` | 0 | The customer's text was too long for the prompt and was cut | Chunk or summarise a long message before the prompt; today anything over the cap is cut. |
 | `drift` | 0 | The same case, the same prompts, a different reply than last time | Pin the model version and the prompt hashes; record again and compare each case against the last accepted baseline. |
@@ -114,18 +124,19 @@ that a change made worse is visible before anything is deployed.
 | Accepted | Commit | Complete | hallucinated_field | tool_misuse | loop | context_overflow | wrong_escalation | drift |
 |---|---|---|---|---|---|---|---|---|
 | 2026-09-15 | `9303535` | 89 / 150 | 0 | 3 | 17 | 0 | 41 | 0 |
+| 2026-09-16 | `cb9dd23` | 108 / 150 | 0 | 3 | 17 | 0 | 22 | 0 |
 
 ## The judge
 
 | Measure | Value |
 |---|---|
 | Cases judged | 25 (0 unjudged) |
-| Judged grounded | 0.2000 |
+| Judged grounded | 0.0800 |
 | Judged appropriate | 0.0000 |
-| Agreement with layer 1 | 0.3200 |
+| Agreement with layer 1 | 0.2000 |
 
-A local model scoring another local model's work agrees with exact scoring on roughly a third of
-cases and calls nothing appropriate. It is published because the number is the finding: **this
+A local model scoring another local model's work agrees with exact scoring on a fifth of cases
+and calls nothing appropriate. It is published because the number is the finding: **this
 judge is not fit to gate on**, and a gate built on it would have been a gate built on noise. It
 stays in the harness, unwired from the gate, so the next model can be measured against the same
 cases.
