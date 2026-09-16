@@ -13,8 +13,8 @@ from datetime import UTC, datetime
 from email.message import EmailMessage
 
 import pytest
-from app.adapters.mailbox import MAX_FETCHED, message_from_bytes, unread_messages
 
+from app.adapters.mailbox import MAX_FETCHED, message_from_bytes, unread_messages
 from app.contracts import Channel
 
 
@@ -133,6 +133,26 @@ def test_a_date_that_cannot_be_read_does_not_become_now():
     """
     with pytest.raises(ValueError, match="Date"):
         message_from_bytes(an_email(date="whenever"))
+
+
+def test_a_body_in_a_charset_nobody_has_is_refused_like_any_other_unreadable_body():
+    """
+    A charset this machine has no codec for is a refusal, not a crash.
+
+    Left to raise LookupError it would escape the ValueError the mailbox loop catches, and one
+    message with an invented charset would end the whole poll -- everyone behind it included.
+    """
+    raw = (
+        b"From: priya@example.com\r\n"
+        b"Message-ID: <no-such-charset@example.com>\r\n"
+        b"Date: Tue, 15 Sep 2026 09:15:00 +0000\r\n"
+        b'Content-Type: text/plain; charset="not-a-real-charset"\r\n'
+        b"\r\n"
+        b"I was charged twice.\r\n"
+    )
+
+    with pytest.raises(ValueError, match="decoded"):
+        message_from_bytes(raw)
 
 
 def test_a_subject_in_another_charset_is_decoded_not_mangled():
