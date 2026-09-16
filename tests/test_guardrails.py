@@ -366,3 +366,20 @@ def test_an_order_id_is_matched_exactly_and_never_normalised():
     ]
 
     assert evidence_of(Intent.DUPLICATE_CHARGE, steps, "4821").charges_paise == ()
+
+
+def test_an_order_with_two_different_duplicates_is_a_persons_decision():
+    """
+    Charged twice for one thing and twice for another: which of them the customer means is a
+    reading of their message, and the message is the thing that cannot be trusted. Nothing in
+    the ledger picks between two duplicates, so a person does.
+    """
+    verdict = justified(refund(50_000), duplicate(10_000, 10_000, 50_000, 50_000))
+
+    assert verdict.runs is False
+    assert "more than one" in (verdict.reason or "")
+
+
+def test_one_duplicate_among_single_charges_is_still_decided_here():
+    """Only the repeated amounts count, so other charges on the order do not make it ambiguous."""
+    assert justified(refund(50_000), duplicate(10_000, 50_000, 50_000, 70_000)).runs is True
