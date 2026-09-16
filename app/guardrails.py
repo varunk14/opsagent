@@ -22,9 +22,14 @@ ledger cannot be talked round either.
 
 Nothing here commits; the caller owns the transaction.
 
+A run also has ceilings on what it may spend reaching a decision -- tokens, reference
+dollars, and seconds of its own model time. Zero means no ceiling there, the opposite of
+the refund limit, so switching a budget off never looks like the harshest setting there is.
+
 Run:  .venv/bin/python -m app.guardrails show
       .venv/bin/python -m app.guardrails set --limit-rupees 10000 --by asha
       .venv/bin/python -m app.guardrails set --min-confidence 0.90 --by asha
+      .venv/bin/python -m app.guardrails set --max-tokens-per-run 20000 --by asha
 """
 
 import argparse
@@ -51,25 +56,71 @@ READING_OF = {
     Intent.OTHER: "something else",
 }
 
-LOAD = "SELECT auto_refund_limit_paise, min_confidence FROM guardrails WHERE singleton"
+LOAD = (
+    "SELECT auto_refund_limit_paise, min_confidence, max_tokens_per_run, max_cost_usd_per_run, "
+    "max_seconds_per_run FROM guardrails WHERE singleton"
+)
 
 SET_LIMITS = """
     UPDATE guardrails
        SET auto_refund_limit_paise = coalesce(%(limit)s::bigint, auto_refund_limit_paise),
            min_confidence = coalesce(%(confidence)s::numeric, min_confidence),
+           max_tokens_per_run = coalesce(%(max_tokens)s::bigint, max_tokens_per_run),
+           max_cost_usd_per_run = coalesce(%(max_cost)s::numeric, max_cost_usd_per_run),
+           max_seconds_per_run = coalesce(%(max_seconds)s::integer, max_seconds_per_run),
            updated_by = %(by)s,
            updated_at = now()
      WHERE singleton
-    RETURNING auto_refund_limit_paise, min_confidence
+    RETURNING auto_refund_limit_paise, min_confidence, max_tokens_per_run, max_cost_usd_per_run,
+              max_seconds_per_run
 """
 
 TWO_PLACES = Decimal("0.01")
+# What numeric(10, 6) can hold exactly. Anything finer would be rounded on the way in.
+SIX_PLACES = Decimal("0.000001")
+
+
+@dataclass(frozen=True)
+class Budgets:
+    """
+    What one run may spend before a person takes it.
+
+    Seconds are seconds the agent spent working -- the latency of its own model calls, added up --
+    never wall-clock since the message arrived. A run waiting for somebody to approve a refund can
+    sit for days, and charging that against a budget would hand over every refund anyone took a
+    lunch break over.
+
+    Zero means no ceiling, the opposite of `auto_refund_limit_paise` where zero is the kill switch.
+    A budget that stopped every run the moment it was set to zero would make the safe way to switch
+    a budget off indistinguishable from the harshest setting there is.
+    """
+
+    max_tokens_per_run: int
+    max_cost_usd_per_run: Decimal
+    max_seconds_per_run: int
+
+
+def over_budget(budgets: Budgets, tokens: int, cost_usd: Decimal, seconds: int) -> str | None:
+    """
+    Which ceiling this run has passed, said so a person reading it knows what to do, or None.
+
+    The ceiling is what a run may spend, not the first amount it may not: a run that lands exactly
+    on it has stayed within what it was given.
+    """
+    if budgets.max_tokens_per_run and tokens > budgets.max_tokens_per_run:
+        return f"{tokens:,} tokens spent, past the {budgets.max_tokens_per_run:,} this run was given"
+    if budgets.max_cost_usd_per_run and cost_usd > budgets.max_cost_usd_per_run:
+        return f"${cost_usd:f} spent, past the ${budgets.max_cost_usd_per_run:f} this run was given"
+    if budgets.max_seconds_per_run and seconds > budgets.max_seconds_per_run:
+        return f"{seconds} seconds of model time, past the {budgets.max_seconds_per_run} this run was given"
+    return None
 
 
 @dataclass(frozen=True)
 class Guardrails:
     auto_refund_limit_paise: int
     min_confidence: Decimal
+    budgets: Budgets
 
 
 @dataclass(frozen=True)
@@ -226,7 +277,16 @@ def load(connection: psycopg.Connection) -> Guardrails:
     row = connection.execute(LOAD).fetchone()
     if row is None:  # pragma: no cover - the row cannot be deleted
         raise LookupError("the guardrails row is missing; apply the migrations")
-    return Guardrails(auto_refund_limit_paise=row[0], min_confidence=row[1])
+    return in_force(row)
+
+
+def in_force(row: Sequence[Any]) -> Guardrails:
+    """One row of the guardrails table as the limits it stands for."""
+    return Guardrails(
+        auto_refund_limit_paise=row[0],
+        min_confidence=row[1],
+        budgets=Budgets(max_tokens_per_run=row[2], max_cost_usd_per_run=row[3], max_seconds_per_run=row[4]),
+    )
 
 
 def set_limits(
@@ -234,6 +294,9 @@ def set_limits(
     *,
     limit_paise: int | None = None,
     min_confidence: Decimal | None = None,
+    max_tokens_per_run: int | None = None,
+    max_cost_usd_per_run: Decimal | None = None,
+    max_seconds_per_run: int | None = None,
     by: str,
 ) -> Guardrails:
     """
@@ -244,8 +307,9 @@ def set_limits(
     """
     if not by.strip():
         raise ValueError("say who is making the change")
-    if limit_paise is None and min_confidence is None:
-        raise ValueError("nothing to change: give a limit, a confidence, or both")
+    changes = (limit_paise, min_confidence, max_tokens_per_run, max_cost_usd_per_run, max_seconds_per_run)
+    if all(change is None for change in changes):
+        raise ValueError("nothing to change: give a limit, a confidence, or a budget")
 
     if limit_paise is not None:
         # bool is an int, and True is not an amount of paise.
@@ -262,12 +326,40 @@ def set_limits(
         if min_confidence != min_confidence.quantize(TWO_PLACES):
             raise ValueError("min_confidence has at most two decimal places")
 
+    for name, ceiling in (("max_tokens_per_run", max_tokens_per_run), ("max_seconds_per_run", max_seconds_per_run)):
+        if ceiling is None:
+            continue
+        # bool is an int, and True is not a number of tokens or seconds.
+        if isinstance(ceiling, bool) or not isinstance(ceiling, int):
+            raise ValueError(f"{name} must be a whole number")  # noqa: TRY004 - the CLI reports it as a bad value
+        if ceiling < 0:
+            raise ValueError(f"{name} must be at least 0, where 0 means no ceiling")
+
+    if max_cost_usd_per_run is not None:
+        if not isinstance(max_cost_usd_per_run, Decimal):
+            raise ValueError("max_cost_usd_per_run must be a Decimal such as Decimal('0.002'), so it stays exact")
+        if not max_cost_usd_per_run.is_finite() or max_cost_usd_per_run < 0:
+            raise ValueError("max_cost_usd_per_run must be at least 0, where 0 means no ceiling")
+        if max_cost_usd_per_run != max_cost_usd_per_run.quantize(SIX_PLACES):
+            # The column would round it, and here rounding is not a rounding error: the strictest
+            # ceiling anyone could ask for rounds to zero, which is the one setting that stops
+            # nothing. Refused, rather than quietly turned into its own opposite.
+            raise ValueError("max_cost_usd_per_run has at most six decimal places")
+
     row = connection.execute(
-        SET_LIMITS, {"limit": limit_paise, "confidence": min_confidence, "by": by.strip()}
+        SET_LIMITS,
+        {
+            "limit": limit_paise,
+            "confidence": min_confidence,
+            "max_tokens": max_tokens_per_run,
+            "max_cost": max_cost_usd_per_run,
+            "max_seconds": max_seconds_per_run,
+            "by": by.strip(),
+        },
     ).fetchone()
     if row is None:  # pragma: no cover - the row cannot be deleted
         raise LookupError("the guardrails row is missing; apply the migrations")
-    return Guardrails(auto_refund_limit_paise=row[0], min_confidence=row[1])
+    return in_force(row)
 
 
 def main(argv: list[str]) -> int:  # pragma: no cover - the operator's command line
@@ -277,6 +369,11 @@ def main(argv: list[str]) -> int:  # pragma: no cover - the operator's command l
     change = commands.add_parser("set", help="change a limit")
     change.add_argument("--limit-rupees", type=Decimal, help="refunds strictly under this run on their own; 0 stops them")
     change.add_argument("--min-confidence", type=Decimal, help="refunds below this confidence need a person")
+    change.add_argument("--max-tokens-per-run", type=int, help="tokens one run may spend; 0 means no ceiling")
+    change.add_argument("--max-cost-per-run", type=Decimal, help="reference dollars one run may reach; 0 means no ceiling")
+    change.add_argument(
+        "--max-seconds-per-run", type=int, help="seconds of model time one run may take; 0 means no ceiling"
+    )
     change.add_argument("--by", required=True, help="who is making the change")
     arguments = parser.parse_args(argv[1:])
 
@@ -291,7 +388,13 @@ def main(argv: list[str]) -> int:  # pragma: no cover - the operator's command l
                 limit = int(paise)
             try:
                 guardrails = set_limits(
-                    connection, limit_paise=limit, min_confidence=arguments.min_confidence, by=arguments.by
+                    connection,
+                    limit_paise=limit,
+                    min_confidence=arguments.min_confidence,
+                    max_tokens_per_run=arguments.max_tokens_per_run,
+                    max_cost_usd_per_run=arguments.max_cost_per_run,
+                    max_seconds_per_run=arguments.max_seconds_per_run,
+                    by=arguments.by,
                 )
             except ValueError as refused:
                 print(f"  refused: {refused}")
@@ -302,6 +405,12 @@ def main(argv: list[str]) -> int:  # pragma: no cover - the operator's command l
 
     print(f"  refunds under {rupees(guardrails.auto_refund_limit_paise)} run on their own")
     print(f"  refunds below confidence {_shown(guardrails.min_confidence)} need a person")
+    for what, ceiling in (
+        ("tokens", guardrails.budgets.max_tokens_per_run),
+        ("reference dollars", guardrails.budgets.max_cost_usd_per_run),
+        ("seconds of model time", guardrails.budgets.max_seconds_per_run),
+    ):
+        print(f"  {what} one run may spend: {ceiling or 'no ceiling'}")
     return 0
 
 

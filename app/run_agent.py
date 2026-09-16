@@ -85,7 +85,7 @@ from app.graph.build import (
 from app.graph.nodes import escalation
 from app.graph.prompts import run_prompt_version
 from app.graph.state import AgentState
-from app.guardrails import Evidence, Verdict, evidence_of, judge, justified
+from app.guardrails import Evidence, Verdict, evidence_of, judge, justified, over_budget
 from app.guardrails import load as load_guardrails
 from app.llm import DEFAULT_MODEL, Ollama, Reply, ServiceUnavailable
 from app.retrieval import PolicyRetriever
@@ -460,6 +460,21 @@ def tokens_by_model(before: Mapping[str, Any], replies: list[Reply]) -> dict[str
     return spent
 
 
+def model_ms(before: Mapping[str, Any], replies: list[Reply]) -> int:
+    """
+    How long this run's own model calls have taken, this tick's added to the earlier ones.
+
+    Time the agent spent working, which is the only time a budget can fairly hold it to. A run
+    waiting for a person to approve a refund can sit for days, and that wait is not the agent's.
+
+    Unlike `tokens_by_model`, a run that predates this counter starts from zero rather than from
+    some reconstruction: nothing stored says how long its earlier ticks took. That under-counts
+    such a run, so its time ceiling trips late or not at all -- a run allowed to finish, never one
+    stopped for time it did not spend.
+    """
+    return int(before.get("model_ms", 0)) + sum(reply.latency_ms for reply in replies)
+
+
 def charge(before: Mapping[str, Any], replies: list[Reply]) -> tuple[Decimal, int, int]:
     """
     What this tick adds to the run's cost, and the run's token totals after it.
@@ -498,6 +513,7 @@ def summarise_agent(
     replies = state.get("replies", [])
     cost, prompt_tokens, completion_tokens = charge(before, replies)
     spent = tokens_by_model(before, replies)
+    worked_ms = model_ms(before, replies)
     classification = state.get("classification")
     extraction = state.get("extraction")
     agent = {
@@ -513,6 +529,7 @@ def summarise_agent(
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
         "tokens_by_model": spent,
+        "model_ms": worked_ms,
         "rate": REFERENCE_RATE.name,
     }
     return agent, cost
@@ -520,7 +537,7 @@ def summarise_agent(
 
 # What a run has been charged for so far. A tick records these with its agent state; an
 # outage has no agent state to record, so it records them alone, under state.billing.
-CHARGED = ("prompt_tokens", "completion_tokens", "model_calls", "tokens_by_model")
+CHARGED = ("prompt_tokens", "completion_tokens", "model_calls", "tokens_by_model", "model_ms")
 
 
 def agent_of(connection: psycopg.Connection, run_id: UUID) -> dict[str, Any]:
@@ -817,6 +834,39 @@ def plan_once_more(
     return cast(AgentState, {**again, "replies": list(state.get("replies", [])) + list(again.get("replies", []))})
 
 
+def within_budget(
+    connection: psycopg.Connection,
+    before: Mapping[str, Any],
+    state: AgentState,
+    proposal: ProposedAction,
+    failure: str | None,
+) -> tuple[ProposedAction, str | None]:
+    """
+    The proposal to act on, or a hand-over in its place when the run has spent what it was given.
+
+    Read here, in the transaction that acts, like every other limit: a ceiling changed a second ago
+    applies. What is compared is what the run has actually spent, this tick's calls included.
+    MAX_STEPS bounded a run by counting tools, which says nothing about tokens, money or time and
+    moves whenever the agent's shape changes.
+
+    A run past a ceiling stops the way every other stop works -- handed to a person with the reason
+    -- rather than abandoned, or retried into the same wall. One already on its way to a person is
+    left alone: there is nothing cheaper for it to do, and its own reason explains the case better
+    than a note about the budget would.
+    """
+    replies = state.get("replies", [])
+    spent_so_far = tokens_by_model(before, replies)
+    spent = over_budget(
+        load_guardrails(connection).budgets,
+        tokens=sum(pair[0] + pair[1] for pair in spent_so_far.values()),
+        cost_usd=priced(spent_so_far),
+        seconds=model_ms(before, replies) // 1000,
+    )
+    if spent is None or proposal.tool == "escalate_to_human":
+        return proposal, failure
+    return hand_over(spent, f"Stopped for a person to take: {spent}.")
+
+
 def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_steps: int) -> RunOutcome:
     """Walk the graph from what the run holds, then act on one proposal in one transaction."""
     with traced_tick(claimed.run_id, {Attr.ATTEMPT: claimed.attempt}) as tick_span:
@@ -845,6 +895,7 @@ def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_st
                     # Per model as well, or the next tick would re-price this outage's tokens at
                     # whichever model happened to answer next.
                     "tokens_by_model": tokens_by_model(before, outage.replies),
+                    "model_ms": model_ms(before, outage.replies),
                 }
                 released = connection.execute(
                     RELEASE,
@@ -865,6 +916,7 @@ def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_st
         with connection.transaction():
             if connection.execute(HOLD_CLAIM, (claimed.run_id, claimed.worker)).fetchone() is None:
                 raise LostClaim(f"run {claimed.run_id} was reclaimed before this worker could act on it")
+            proposal, failure = within_budget(connection, before, state, proposal, failure)
             status, proposal, failure, cost = act(connection, claimed, before, state, steps, proposal, failure, version)
             close_tick(connection, claimed.run_id, tick_span, status)
 

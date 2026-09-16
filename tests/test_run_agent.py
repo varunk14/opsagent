@@ -22,6 +22,7 @@ from app.baseline import REFERENCE_RATE, token_cost
 from app.contracts import Channel, IncomingMessage, ProposedAction
 from app.graph.build import build_graph
 from app.graph.prompts import run_prompt_version
+from app.guardrails import set_limits
 from app.intake import accept
 from app.llm import DEFAULT_MODEL, ModelUnavailable, Reply
 from app.retrieval import PolicySearchUnavailable
@@ -36,6 +37,7 @@ from app.run_agent import (
 from app.seed import load_ledger
 from tests.fakes import (
     CLASSIFIED_DUPLICATE,
+    CLASSIFIED_STATUS,
     EXTRACTED_4821,
     OUTAGE,
     PROPOSED_ESCALATE,
@@ -729,6 +731,7 @@ def test_outage_totals_are_folded_in_and_cleared_once_a_tick_records_its_own(fre
         "completion_tokens": 5,
         "model_calls": 1,
         "tokens_by_model": {DEFAULT_MODEL: [10, 5]},
+        "model_ms": 1,
     }
     with psycopg.connect(fresh_database) as connection:
         connection.execute("UPDATE runs SET next_retry_at = now() WHERE id = %s", (run_id,))
@@ -740,6 +743,7 @@ def test_outage_totals_are_folded_in_and_cleared_once_a_tick_records_its_own(fre
     assert "billing" not in state
     agent = state["agent"]
     assert (agent["prompt_tokens"], agent["completion_tokens"], agent["model_calls"]) == (50, 25, 5)
+    assert agent["model_ms"] == 5, "the outage's own call counts toward the run's working time too"
 
 
 # --- a repeated lookup is asked once more before anyone is woken ------------------------------
@@ -1031,3 +1035,174 @@ def test_a_model_name_is_bounded_before_it_becomes_a_key_on_the_run():
     spent = tokens_by_model({}, [Reply(text="{}", prompt_tokens=1, completion_tokens=1, latency_ms=1, model=long_name)])
 
     assert list(spent) == ["m" * MAX_MODEL_NAME_CHARS]
+
+
+# --- what one run may spend -------------------------------------------------------------------
+
+
+def test_the_seconds_a_run_spent_working_are_kept_on_it():
+    """Its own model calls, added up. Not the hours it waited for somebody to approve a refund."""
+    from app.llm import Reply
+    from app.run_agent import model_ms
+
+    replies = [
+        Reply(text="{}", prompt_tokens=1, completion_tokens=1, latency_ms=1_500),
+        Reply(text="{}", prompt_tokens=1, completion_tokens=1, latency_ms=2_500),
+    ]
+
+    assert model_ms({}, replies) == 4_000
+    assert model_ms({"model_ms": 4_000}, replies) == 8_000
+
+
+@pytest.mark.db
+def test_a_run_past_its_token_budget_goes_to_a_person_with_nothing_paid(fresh_database):
+    """
+    MAX_STEPS bounded a run indirectly, by counting tools. This bounds what it may actually spend.
+
+    The run is stopped where every other stop happens -- handed to a person, with the reason they
+    need to pick it up -- rather than abandoned or retried into the same wall.
+    """
+    from tests.test_approval_path import refund_model, work
+
+    ledger(fresh_database)
+    queue(fresh_database)
+    with psycopg.connect(fresh_database) as connection:
+        set_limits(connection, max_tokens_per_run=20, by="a tight budget")
+        connection.commit()
+
+    outcome = work(fresh_database, refund_model(360_000))
+
+    assert outcome.status == "waiting_approval"
+    assert outcome.failure is not None and "tokens spent" in outcome.failure
+    assert count(fresh_database, "refunds") == 0
+
+
+@pytest.mark.db
+def test_a_run_inside_its_budget_is_untouched(fresh_database):
+    from tests.test_approval_path import refund_model, refunds, work
+
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    with psycopg.connect(fresh_database) as connection:
+        set_limits(connection, max_tokens_per_run=10_000, by="the usual budget")
+        connection.commit()
+
+    outcome = work(fresh_database, refund_model(360_000))
+
+    assert outcome.status == "done"
+    assert refunds(fresh_database) == [("4821", 360_000, run_id)]
+
+
+@pytest.mark.db
+def test_a_budget_counts_what_the_whole_run_has_spent_not_just_this_tick(fresh_database):
+    """
+    Three calls in the first tick, one in the second. Neither tick passes the ceiling alone.
+
+    A budget that forgot what earlier ticks spent would let a run cost any amount, so long as it
+    spread the cost over enough of them.
+    """
+    from tests.test_approval_path import refund_model, work
+
+    ledger(fresh_database)
+    queue(fresh_database)
+    with psycopg.connect(fresh_database) as connection:
+        set_limits(connection, max_tokens_per_run=50, by="a budget of four calls")
+        connection.commit()
+
+    outcome = work(fresh_database, refund_model(360_000))
+
+    assert outcome.status == "waiting_approval"
+    assert outcome.failure is not None and "60 tokens spent" in outcome.failure
+    assert count(fresh_database, "refunds") == 0
+
+
+@pytest.mark.db
+def test_a_run_already_going_to_a_person_is_not_stopped_again(fresh_database):
+    """Its reason is the one that explains the case. A budget notice on top would bury it."""
+    from tests.test_approval_path import work
+
+    ledger(fresh_database)
+    queue(fresh_database)
+    with psycopg.connect(fresh_database) as connection:
+        set_limits(connection, max_tokens_per_run=1, by="a budget nothing can meet")
+        connection.commit()
+    model = ScriptedModel(classify=CLASSIFIED_STATUS, extract=EXTRACTED_4821, plan=PROPOSED_ESCALATE)
+
+    outcome = work(fresh_database, model)
+
+    assert outcome.tool == "escalate_to_human"
+    assert "tokens spent" not in (outcome.failure or ""), "the case's own reason, not the budget's"
+
+
+@pytest.mark.db
+def test_seconds_are_seconds_and_not_milliseconds(fresh_database):
+    """
+    Four calls of a second each, under a ten second ceiling: well within it.
+
+    Read as milliseconds the same run would be four thousand over, and every run the agent has
+    ever worked would be handed to a person.
+    """
+    from tests.test_approval_path import refunds, work
+
+    class Slow(ScriptedModel):
+        def generate(self, prompt: str):
+            from dataclasses import replace
+
+            return replace(super().generate(prompt), latency_ms=1_000)
+
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    with psycopg.connect(fresh_database) as connection:
+        set_limits(connection, max_seconds_per_run=10, max_tokens_per_run=0, by="ten seconds")
+        connection.commit()
+    slow = Slow(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=[PROPOSED_LOOKUP, proposed_refund(360_000)])
+
+    outcome = work(fresh_database, slow)
+
+    assert outcome.status == "done", "four seconds of model time is inside a ten second ceiling"
+    assert refunds(fresh_database) == [("4821", 360_000, run_id)]
+
+
+@pytest.mark.db
+def test_a_run_past_its_cost_ceiling_goes_to_a_person_too(fresh_database):
+    """The ceiling that is money rather than tokens, driven through the real worker."""
+    from tests.test_approval_path import refund_model, work
+
+    ledger(fresh_database)
+    queue(fresh_database)
+    with psycopg.connect(fresh_database) as connection:
+        set_limits(
+            connection, max_tokens_per_run=0, max_cost_usd_per_run=Decimal("0.000002"), by="a budget of a few cents"
+        )
+        connection.commit()
+
+    outcome = work(fresh_database, refund_model(360_000))
+
+    assert outcome.status == "waiting_approval"
+    assert outcome.failure is not None and "$0.000002" in outcome.failure
+    assert count(fresh_database, "refunds") == 0
+
+
+@pytest.mark.db
+def test_a_run_past_its_time_ceiling_goes_to_a_person_too(fresh_database):
+    """And the ceiling that is time. A second of model time against a ceiling of none."""
+    from tests.test_approval_path import work
+
+    class Slow(ScriptedModel):
+        def generate(self, prompt: str):
+            from dataclasses import replace
+
+            return replace(super().generate(prompt), latency_ms=2_000)
+
+    ledger(fresh_database)
+    queue(fresh_database)
+    with psycopg.connect(fresh_database) as connection:
+        set_limits(connection, max_tokens_per_run=0, max_seconds_per_run=1, by="one second")
+        connection.commit()
+    slow = Slow(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=[PROPOSED_LOOKUP, proposed_refund(360_000)])
+
+    outcome = work(fresh_database, slow)
+
+    assert outcome.status == "waiting_approval"
+    assert outcome.failure is not None and "seconds of model time" in outcome.failure
+    assert count(fresh_database, "refunds") == 0
