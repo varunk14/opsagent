@@ -12,6 +12,7 @@ fails must leave the cursor exactly where it found it.
 import psycopg
 import pytest
 
+from app.intake import accept
 from app.poll import poll_telegram
 from tests.test_adapters_telegram import FakeBot, an_update
 
@@ -69,6 +70,39 @@ def test_a_pass_that_dies_part_way_leaves_the_cursor_alone(fresh_database, monke
 
     assert [asked for asked in bot.asked if asked[0] is not None] == [], "the cursor must not move"
     assert runs_in(fresh_database) == 0
+
+
+def test_a_pass_that_dies_after_handling_one_still_leaves_the_cursor_alone(fresh_database, monkeypatch):
+    """
+    The one the test above does not catch, and the worst thing this channel can do.
+
+    There the pass fails before anything is handled, so a cursor moved too early and a cursor never
+    moved look identical. Here the first update is accepted and the second brings the pass down, so
+    the rollback throws away work that was already done. A pass confirming as it went would have
+    told Telegram to discard update 700 -- whose run no longer exists, whose message is now gone
+    from the only place it ever lived, and whose sender is waiting for a reply to it.
+
+    A mutation that moved the confirmation inside the transaction passed every other test in this
+    file. This is the one that fails.
+    """
+    bot = FakeBot([an_update(update_id=700, message_id=11), an_update(update_id=701, message_id=12)])
+
+    accepted: list[object] = []
+
+    def fails_on_the_second(connection, message):
+        accepted.append(message)
+        if len(accepted) > 1:
+            raise psycopg.OperationalError("the database went away mid-pass")
+        return accept(connection, message)
+
+    monkeypatch.setattr("app.poll.accept", fails_on_the_second)
+
+    with pytest.raises(psycopg.OperationalError), psycopg.connect(fresh_database) as connection:
+        poll_telegram(connection, bot)
+
+    assert len(accepted) == 2, "the first one really was handled before the pass died"
+    assert [asked for asked in bot.asked if asked[0] is not None] == [], "the cursor must not move"
+    assert runs_in(fresh_database) == 0, "and its run must not survive either"
 
 
 def test_a_second_pass_over_the_same_updates_adds_nothing(fresh_database):
