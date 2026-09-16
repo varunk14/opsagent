@@ -493,3 +493,29 @@ def test_a_trend_of_only_zeroes_draws_no_bar_rather_than_dividing_by_zero(tmp_pa
     (row,) = golden_trend(path)
 
     assert {width for _, _, width in row.mix} == {0}
+
+
+def test_a_history_that_is_not_text_at_all_is_no_trend_rather_than_a_broken_page(tmp_path):
+    from app.failures import golden_trend
+
+    path = tmp_path / "history.jsonl"
+    path.write_bytes(json.dumps(accepted("2026-09-16", "c12eee8", {"loop": 1})).encode() + b"\n\xff\xfe truncated")
+
+    assert golden_trend(path) == []
+
+
+def test_counts_that_are_not_counts_scale_no_bar(tmp_path):
+    from app.failures import golden_trend
+
+    path = history_file(
+        tmp_path / "history.jsonl",
+        accepted("2026-09-16", "c12eee8", {"loop": 2}),
+        accepted("2026-09-17", "abc1234", {"loop": True, "tool_misuse": -50, "drift": "many"}),
+    )
+
+    first, second = golden_trend(path)
+
+    assert {category: width for category, _, width in first.mix}["loop"] == 100  # 2 of 2, not 2 of 50
+    assert {category: count for category, count, _ in second.mix} == dict.fromkeys(
+        [category.value for category in FailureCategory], 0
+    )

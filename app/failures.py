@@ -302,14 +302,14 @@ def golden_trend(path: Path = GOLDEN_HISTORY) -> list[Accepted]:
     version of the agent, so a category that a change made worse is visible before a deploy.
     The file is the append-only history `python -m evals accept` writes. It is read as
     evidence, never trusted: a line that is not an accepted baseline is skipped, and a missing
-    file is simply no trend -- the screen must not fall over because the history is absent or
-    half-written.
+    file is simply no trend -- the screen must not fall over because the history is absent,
+    half-written, or not text at all.
     """
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError:
+    except (OSError, ValueError):  # unreadable, or bytes that are not UTF-8: no trend, not a broken page
         return []
-    accepted: list[tuple[dict[str, Any], dict[str, int]]] = []
+    accepted: list[tuple[dict[str, Any], list[tuple[str, int]]]] = []
     for line in lines:
         try:
             found = json.loads(line)
@@ -317,23 +317,23 @@ def golden_trend(path: Path = GOLDEN_HISTORY) -> list[Accepted]:
             continue
         mix = found.get("failure_mix") if isinstance(found, dict) else None
         if isinstance(mix, dict):
-            accepted.append((found, mix))
-    largest = max((count for _, mix in accepted for count in mix.values() if isinstance(count, int)), default=0)
+            accepted.append((found, [(category.value, _count(mix.get(category.value))) for category in FailureCategory]))
+    # The widths are scaled to the largest count the trend actually shows, so every bar on the page means the same thing.
+    largest = max((count for _, mix in accepted for _, count in mix), default=0)
     return [
         Accepted(
             on=str(found.get("accepted_on", "")),
             code=str(found.get("code", "")),
-            completed=int(found.get("completed", 0)),
-            cases=int(found.get("cases", 0)),
-            mix=[(category.value, count, round(100 * count / largest) if largest else 0) for category, count in
-                 ((category, _count(mix.get(category.value))) for category in FailureCategory)],
+            completed=_count(found.get("completed")),
+            cases=_count(found.get("cases")),
+            mix=[(category, count, round(100 * count / largest) if largest else 0) for category, count in mix],
         )
         for found, mix in accepted
     ]
 
 
 def _count(value: Any) -> int:
-    """A category's count from a history line: anything that is not a whole number counts as none."""
+    """A count read from a history line: anything that is not a whole number of things counts as none."""
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
