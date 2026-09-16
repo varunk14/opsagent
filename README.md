@@ -192,6 +192,18 @@ and a cost derived from a fixed reference rate. Cost optimisation is measured ag
 The rate is arbitrary and says so; it is the same on both sides, so the ratio is
 what survives.
 
+## Reliability
+
+`RELIABILITY.md` holds what the agent gets right and wrong, measured over 150 labelled cases:
+task completion, escalation precision and recall, the nineteen refunds it pays that a person
+should have decided, and the failure mix across six fixed categories. The model's replies are
+recorded on a machine with a GPU and replayed in CI, so the gate runs without one;
+`python -m evals verify` re-runs the set live and reports what has changed since.
+
+Completion is 59 %, the judge is too weak to gate on, and both numbers are published rather than
+buried. `/failures` on the local screen charts the mix of real runs per week beside the mix of
+every accepted baseline, so a category a change made worse is visible before anything ships.
+
 ## Why the durability is hand-rolled
 
 A run is a row in Postgres, not a workflow in Temporal. Workers claim runs with
@@ -215,8 +227,7 @@ failure modes are the interesting part, and each one is pinned by a test.
 
 ## Planned
 
-A live deployment, a failure taxonomy, and cost routing measured against
-`BASELINE.md`.
+A live deployment, and cost routing measured against `BASELINE.md`.
 
 ## Running the experiments
 
