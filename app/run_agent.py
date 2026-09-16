@@ -70,19 +70,24 @@ from app.approvals import (
     mark_executed,
     open_approval,
 )
-from app.baseline import REFERENCE_RATE, cost_of
+from app.baseline import RATES, REFERENCE_RATE, cost_of
 from app.contracts import Classification, ExtractedRefund, ProposedAction, StepRecord
 from app.db import apply_migrations, connect
 from app.embeddings import OllamaEmbedder
 from app.executor import OWNED_ORDER, ToolOutcome, execute
 from app.failures import record_category
-from app.graph.build import build_graph, failure_recorded, run_graph
+from app.graph.build import (
+    MAX_MODEL_NAME_CHARS,
+    build_graph,
+    failure_recorded,
+    run_graph,
+)
 from app.graph.nodes import escalation
 from app.graph.prompts import run_prompt_version
 from app.graph.state import AgentState
 from app.guardrails import Evidence, Verdict, evidence_of, judge, justified
 from app.guardrails import load as load_guardrails
-from app.llm import Ollama, Reply, ServiceUnavailable
+from app.llm import DEFAULT_MODEL, Ollama, Reply, ServiceUnavailable
 from app.retrieval import PolicyRetriever
 from app.tracing import (
     Attr,
@@ -442,8 +447,14 @@ def tokens_by_model(before: Mapping[str, Any], replies: list[Reply]) -> dict[str
     priced. The rates differ, so totalled tokens no longer say what they cost.
     """
     spent = {model: list(counts) for model, counts in (before.get("tokens_by_model") or {}).items()}
+    if not spent and (before.get("prompt_tokens") or before.get("completion_tokens")):
+        # A run already in flight when the split arrived. Only one model had ever run, so its
+        # totals are that model's; starting from nothing would throw away what it had been charged.
+        spent = {DEFAULT_MODEL: [before.get("prompt_tokens", 0), before.get("completion_tokens", 0)]}
     for reply in replies:
-        running = spent.setdefault(reply.model, [0, 0])
+        # Bounded like the name the span records: this one becomes a key in the run's stored
+        # state, and nothing else that reaches stored state is left uncapped.
+        running = spent.setdefault(reply.model[:MAX_MODEL_NAME_CHARS], [0, 0])
         running[0] += reply.prompt_tokens
         running[1] += reply.completion_tokens
     return spent
@@ -463,8 +474,17 @@ def charge(before: Mapping[str, Any], replies: list[Reply]) -> tuple[Decimal, in
 
 
 def priced(spent: Mapping[str, Sequence[int]]) -> Decimal:
-    """What those per-model token counts cost. Stored state arrives as lists; `cost_of` wants pairs."""
-    return cost_of({model: (counts[0], counts[1]) for model, counts in spent.items()})
+    """
+    What those per-model token counts cost. Stored state arrives as lists; `cost_of` wants pairs.
+
+    A model nobody has given a rate contributes nothing, exactly as its span carries tokens and no
+    cost. `cost_of` refuses such a model, and rightly: a measurement must not invent a rate. But
+    this is the billing path, and a run that has already paid a refund cannot be abandoned because
+    an accounting convention is missing. The tokens stay recorded against the model that spent
+    them, so the gap is visible rather than absorbed into somebody else's rate.
+    """
+    known = {model: (counts[0], counts[1]) for model, counts in spent.items() if model in RATES}
+    return cost_of(known)
 
 
 def summarise_agent(

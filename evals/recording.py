@@ -94,7 +94,15 @@ class RecordedReply:
 
 
 def replayed(found: RecordedReply) -> Reply:
-    return Reply(text=found.text, prompt_tokens=found.prompt_tokens, completion_tokens=found.completion_tokens, latency_ms=0)
+    # The model is half the key this was stored under, and it is what prices the call on the way
+    # back: dropped here, every replayed reply would be priced as whichever model is the default.
+    return Reply(
+        text=found.text,
+        prompt_tokens=found.prompt_tokens,
+        completion_tokens=found.completion_tokens,
+        latency_ms=0,
+        model=found.model,
+    )
 
 
 class Recordings:

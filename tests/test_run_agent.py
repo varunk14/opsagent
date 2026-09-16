@@ -1013,3 +1013,21 @@ def test_a_replayed_reply_says_which_model_was_recorded():
     found = RecordedReply(model=SMALL_MODEL, task="classify", text="{}", prompt_tokens=10, completion_tokens=2)
 
     assert replayed(found).model == SMALL_MODEL
+
+
+def test_a_model_name_is_bounded_before_it_becomes_a_key_on_the_run():
+    """
+    The span bounds the name it records; what is stored on the run must agree.
+
+    A name is set by whoever runs the worker, not by a customer, so this is not a live hole --
+    but it is the only value in the codebase that reached stored state uncapped, and the ladder
+    is about to make model names vary per call.
+    """
+    from app.graph.build import MAX_MODEL_NAME_CHARS
+    from app.llm import Reply
+    from app.run_agent import tokens_by_model
+
+    long_name = "m" * 500
+    spent = tokens_by_model({}, [Reply(text="{}", prompt_tokens=1, completion_tokens=1, latency_ms=1, model=long_name)])
+
+    assert list(spent) == ["m" * MAX_MODEL_NAME_CHARS]
