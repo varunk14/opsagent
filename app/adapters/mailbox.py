@@ -17,6 +17,7 @@ from email import message_from_bytes as parse_bytes
 from email.message import EmailMessage
 from email.policy import default as default_policy
 from email.utils import parseaddr, parsedate_to_datetime
+from hashlib import sha256
 from typing import Any, Protocol
 
 from app.contracts import Channel, IncomingMessage
@@ -41,6 +42,11 @@ MAX_HEADER_BYTES = 32_768
 MAX_RAW_BYTES = 2_000_000
 
 
+# How much of a message we could not read is kept so a person can recognise it. Enough to see a
+# subject line and the top of a body; not so much that a refusal costs what the message would have.
+PREVIEW_CHARS = 2_000
+
+
 @dataclass(frozen=True)
 class Fetched:
     """
@@ -49,9 +55,17 @@ class Fetched:
     Exactly one of `message` and `refusal` is set. Both outcomes are carried rather than one being
     dropped, because a refusal is something a person needs to see -- and the caller cannot mark
     anything read without the number, which is the point of handing it back.
+
+    `digest` and `preview` describe the bytes rather than the message, which is what makes them
+    usable when there is no message. The digest is how a refusal gets recorded once however many
+    times it is delivered: a message we could not read has no Message-ID we are willing to trust --
+    that is frequently the very reason it was refused -- so the bytes are the only stable name it
+    has.
     """
 
     number: bytes
+    digest: str
+    preview: str
     message: IncomingMessage | None = None
     refusal: str | None = None
 
@@ -216,10 +230,17 @@ def unread_messages(mailbox: Mailbox) -> Iterator[Fetched]:
             log.warning("message %r was listed but could not be fetched", number)
             continue
 
+        digest = sha256(raw).hexdigest()
+        # errors="replace" rather than a decode that could raise: this describes a message we may
+        # be about to refuse, and it must not be able to fail in its turn.
+        preview = raw[:PREVIEW_CHARS].decode("utf-8", errors="replace")
+
         try:
-            yield Fetched(number=number, message=message_from_bytes(raw))
+            message = message_from_bytes(raw)
         except ValueError as exc:
-            yield Fetched(number=number, refusal=str(exc))
+            yield Fetched(number=number, digest=digest, preview=preview, refusal=str(exc))
+        else:
+            yield Fetched(number=number, digest=digest, preview=preview, message=message)
 
 
 def mark_read(mailbox: Mailbox, number: bytes) -> bool:
