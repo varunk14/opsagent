@@ -25,7 +25,7 @@ from app.graph.prompts import run_prompt_version
 from app.intake import accept
 from app.llm import ModelUnavailable, Reply
 from app.retrieval import PolicySearchUnavailable
-from app.run_agent import ALREADY_SHOWN, LostClaim, claim_next, work_next
+from app.run_agent import ALREADY_SHOWN, MICRO_DOLLAR, LostClaim, claim_next, work_next
 from app.seed import load_ledger
 from tests.fakes import (
     CLASSIFIED_DUPLICATE,
@@ -887,3 +887,53 @@ def test_a_step_is_the_same_step_only_when_the_tool_is_the_same_too():
     assert repeats(lookup, {"tool": "get_order", "args": arguments, "result": {}}) is True
     assert repeats(lookup, {"tool": "issue_refund", "args": arguments, "result": {}}) is False
     assert repeats(lookup, {"tool": "get_order", "args": {"order_id": "3310"}, "result": {}}) is False
+
+
+# --- a run is charged at the rate of each model that worked on it -----------------------------
+
+
+def test_a_reply_says_which_model_produced_it():
+    """Without it, the run cannot be priced: tokens alone do not say what they cost."""
+    from app.llm import DEFAULT_MODEL, Reply
+
+    assert Reply(text="{}", prompt_tokens=1, completion_tokens=1, latency_ms=1).model == DEFAULT_MODEL
+
+
+def test_a_run_worked_by_two_models_is_charged_at_both_rates():
+    from app.baseline import cost_of
+    from app.llm import DEFAULT_MODEL, SMALL_MODEL, Reply
+    from app.run_agent import charge
+
+    replies = [
+        Reply(text="{}", prompt_tokens=1_000, completion_tokens=100, latency_ms=1, model=SMALL_MODEL),
+        Reply(text="{}", prompt_tokens=2_000, completion_tokens=200, latency_ms=1, model=DEFAULT_MODEL),
+    ]
+
+    cost, _, _ = charge({}, replies)
+
+    assert cost == cost_of({SMALL_MODEL: (1_000, 100), DEFAULT_MODEL: (2_000, 200)}).quantize(MICRO_DOLLAR)
+
+
+def test_the_same_tokens_cost_less_on_the_small_model():
+    from app.llm import DEFAULT_MODEL, SMALL_MODEL, Reply
+    from app.run_agent import charge
+
+    def cost_on(model: str):
+        return charge({}, [Reply(text="{}", prompt_tokens=100_000, completion_tokens=0, latency_ms=1, model=model)])[0]
+
+    assert cost_on(SMALL_MODEL) < cost_on(DEFAULT_MODEL)
+
+
+def test_what_each_model_spent_is_kept_on_the_run_so_a_later_tick_counts_on_from_it():
+    from app.llm import DEFAULT_MODEL, SMALL_MODEL, Reply
+    from app.run_agent import charge, tokens_by_model
+
+    first = tokens_by_model({}, [Reply(text="{}", prompt_tokens=10, completion_tokens=1, latency_ms=1, model=SMALL_MODEL)])
+    second = tokens_by_model(
+        {"tokens_by_model": first},
+        [Reply(text="{}", prompt_tokens=20, completion_tokens=2, latency_ms=1, model=DEFAULT_MODEL)],
+    )
+
+    assert first == {SMALL_MODEL: [10, 1]}
+    assert second == {SMALL_MODEL: [10, 1], DEFAULT_MODEL: [20, 2]}
+    assert charge({"tokens_by_model": first}, []) [0] == Decimal("0.000000"), "no new replies, no new charge"
