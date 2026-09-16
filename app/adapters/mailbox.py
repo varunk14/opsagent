@@ -9,8 +9,9 @@ The module is called `mailbox` rather than `email` on purpose -- it has to impor
 library's `email` package, and a sibling of that name would shadow it.
 """
 
+import imaplib
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from email import message_from_bytes as parse_bytes
@@ -40,6 +41,15 @@ MAX_FETCHED = 50
 # fits inside it comfortably.
 MAX_HEADER_BYTES = 32_768
 MAX_RAW_BYTES = 2_000_000
+
+# Where the mailbox's details come from. The password belongs in a .env file that is not committed;
+# it is an app password for one mailbox, which can be revoked on its own without touching the
+# account it belongs to.
+HOST_VAR = "OPSAGENT_IMAP_HOST"
+USER_VAR = "OPSAGENT_IMAP_USER"
+PASSWORD_VAR = "OPSAGENT_IMAP_PASSWORD"
+PORT_VAR = "OPSAGENT_IMAP_PORT"
+DEFAULT_PORT = 993
 
 
 # How much of a message we could not read is kept so a person can recognise it. Enough to see a
@@ -195,6 +205,71 @@ def _text(message: EmailMessage) -> str:
         # caught by the poll loop, and one message naming an invented charset would end that poll
         # for everyone behind it.
         raise ValueError(f"the email's text cannot be decoded: {exc}") from exc
+
+
+@dataclass(frozen=True)
+class MailboxSettings:
+    """
+    What is needed to reach one mailbox. The password is an app password, never an account password.
+
+    `repr` is written out rather than inherited because the generated one prints every field, and
+    these get held in frames: one unhandled error anywhere below this and the default would put a
+    live app password into a traceback, a log file, and whatever collects that log file.
+    """
+
+    host: str
+    user: str
+    password: str
+    port: int = 993
+
+    def __repr__(self) -> str:
+        return f"MailboxSettings(host={self.host!r}, user={self.user!r}, port={self.port}, password=...)"
+
+
+def settings_from_env(environ: Mapping[str, str]) -> MailboxSettings:
+    """
+    Read the mailbox settings, refusing by name if any is missing.
+
+    Nothing here has a default except the port. A default host would be someone else's mail server,
+    tried with a real password; a poller running with no password fails identically to a mail server
+    that is down, and someone spends an afternoon on it.
+    """
+    missing = [name for name in (HOST_VAR, USER_VAR, PASSWORD_VAR) if not environ.get(name, "").strip()]
+    if missing:
+        raise ValueError(f"the mailbox needs {' and '.join(missing)} set")
+
+    port = environ.get(PORT_VAR, "").strip() or str(DEFAULT_PORT)
+    if not port.isdigit():
+        # Deliberately quotes the port and nothing else: the password is in the same environment.
+        raise ValueError(f"{PORT_VAR} is not a port number: {port!r}")
+
+    return MailboxSettings(
+        host=environ[HOST_VAR].strip(),
+        user=environ[USER_VAR].strip(),
+        # Not stripped. Some providers issue app passwords with spaces in them, and one helpfully
+        # removed space is an authentication failure nobody can see the cause of.
+        password=environ[PASSWORD_VAR],
+        port=int(port),
+    )
+
+
+def open_mailbox(settings: MailboxSettings, connect: Callable[..., Any] = imaplib.IMAP4_SSL) -> Any:
+    """
+    Open and log in to the mailbox described by `settings`.
+
+    IMAP4_SSL, with no option anywhere for the plain kind. Plain IMAP4 would work against most
+    servers and put the app password on the network in the clear, and nothing about the poller's
+    behaviour would look the slightest bit different -- which is exactly why it is not offered.
+
+    A failure is re-raised naming the mailbox and never the secret. The moment a login is rejected
+    is the moment the obvious implementation echoes back what it tried.
+    """
+    try:
+        mailbox = connect(settings.host, settings.port)
+        mailbox.login(settings.user, settings.password)
+    except (OSError, imaplib.IMAP4.error) as exc:
+        raise ValueError(f"could not open {settings.user} at {settings.host}: {type(exc).__name__}") from None
+    return mailbox
 
 
 def unread_messages(mailbox: Mailbox) -> Iterator[Fetched]:

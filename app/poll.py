@@ -28,9 +28,11 @@ would make the number of messages handled depend on where the file broke, and
 nothing downstream could tell that apart from a quiet inbox. The bound above is
 what keeps that honest rather than expensive.
 
-Run:  .venv/bin/python -m app.poll fixtures/inbox.jsonl
+Run:  .venv/bin/python -m app.poll fixtures/inbox.jsonl   one pass over a file
+      .venv/bin/python -m app.poll --mailbox              one pass over a real mailbox
 """
 
+import os
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -43,9 +45,12 @@ from psycopg.types.json import Jsonb
 from app.adapters.fixture import read_messages
 from app.adapters.mailbox import (
     MAX_FETCHED,
+    PASSWORD_VAR,
     Fetched,
     Mailbox,
     mark_read,
+    open_mailbox,
+    settings_from_env,
     unread_messages,
 )
 from app.contracts import IncomingMessage
@@ -215,6 +220,9 @@ def quarantine_refusal(connection: psycopg.Connection, item: Fetched) -> None:
 
 
 def main(argv: list[str]) -> int:  # pragma: no cover - the interactive driver
+    if len(argv) > 1 and argv[1] == "--mailbox":
+        return poll_the_mailbox()
+
     inbox = Path(argv[1] if len(argv) > 1 else "fixtures/inbox.jsonl")
 
     with connect() as connection:
@@ -233,6 +241,45 @@ def main(argv: list[str]) -> int:  # pragma: no cover - the interactive driver
         print("\n  More waiting. Run it again.")
     elif summary.accepted == 0 and summary.seen:
         print("\n  Nothing new. Run it again as often as you like; that is the point.")
+    return 0
+
+
+def poll_the_mailbox() -> int:  # pragma: no cover - needs a real mail server
+    """
+    One pass over the mailbox the environment describes.
+
+    Logs out in a finally, because an IMAP server holds the folder for a session that does not say
+    goodbye and the next pass would find it locked.
+    """
+    try:
+        settings = settings_from_env(os.environ)
+    except ValueError as exc:
+        print(f"  {exc}")
+        print(f"  Set them in .env, which is not committed. {PASSWORD_VAR} is an app password.")
+        return 1
+
+    mailbox = open_mailbox(settings)
+    try:
+        with connect() as connection:
+            summary = poll_mailbox(connection, mailbox)
+    finally:
+        mailbox.logout()
+
+    print(f"  read      {summary.seen} message(s) from {settings.user}")
+    print(f"  accepted  {summary.accepted}")
+    print(f"  duplicate {summary.duplicates}")
+
+    if summary.refused:
+        print(f"\n  REFUSED   {summary.refused}")
+        print("  A message could not be read -- no usable Message-ID, no text, an")
+        print("  unreadable date, or too large. It is recorded rather than retried")
+        print("  forever. `python -m app.dead_letters` lists it.")
+    if summary.collisions:
+        print(f"\n  COLLIDED  {summary.collisions}")
+        print("  A message arrived reusing a key that already exists, carrying")
+        print("  different text. `python -m app.dead_letters` lists it.")
+    if summary.more_waiting:
+        print("\n  More waiting. Run it again.")
     return 0
 
 
