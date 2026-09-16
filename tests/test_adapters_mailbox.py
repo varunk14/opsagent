@@ -24,27 +24,7 @@ from app.adapters.mailbox import (
     unread_messages,
 )
 from app.contracts import Channel
-
-
-def an_email(
-    *,
-    sender: str = "priya@example.com",
-    subject: str | None = "Charged twice for order #4821",
-    body: str = "Hi, I think I was charged twice for order #4821.",
-    message_id: str | None = "<abc123@example.com>",
-    date: str = "Tue, 15 Sep 2026 09:15:00 +0000",
-) -> bytes:
-    """One plain-text email, as bytes off the wire."""
-    message = EmailMessage()
-    message["From"] = sender
-    if subject is not None:
-        message["Subject"] = subject
-    if message_id is not None:
-        message["Message-ID"] = message_id
-    message["Date"] = date
-    message.set_content(body)
-    return message.as_bytes()
-
+from tests.fakes import FakeMailbox, an_email
 
 # --- reading one ---------------------------------------------------------------------------------
 
@@ -243,34 +223,6 @@ def test_a_subject_in_another_charset_is_decoded_not_mangled():
 # --- the mailbox ---------------------------------------------------------------------------------
 
 
-class FakeMailbox:
-    """imaplib's shape, as much of it as the adapter uses."""
-
-    def __init__(self, messages: dict[bytes, bytes], *, seen: list[bytes] | None = None) -> None:
-        self.messages = messages
-        self.seen = seen if seen is not None else []
-        self.selected: str | None = None
-        self.logged_out = False
-
-    def select(self, mailbox: str):
-        self.selected = mailbox
-        return "OK", [str(len(self.messages)).encode()]
-
-    def search(self, charset, *criteria):
-        return "OK", [b" ".join(self.messages)]
-
-    def fetch(self, number: bytes, parts: str):
-        return "OK", [(b"", self.messages[number])]
-
-    def store(self, number: bytes, command: str, flags: str):
-        self.seen.append(number)
-        return "OK", [b""]
-
-    def logout(self):
-        self.logged_out = True
-        return "BYE", [b""]
-
-
 def test_every_unread_message_is_offered_with_the_number_that_marks_it():
     """
     Reading does not mark anything read. That is the whole point of the split.
@@ -283,7 +235,7 @@ def test_every_unread_message_is_offered_with_the_number_that_marks_it():
         {b"1": an_email(message_id="<one@example.com>"), b"2": an_email(message_id="<two@example.com>")}
     )
 
-    found = list(unread_messages(mailbox))
+    found = list(unread_messages(mailbox).messages)
 
     assert [item.message.external_id for item in found] == ["one@example.com", "two@example.com"]
     assert [item.number for item in found] == [b"1", b"2"]
@@ -301,7 +253,7 @@ def test_a_message_that_cannot_be_read_is_handed_back_as_a_refusal():
     """
     mailbox = FakeMailbox({b"1": b"not an email at all", b"2": an_email(message_id="<good@example.com>")})
 
-    found = list(unread_messages(mailbox))
+    found = list(unread_messages(mailbox).messages)
 
     assert len(found) == 2
     assert found[0].message is None
@@ -315,7 +267,7 @@ def test_one_unreadable_message_does_not_stop_the_others():
     """A mailbox is not a file: one malformed message must not block every message behind it."""
     mailbox = FakeMailbox({b"1": b"not an email at all", b"2": an_email(message_id="<good@example.com>")})
 
-    readable = [item.message.external_id for item in unread_messages(mailbox) if item.message]
+    readable = [item.message.external_id for item in unread_messages(mailbox).messages if item.message]
 
     assert readable == ["good@example.com"]
 
@@ -340,10 +292,90 @@ def test_marking_a_message_read_says_whether_it_worked(caplog):
     assert "NO" in caplog.text
 
 
+def test_a_connection_that_drops_while_marking_is_reported_not_raised(caplog):
+    """
+    By the time anything is marked, the runs are committed. An exception here is not ours to throw.
+
+    Let out, it would abandon the rest of the marking loop -- every message after this one left
+    unread although its run exists -- and take the pass's summary with it, so the caller could not
+    even tell what had been done. Reported instead: the flag did not stick, the next pass sees the
+    message again, and intake recognises it.
+    """
+
+    class DropsTheConnection(FakeMailbox):
+        def store(self, number: bytes, command: str, flags: str):
+            raise OSError("connection reset by peer")
+
+    assert mark_read(DropsTheConnection({b"1": an_email()}), b"1") is False
+    assert "OSError" in caplog.text
+
+
 def test_only_so_many_are_taken_from_one_poll():
     """A mailbox with ten thousand unread messages must not become ten thousand runs at once."""
     mailbox = FakeMailbox(
         {str(n).encode(): an_email(message_id=f"<{n}@example.com>") for n in range(MAX_FETCHED + 10)}
     )
 
-    assert len(list(unread_messages(mailbox))) == MAX_FETCHED
+    assert len(list(unread_messages(mailbox).messages)) == MAX_FETCHED
+
+
+def test_how_many_were_waiting_is_reported_not_inferred():
+    """
+    The count comes from what the server listed, not from what we managed to read.
+
+    Inferring it -- "we handled MAX_FETCHED, so there is probably more" -- is wrong in both
+    directions. A mailbox holding exactly MAX_FETCHED would report a backlog it does not have, and
+    one message that fails to fetch would drop the tally below the cap and report a drained mailbox
+    while a real backlog sat behind it. The second is the one that matters: it tells whoever is
+    scheduling the next pass to stop.
+    """
+    exactly = FakeMailbox(
+        {str(n).encode(): an_email(message_id=f"<{n}@example.com>") for n in range(MAX_FETCHED)}
+    )
+    more = FakeMailbox(
+        {str(n).encode(): an_email(message_id=f"<{n}@example.com>") for n in range(MAX_FETCHED + 1)}
+    )
+
+    assert unread_messages(exactly).waiting == MAX_FETCHED
+    assert unread_messages(more).waiting == MAX_FETCHED + 1
+
+
+def test_a_message_the_server_will_not_produce_does_not_hide_the_backlog():
+    """The failure the count must survive: listed, then not delivered."""
+
+    class ListsMoreThanItWillGive(FakeMailbox):
+        def fetch(self, number: bytes, parts: str):
+            if number == b"1":
+                return "NO", [b"gone"]
+            return super().fetch(number, parts)
+
+    mailbox = ListsMoreThanItWillGive(
+        {str(n).encode(): an_email(message_id=f"<{n}@example.com>") for n in range(MAX_FETCHED + 5)}
+    )
+    unread = unread_messages(mailbox)
+    read = list(unread.messages)
+
+    assert len(read) < MAX_FETCHED, "one was listed and never delivered"
+    assert unread.waiting == MAX_FETCHED + 5, "the backlog is what the server said, not what we got"
+
+
+def test_a_message_number_that_is_not_a_number_is_ignored():
+    """
+    Numbers come from the server, and they are put straight back into the next command.
+
+    imaplib strips control characters before sending, so this is a second lock on a door that is
+    already locked -- but the door is the only thing standing between a hostile server's response
+    and our outgoing command line, and it belongs to somebody else's library.
+    """
+
+    class AnswersWithNonsense(FakeMailbox):
+        def search(self, charset, *criteria):
+            return "OK", [b"1 not-a-number 2"]
+
+    mailbox = AnswersWithNonsense(
+        {b"1": an_email(message_id="<one@example.com>"), b"2": an_email(message_id="<two@example.com>")}
+    )
+
+    found = [item.message.external_id for item in unread_messages(mailbox).messages if item.message]
+
+    assert found == ["one@example.com", "two@example.com"]

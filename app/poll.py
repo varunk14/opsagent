@@ -168,8 +168,10 @@ def poll_mailbox(connection: psycopg.Connection, mailbox: Mailbox) -> PollSummar
     accepted = duplicates = collisions = refused = 0
     handled: list[bytes] = []
 
+    unread = unread_messages(mailbox)
+
     with connection.transaction():
-        for item in unread_messages(mailbox):
+        for item in unread.messages:
             if item.message is None:
                 quarantine_refusal(connection, item)
                 refused += 1
@@ -194,7 +196,10 @@ def poll_mailbox(connection: psycopg.Connection, mailbox: Mailbox) -> PollSummar
         duplicates=duplicates,
         collisions=collisions,
         refused=refused,
-        more_waiting=len(handled) >= MAX_FETCHED,
+        # What the server listed, not what came back. A message that was listed and then not
+        # delivered is still waiting, and counting only what we read would report a drained mailbox
+        # with a backlog sitting behind it.
+        more_waiting=unread.waiting > MAX_FETCHED,
     )
 
 

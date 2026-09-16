@@ -11,6 +11,7 @@ library's `email` package, and a sibling of that name would shadow it.
 
 import imaplib
 import logging
+import ssl
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
@@ -261,18 +262,51 @@ def open_mailbox(settings: MailboxSettings, connect: Callable[..., Any] = imapli
     servers and put the app password on the network in the clear, and nothing about the poller's
     behaviour would look the slightest bit different -- which is exactly why it is not offered.
 
+    The ssl_context is passed explicitly, and that is not decoration. `imaplib.IMAP4_SSL(host, port)`
+    with no context falls back to `ssl._create_stdlib_context()`, which in CPython is an alias for
+    `_create_unverified_context`: CERT_NONE, check_hostname off. Encrypted, and to nobody in
+    particular -- anyone on the path can offer a self-signed certificate, be believed, and be handed
+    the app password. Encryption without authentication ends up where plaintext does, just with a
+    more convincing name.
+
     A failure is re-raised naming the mailbox and never the secret. The moment a login is rejected
     is the moment the obvious implementation echoes back what it tried.
     """
+    failed_with: str | None = None
     try:
-        mailbox = connect(settings.host, settings.port)
+        mailbox = connect(settings.host, settings.port, ssl_context=ssl.create_default_context())
         mailbox.login(settings.user, settings.password)
     except (OSError, imaplib.IMAP4.error) as exc:
-        raise ValueError(f"could not open {settings.user} at {settings.host}: {type(exc).__name__}") from None
+        # Only the type name is kept. imaplib builds its login error out of the server's own reply
+        # text, and the server is the one party that has already been sent the password -- a hostile
+        # one can simply echo it back.
+        failed_with = type(exc).__name__
+
+    # Raised out here, after the handler, and that placement is the point. Raising inside it would
+    # attach the original as __context__ no matter what: `from None` only suppresses the chain when
+    # a traceback is *printed*, it does not clear the link, and anything that walks it -- a crash
+    # reporter, a debugger -- would read the server's text back out. Outside the handler there is no
+    # active exception left to attach.
+    if failed_with is not None:
+        raise ValueError(f"could not open {settings.user} at {settings.host}: {failed_with}")
     return mailbox
 
 
-def unread_messages(mailbox: Mailbox) -> Iterator[Fetched]:
+@dataclass(frozen=True)
+class Unread:
+    """
+    What one pass found: how many the server said were waiting, and the ones it will read.
+
+    `waiting` counts what was listed, not what was read, and the two are different numbers whenever
+    a message is listed and then not delivered. Reporting the second as though it were the first is
+    how a backlog gets hidden -- see the docstring on `unread_messages`.
+    """
+
+    waiting: int
+    messages: Iterator[Fetched]
+
+
+def unread_messages(mailbox: Mailbox) -> Unread:
     """
     Yield every unread message in INBOX, up to MAX_FETCHED. Marks nothing read.
 
@@ -288,6 +322,11 @@ def unread_messages(mailbox: Mailbox) -> Iterator[Fetched]:
 
     A message that cannot be read comes back as a refusal rather than being skipped. One unreadable
     message must not block the rest -- a mailbox is not a file, and whoever is behind it is waiting.
+
+    `waiting` is the count the server gave, not the count we managed to read. Those differ exactly
+    when a message is listed and then not delivered, and the difference matters in the wrong
+    direction: inferring the backlog from what came back would say "nothing left" while a real one
+    sat behind the message that failed, and whoever schedules the next pass would believe it.
     """
     status, _ = mailbox.select("INBOX")
     if status != "OK":
@@ -297,11 +336,17 @@ def unread_messages(mailbox: Mailbox) -> Iterator[Fetched]:
     if status != "OK":
         raise ValueError(f"the mailbox could not be searched: {status}")
 
-    for number in _numbers(data)[:MAX_FETCHED]:
+    numbers = _numbers(data)
+    return Unread(waiting=len(numbers), messages=_read(mailbox, numbers[:MAX_FETCHED]))
+
+
+def _read(mailbox: Mailbox, numbers: list[bytes]) -> Iterator[Fetched]:
+    """The reading half of `unread_messages`, separated so the count is known before it starts."""
+    for number in numbers:
         raw = _fetch(mailbox, number)
         if raw is None:
             # The server offered the number and then would not produce the message. Nothing is
-            # marked, so the next poll asks again.
+            # marked, so the next poll asks again -- and `waiting` still counts it.
             log.warning("message %r was listed but could not be fetched", number)
             continue
 
@@ -327,7 +372,15 @@ def mark_read(mailbox: Mailbox, number: bytes) -> bool:
     failure and a mailbox that never accepts a flag -- quietly spending every slot of every poll on
     the same message -- look identical from here, and only the second one needs a person.
     """
-    status, _ = mailbox.store(number, "+FLAGS", "\\Seen")
+    try:
+        status, _ = mailbox.store(number, "+FLAGS", "\\Seen")
+    except (OSError, imaplib.IMAP4.error) as exc:
+        # Caught rather than raised, because by here the runs are committed. Letting a dropped
+        # connection out would abandon the rest of the marking loop -- every message after this one
+        # left unread despite its run existing -- and lose the pass's summary on the way out.
+        log.warning("could not mark message %r read (%s); it will be offered again", number, type(exc).__name__)
+        return False
+
     if status != "OK":
         log.warning("could not mark message %r read (%s); it will be offered again", number, status)
         return False
@@ -335,10 +388,16 @@ def mark_read(mailbox: Mailbox, number: bytes) -> bool:
 
 
 def _numbers(data: Any) -> list[bytes]:
-    """The message numbers out of a search response, which arrives as one space-separated line."""
+    """
+    The message numbers out of a search response, which arrives as one space-separated line.
+
+    Anything that is not a number is dropped. These go straight back out in the next command, so
+    they are the server's input to our command line; imaplib strips control characters before
+    sending, which already closes the door, but the door belongs to somebody else's library.
+    """
     if not data or not isinstance(data[0], bytes):
         return []
-    return data[0].split()
+    return [number for number in data[0].split() if number.isdigit()]
 
 
 def _fetch(mailbox: Mailbox, number: bytes) -> bytes | None:

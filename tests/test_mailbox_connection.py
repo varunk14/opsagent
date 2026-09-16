@@ -11,6 +11,8 @@ once into a .env file that is never committed, and everything here exists so tha
 turn up in a log line, a traceback, or a repr in someone's terminal.
 """
 
+import ssl
+
 import pytest
 
 from app.adapters.mailbox import (
@@ -35,9 +37,10 @@ COMPLETE = {
 class FakeIMAP:
     """imaplib.IMAP4_SSL's shape as far as opening a connection uses it."""
 
-    def __init__(self, host: str, port: int) -> None:
+    def __init__(self, host: str, port: int, ssl_context=None) -> None:
         self.host = host
         self.port = port
+        self.ssl_context = ssl_context
         self.logged_in_as: tuple[str, str] | None = None
 
     def login(self, user: str, password: str):
@@ -136,20 +139,60 @@ def test_the_connection_goes_to_the_host_and_port_configured():
     assert opened.logged_in_as == ("support@example.com", SECRET)
 
 
-def test_the_default_connection_is_an_encrypted_one():
+def test_the_connection_checks_who_it_is_talking_to():
     """
-    Pinned because the failure is silent.
+    Encrypted is not the same as authenticated, and imaplib's default is the first without the
+    second.
 
-    Plain IMAP4 would work against most servers and send the app password over the network in the
-    clear, and nothing in the behaviour of the poller would look any different. There is
-    deliberately no setting that turns this off.
+    `imaplib.IMAP4_SSL(host, port)` with no ssl_context falls back to `ssl._create_stdlib_context()`
+    -- which in CPython is literally an alias for `_create_unverified_context`: verify_mode
+    CERT_NONE, check_hostname False. The bytes are encrypted and the certificate is nobody's. Anyone
+    on the path can present a self-signed certificate, be believed, and take the app password.
+
+    So the context is passed explicitly, and this asserts what it is rather than which class was
+    used. An earlier version of this test checked `open_mailbox`'s default was IMAP4_SSL and passed
+    happily while the connection verified nothing.
     """
-    import imaplib
+    opened = open_mailbox(settings_from_env(COMPLETE), connect=FakeIMAP)
 
-    from app.adapters.mailbox import open_mailbox as opener
+    assert opened.ssl_context is not None, "a context must be passed, not left to imaplib's default"
+    assert opened.ssl_context.verify_mode == ssl.CERT_REQUIRED
+    assert opened.ssl_context.check_hostname is True
 
-    assert opener.__defaults__ == (imaplib.IMAP4_SSL,)
-    assert issubclass(imaplib.IMAP4_SSL, imaplib.IMAP4)
+
+def test_imaplibs_own_default_is_the_unverified_one():
+    """
+    The reason the test above exists, pinned against the standard library itself.
+
+    If a future Python makes the default context a verifying one, this fails and the explicit
+    context can be reconsidered. Until then it is documenting why we do not rely on it.
+    """
+    assert ssl._create_stdlib_context().verify_mode == ssl.CERT_NONE
+    assert ssl._create_stdlib_context().check_hostname is False
+
+
+def test_nothing_of_the_failure_is_kept_where_the_password_could_be():
+    """
+    `raise ... from None` suppresses the chained exception when a traceback is printed, but does
+    not clear it: `__context__` still holds the original.
+
+    That matters because imaplib builds its login error out of the server's own reply text, and the
+    server is the one party that has already been sent the password. A hostile server can echo it
+    back, and anything that walks `__context__` -- a crash reporter, a debugger, a future error
+    handler -- would read it out. Cheaper to drop the link than to rely on everyone downstream
+    respecting a suppression flag.
+    """
+
+    class EchoesThePasswordBack(FakeIMAP):
+        def login(self, user: str, password: str):
+            raise OSError(f"NO authentication failed for {password}")
+
+    with pytest.raises(ValueError) as refused:
+        open_mailbox(settings_from_env(COMPLETE), connect=EchoesThePasswordBack)
+
+    assert refused.value.__context__ is None
+    assert refused.value.__cause__ is None
+    assert SECRET not in str(refused.value)
 
 
 def test_settings_carry_no_default_host():

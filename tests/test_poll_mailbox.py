@@ -16,7 +16,7 @@ Two orderings are load-bearing, and both are tested by making the pass fail on p
 import psycopg
 import pytest
 
-from app.adapters.mailbox import PREVIEW_CHARS
+from app.adapters.mailbox import MAX_FETCHED, PREVIEW_CHARS
 from app.poll import poll_mailbox
 from tests.fakes import FakeMailbox, an_email
 
@@ -239,6 +239,48 @@ def test_a_refusal_is_not_polled_forever(fresh_database):
 
     assert second.refused == 1
     assert len(letters_in(fresh_database)) == 1
+
+
+# --- what the summary says is left ------------------------------------------------------------
+
+
+def test_a_backlog_is_reported_even_when_a_message_would_not_come_back(fresh_database):
+    """
+    The summary's job is to tell whoever schedules the next pass whether to bother.
+
+    Counting what came back rather than what the server listed gets this wrong in the direction
+    that hurts: one message listed and then not delivered drops the tally below the cap, and a
+    mailbox with hundreds still queued reports itself drained.
+    """
+
+    class WillNotProduceTheFirst(FakeMailbox):
+        def fetch(self, number: bytes, parts: str):
+            if number == b"0":
+                return "NO", [b"gone"]
+            return super().fetch(number, parts)
+
+    backlog = WillNotProduceTheFirst(
+        {str(n).encode(): an_email(message_id=f"<{n}@example.com>") for n in range(MAX_FETCHED + 5)}
+    )
+
+    with psycopg.connect(fresh_database) as connection:
+        summary = poll_mailbox(connection, backlog)
+
+    assert summary.accepted < MAX_FETCHED, "one of them was never delivered"
+    assert summary.more_waiting is True
+
+
+def test_a_mailbox_that_is_exactly_full_is_not_reported_as_having_more(fresh_database):
+    """The other direction: a cap reached is not the same as a queue behind it."""
+    exactly = FakeMailbox(
+        {str(n).encode(): an_email(message_id=f"<{n}@example.com>") for n in range(MAX_FETCHED)}
+    )
+
+    with psycopg.connect(fresh_database) as connection:
+        summary = poll_mailbox(connection, exactly)
+
+    assert summary.accepted == MAX_FETCHED
+    assert summary.more_waiting is False
 
 
 # --- the transaction ------------------------------------------------------------------------
