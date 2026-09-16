@@ -104,7 +104,11 @@ TOOLS: tuple[ToolDescription, ...] = (
                         "Whole paise, never rupees and never a decimal. "
                         # Not 3,600: that is exactly what order 4821 was charged, and an example
                         # that matches a real ledger entry is one the model can copy into a refund.
-                        "Rs 1,234 is 123400."
+                        # Not 1,234 either, which was tried: it matches nothing, and the model then
+                        # read "Rs 5,000" as 50000 in two duplicate charges -- ten times too small.
+                        # Measured over the 30 duplicate-charge cases: 3,600 and 2,500 both 30/30,
+                        # 1,234 28/30. The example has to look like the amounts people write.
+                        "Rs 2,500 is 250000."
                     ),
                 },
                 "reason": {

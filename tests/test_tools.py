@@ -95,10 +95,16 @@ def test_the_prompt_says_once_which_arguments_are_required():
 
 
 def test_the_tool_list_keeps_the_hints_the_model_cannot_guess():
-    """Paise against rupees is a factor of a hundred, and nothing in a message says which one."""
+    """
+    Paise against rupees is a factor of a hundred, and nothing in a message says which one.
+
+    The example's shape matters as much as its presence. "Rs 1,234 is 123400" was tried and the
+    model read "Rs 5,000" as 50000 in two cases; a round figure like the amounts customers write
+    got all 30 duplicate-charge cases right.
+    """
     described = describe_tools()
 
-    assert "123400" in described and "paise" in described.lower()
+    assert "250000" in described and "paise" in described.lower()
 
 
 def test_the_tool_list_names_no_number_the_model_could_copy_into_a_real_case():

@@ -11,7 +11,7 @@ Tools. Every argument is required unless it says optional:
 
 - issue_refund: Pay money back to the customer. This moves real money and cannot be undone. Only propose it when an order lookup shows the charge and a policy passage allows it.
     order_id (string): The order number you looked up, exactly as the customer wrote it
-    amount_paise (integer): Whole paise, never rupees and never a decimal. Rs 1,234 is 123400.
+    amount_paise (integer): Whole paise, never rupees and never a decimal. Rs 2,500 is 250000.
     reason (string): Why this refund is owed
 
 - escalate_to_human: Hand the case to a person and stop. Use this whenever you are not sure, when the policy does not cover the situation, or when the customer is asking for something no tool here can do. Escalating is a correct outcome, not a failure.
