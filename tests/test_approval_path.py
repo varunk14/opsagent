@@ -338,14 +338,26 @@ def test_a_refund_on_someone_elses_order_is_refused_not_paid(fresh_database):
     """
     Order 3310 is Dev's. Priya's run looked up 4821 and asks to refund 3310 instead.
 
-    Two things refuse it now, and the earlier one wins: nothing this run looked up says 3310 was
-    charged at all, so the refund never reaches the ledger. The executor's own refusal -- an order
-    another customer placed looks exactly like no order -- is unchanged and tested where it lives,
-    in tests/test_executor.py. A refusal on the conditions never becomes an approval, so there is
-    no path by which a person can wave one of these past the conditions.
+    Her message names 3310 as well as 4821, on purpose. A refund on an order the customer never
+    wrote is now refused before anything else looks at it, and without 3310 in the message that
+    refusal would win and this test would stay green while no longer reaching the check it is named
+    for. With it, what refuses is the one this test is about: nothing this run looked up says 3310
+    was charged at all, so the refund never reaches the ledger. The executor's own refusal -- an
+    order another customer placed looks exactly like no order -- is tested where it lives, in
+    tests/test_executor.py. A refusal on the conditions never becomes an approval, so there is no
+    path by which a person can wave one of these past the conditions.
     """
     ledger(fresh_database)
-    queue(fresh_database)
+    message = IncomingMessage(
+        channel=Channel.EMAIL,
+        external_id="4821-and-3310",
+        sender="priya@example.com",
+        subject="Charged twice for order #4821",
+        body="Hi, I think I was charged twice for order #4821. My friend's order 3310 too.",
+        received_at=datetime(2026, 9, 13, 9, 15, tzinfo=UTC),
+    )
+    with psycopg.connect(fresh_database) as connection:
+        run_id = str(accept(connection, message).run_id)
     model = ScriptedModel(
         classify=CLASSIFIED_DUPLICATE,
         extract=EXTRACTED_4821,
@@ -357,6 +369,9 @@ def test_a_refund_on_someone_elses_order_is_refused_not_paid(fresh_database):
     assert outcome.status == "waiting_approval"
     assert outcome.failure == "plan: the conditions for paying it were not met"
     assert refunds(fresh_database) == []
+    with psycopg.connect(fresh_database) as connection:
+        state = connection.execute("SELECT state FROM runs WHERE id = %s", (run_id,)).fetchone()[0]
+    assert "did not mention" not in json.dumps(state), "the conditions refused it, not the mention check"
 
 
 # --- after a person decides -----------------------------------------------------------------
