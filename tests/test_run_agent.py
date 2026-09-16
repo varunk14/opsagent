@@ -10,6 +10,7 @@ a worker that dies loses at most the step in flight.
 These tests commit, so each one gets its own scratch database.
 """
 
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -24,7 +25,7 @@ from app.graph.prompts import run_prompt_version
 from app.intake import accept
 from app.llm import ModelUnavailable, Reply
 from app.retrieval import PolicySearchUnavailable
-from app.run_agent import LostClaim, claim_next, work_next
+from app.run_agent import ALREADY_SHOWN, LostClaim, claim_next, work_next
 from app.seed import load_ledger
 from tests.fakes import (
     CLASSIFIED_DUPLICATE,
@@ -727,3 +728,91 @@ def test_outage_totals_are_folded_in_and_cleared_once_a_tick_records_its_own(fre
     assert "billing" not in state
     agent = state["agent"]
     assert (agent["prompt_tokens"], agent["completion_tokens"], agent["model_calls"]) == (50, 25, 5)
+
+
+# --- a repeated lookup is asked once more before anyone is woken ------------------------------
+
+
+def repeating_model(*after_the_repeat: str) -> ScriptedModel:
+    """
+    Look 4821 up, ask for the same lookup again, then whatever `after_the_repeat` says.
+
+    The planner asking for a result it has already been shown is the single largest cause of
+    incomplete runs. It is not a reason to wake a person yet: the run is asked once more with
+    that result pointed at, and only a second repeat hands the case over.
+    """
+    return ScriptedModel(
+        classify=CLASSIFIED_DUPLICATE,
+        extract=EXTRACTED_4821,
+        plan=[PROPOSED_LOOKUP, PROPOSED_LOOKUP, *after_the_repeat],
+    )
+
+
+def test_a_repeated_lookup_is_asked_again_with_its_result_pointed_at(fresh_database):
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    model = repeating_model(proposed_refund(360_000))
+
+    with psycopg.connect(fresh_database) as connection:
+        work_next(connection, graph_of(model))  # the lookup
+        outcome = work_next(connection, graph_of(model))  # the repeat, then the second ask
+
+    assert outcome.status == "done"
+    assert outcome.failure is None
+    asked = plan_prompts(model)
+    assert ALREADY_SHOWN in asked[-1], "the repeated result is pointed at in the second ask"
+    assert ALREADY_SHOWN not in asked[0], "and not in an ask that repeated nothing"
+
+
+def test_the_second_ask_sees_the_result_it_asked_for_again(fresh_database):
+    ledger(fresh_database)
+    queue(fresh_database)
+    model = repeating_model(proposed_refund(360_000))
+
+    with psycopg.connect(fresh_database) as connection:
+        work_next(connection, graph_of(model))
+        work_next(connection, graph_of(model))
+
+    second = plan_prompts(model)[-1]
+    assert '"charges_paise"' in second and "360000" in second
+
+
+def test_repeating_a_second_time_hands_the_case_over(fresh_database):
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    model = repeating_model(PROPOSED_LOOKUP)
+
+    with psycopg.connect(fresh_database) as connection:
+        work_next(connection, graph_of(model))
+        outcome = work_next(connection, graph_of(model))
+
+    assert outcome.status == "waiting_approval"
+    assert outcome.failure == "plan: repeated an earlier step"
+    assert count(fresh_database, "refunds") == 0
+
+
+def test_both_asks_are_charged_for(fresh_database):
+    """The run is asked twice, so it pays for two plan calls: nothing is charged for free."""
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    model = repeating_model(proposed_refund(360_000))
+
+    with psycopg.connect(fresh_database) as connection:
+        work_next(connection, graph_of(model))
+        work_next(connection, graph_of(model))
+
+    agent = row(fresh_database, run_id)["state"]["agent"]
+    assert agent["model_calls"] == 5, "classify, extract and plan, then plan and plan again"
+
+
+def test_the_marker_is_never_written_into_what_the_run_stores(fresh_database):
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    model = repeating_model(proposed_refund(360_000))
+
+    with psycopg.connect(fresh_database) as connection:
+        work_next(connection, graph_of(model))
+        work_next(connection, graph_of(model))
+
+    steps = row(fresh_database, run_id)["state"]["agent"]["steps"]
+    assert all(ALREADY_SHOWN not in json.dumps(step) for step in steps)
