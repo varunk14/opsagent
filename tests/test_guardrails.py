@@ -282,15 +282,31 @@ def test_a_refund_proposed_before_any_lookup_is_not_owed_by_anything():
     assert "looked up" in (verdict.reason or "")
 
 
-def test_part_of_a_confirmed_duplicate_is_still_owed():
+def test_a_refund_for_less_than_the_duplicate_is_a_persons_decision():
     """
-    The amount is deliberately not a condition. The ledger already refuses a refund larger
-    than the order was charged, the limit bounds what runs without a person, and a refund
-    split into parts is judged as the total it adds up to -- so requiring the amount to equal
-    a charge exactly would refuse legitimate partial refunds while adding no safety.
+    A duplicate charge is owed back at the amount it was charged. Something smaller may well be
+    right -- a partial refund can be exactly what a case needs -- but nothing the run established
+    says what that smaller number should be, so a person chooses it rather than the model.
     """
+    verdict = justified(refund(90_000), duplicate(360_000, 360_000))
 
-    assert justified(refund(90_000), duplicate(360_000, 360_000)).runs is True
+    assert verdict.runs is False
+    assert "not one of the charges" in (verdict.reason or "")
+
+
+def test_a_refund_for_more_than_was_ever_charged_is_refused_here_too():
+    """The ledger would refuse it as well. Refusing here means it never reaches the ledger."""
+    assert justified(refund(400_000), duplicate(360_000, 360_000)).runs is False
+
+
+def test_the_duplicate_is_owed_back_at_what_it_was_charged():
+    assert justified(refund(360_000), duplicate(360_000, 360_000)).runs is True
+
+
+def test_the_amount_must_match_the_charge_that_was_duplicated():
+    """Two amounts, one of them repeated: the repeated one is the duplicate, not the other."""
+    assert justified(refund(12_000), duplicate(12_000, 360_000, 360_000)).runs is False
+    assert justified(refund(360_000), duplicate(12_000, 360_000, 360_000)).runs is True
 
 
 def test_the_charges_are_read_from_the_lookup_of_that_order_only():
@@ -340,7 +356,7 @@ def test_an_order_charged_twice_for_different_things_holds_no_duplicate():
 
 
 def test_a_repeated_charge_among_others_is_still_a_duplicate():
-    assert justified(refund(90_000), duplicate(12_000, 360_000, 360_000)).runs is True
+    assert justified(refund(360_000), duplicate(12_000, 360_000, 360_000)).runs is True
 
 
 def test_an_order_id_is_matched_exactly_and_never_normalised():

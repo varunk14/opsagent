@@ -15,6 +15,7 @@ one the ledger refuses goes to a person rather than being tried again.
 These tests commit, so each one gets its own scratch database.
 """
 
+import json
 import threading
 import time
 from datetime import UTC, datetime
@@ -53,6 +54,32 @@ from tests.test_run_agent import (
 )
 
 pytestmark = pytest.mark.db
+
+
+def duplicate_model(order_id: str, amount_paise: int, confidence: str = "0.9") -> ScriptedModel:
+    """Look an order charged twice up, then propose refunding one of those two charges."""
+    return ScriptedModel(
+        classify=CLASSIFIED_DUPLICATE,
+        extract=json.dumps({"order_id": order_id, "amount_paise": None, "reason": "charged twice"}),
+        plan=[
+            json.dumps({"tool": "get_order", "args": {"order_id": order_id}, "confidence": 0.8, "reasoning": "confirm"}),
+            proposed_refund(amount_paise, confidence, order_id=order_id),
+        ],
+    )
+
+
+def queue_about(dsn: str, order_id: str, external_id: str) -> str:
+    """A run from the customer who placed `order_id`, saying they were charged twice for it."""
+    message = IncomingMessage(
+        channel=Channel.EMAIL,
+        external_id=external_id,
+        sender="priya@example.com",
+        subject=f"Charged twice for order #{order_id}",
+        body=f"Hi, I think I was charged twice for order #{order_id} last Tuesday.",
+        received_at=datetime(2026, 9, 13, 9, 15, tzinfo=UTC),
+    )
+    with psycopg.connect(dsn) as connection:
+        return str(accept(connection, message).run_id)
 
 
 class MustNotBeAsked:
@@ -129,10 +156,10 @@ def test_a_refund_under_the_limit_is_paid_once_and_the_run_is_done(fresh_databas
     ledger(fresh_database)
     run_id = queue(fresh_database)
 
-    outcome = work(fresh_database, refund_model(90_000))
+    outcome = work(fresh_database, refund_model(360_000))
 
     assert (outcome.status, outcome.tool, outcome.steps, outcome.failure) == ("done", "issue_refund", 2, None)
-    assert refunds(fresh_database) == [("4821", 90_000, run_id)]
+    assert refunds(fresh_database) == [("4821", 360_000, run_id)]
     assert approvals_of(fresh_database, run_id) == []
     assert keys(fresh_database, run_id) == [f"{run_id}:step_1:get_order", f"{run_id}:step_2:issue_refund"]
     stored = row(fresh_database, run_id)
@@ -283,16 +310,26 @@ def test_the_limit_in_force_when_the_worker_acts_is_the_one_applied(fresh_databa
 
 
 def test_a_refund_the_ledger_refuses_goes_to_a_person(fresh_database):
-    """Rs 8,000 against Rs 7,200 charged: allowed by a raised limit, refused by the ledger cap."""
-    ledger(fresh_database)
-    run_id = queue(fresh_database)
-    limit(fresh_database, 1_000_000)
+    """
+    A third refund of a duplicate the order was only ever charged twice for.
 
-    outcome = work(fresh_database, refund_model(800_000))
+    An automatic refund must equal a charge that was duplicated, so it can never be larger than
+    the order took in one go -- the only way past the ledger cap is to pay that charge back more
+    times than it was made. Order 4902 was charged Rs 900 twice; the third Rs 900 is more than
+    the order ever took, and the ledger refuses it however high the limit is set.
+    """
+    ledger(fresh_database)
+    limit(fresh_database, 1_000_000)
+    for paid in ("first", "second"):
+        queue_about(fresh_database, "4902", f"cap-{paid}")
+        work(fresh_database, duplicate_model("4902", 90_000))
+    run_id = queue_about(fresh_database, "4902", "cap-third")
+
+    outcome = work(fresh_database, duplicate_model("4902", 90_000))
 
     assert (outcome.status, outcome.tool) == ("waiting_approval", "issue_refund")
     assert "the ledger refused the refund" in outcome.failure
-    assert refunds(fresh_database) == []
+    assert [amount for _, amount, _ in refunds(fresh_database)] == [90_000, 90_000], "the first two stand"
     assert row(fresh_database, run_id)["state"]["agent"]["steps"][1]["result"]["refunded"] is False
     assert work(fresh_database, MustNotBeAsked()) is None, "a refused refund is not retried"
 

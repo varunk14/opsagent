@@ -29,7 +29,14 @@ from tests.fakes import (
     ScriptedModel,
     proposed_refund,
 )
-from tests.test_approval_path import approvals_of, refund_model, refunds, work
+from tests.test_approval_path import (
+    approvals_of,
+    duplicate_model,
+    queue_about,
+    refund_model,
+    refunds,
+    work,
+)
 from tests.test_run_agent import ledger, queue
 
 pytestmark = pytest.mark.db
@@ -84,33 +91,35 @@ def test_a_rs_7200_refund_pauses_for_approval(fresh_database):
 
 
 def test_a_rs_900_refund_does_not(fresh_database):
+    """Order 4902 was charged Rs 900 twice, so Rs 900 is what its duplicate owes back."""
     ledger(fresh_database)
-    run_id = queue(fresh_database)
+    run_id = queue_about(fresh_database, "4902", "rs900")
 
-    outcome = work(fresh_database, refund_model(90_000))
+    outcome = work(fresh_database, duplicate_model("4902", 90_000))
 
     assert outcome.status == "done"
     assert approvals_of(fresh_database, run_id) == []
-    assert refunds(fresh_database) == [("4821", 90_000, run_id)]
+    assert refunds(fresh_database) == [("4902", 90_000, run_id)]
 
 
 def test_raising_the_threshold_lets_the_rs_7200_refund_through_without_a_code_change(fresh_database):
+    """Order 4903 was charged Rs 7,200 twice. Only the threshold stands between it and payment."""
     ledger(fresh_database)
-    run_id = queue(fresh_database)
+    run_id = queue_about(fresh_database, "4903", "rs7200")
     change_threshold(fresh_database, limit_paise=1_000_000)
 
-    outcome = work(fresh_database, refund_model(720_000))
+    outcome = work(fresh_database, duplicate_model("4903", 720_000))
 
     assert outcome.status == "done"
-    assert refunds(fresh_database) == [("4821", 720_000, run_id)]
+    assert refunds(fresh_database) == [("4903", 720_000, run_id)]
 
 
 def test_lowering_the_threshold_pauses_the_rs_900_refund_without_a_code_change(fresh_database):
     ledger(fresh_database)
-    run_id = queue(fresh_database)
+    run_id = queue_about(fresh_database, "4902", "rs900-lower")
     change_threshold(fresh_database, limit_paise=50_000)
 
-    outcome = work(fresh_database, refund_model(90_000))
+    outcome = work(fresh_database, duplicate_model("4902", 90_000))
 
     assert outcome.status == "waiting_approval"
     assert [approval["reason"] for approval in approvals_of(fresh_database, run_id)] == [

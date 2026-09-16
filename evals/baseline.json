@@ -31,8 +31,8 @@
     "drift": 0,
     "hallucinated_field": 0,
     "loop": 13,
-    "tool_misuse": 3,
-    "wrong_escalation": 22
+    "tool_misuse": 0,
+    "wrong_escalation": 25
   },
   "false_positive_rate": "0.4615",
   "golden_sha256": "af4048c0885c19e50cfbfbfbee618ed217750d3d09c1741b53e3da61dc69264b",

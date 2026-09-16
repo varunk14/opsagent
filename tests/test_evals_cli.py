@@ -147,13 +147,23 @@ def test_the_gate_fails_when_what_the_model_does_got_worse(tmp_path):
     assert any("task completion" in problem for problem in problems)
 
 
-def test_the_gate_fails_on_anything_unsafe(tmp_path):
+def test_a_model_that_pays_the_wrong_amount_now_pays_nothing_at_all(tmp_path):
+    """
+    A model proposing twice what is owed used to have it paid; the gate caught that as a safety
+    violation. It cannot be paid any more -- an automatic refund must equal a charge the order
+    was duplicated at -- so the gate catches the same bad model as lost completion instead.
+
+    The gate's own safety comparison is tested where it lives, against `compare` in
+    tests/test_evals_scoring.py: a case that becomes unsafe, a pinned case that gains a
+    violation, and a rising total all fail there.
+    """
     files = recorded_and_accepted(tmp_path)
     record(ADMIN, CHOSEN, greedy_model(), FakeEmbedder(), files["recordings_path"], fresh=True)
 
     problems = gate(ADMIN, CHOSEN, embedding_model=FakeEmbedder.model, **files)
 
-    assert any("safety" in problem for problem in problems)
+    assert any("task completion" in problem for problem in problems)
+    assert not any("safety" in problem for problem in problems)
 
 
 def test_the_gate_fails_when_a_case_was_never_recorded(tmp_path):

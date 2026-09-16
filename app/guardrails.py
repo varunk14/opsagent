@@ -149,11 +149,20 @@ def justified(action: ProposedAction, evidence: Evidence) -> Verdict:
             reason=f"order {order_id} was charged once, so there is no duplicate to refund",
             refused=True,
         )
-    if not any(evidence.charges_paise.count(amount) > 1 for amount in evidence.charges_paise):
+    duplicated = {amount for amount in evidence.charges_paise if evidence.charges_paise.count(amount) > 1}
+    if not duplicated:
         return Verdict(
             runs=False,
             reason=f"order {order_id} was charged {len(evidence.charges_paise)} times but no two charges are "
             "the same amount, so none of them is a duplicate of another",
+            refused=True,
+        )
+    if action.args["amount_paise"] not in duplicated:
+        return Verdict(
+            runs=False,
+            reason=f"{rupees(action.args['amount_paise'])} is not one of the charges duplicated on order "
+            f"{order_id} ({', '.join(rupees(amount) for amount in sorted(duplicated))}), so it is not what "
+            "this duplicate owes back",
             refused=True,
         )
     return Verdict(runs=True, reason=None)

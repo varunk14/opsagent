@@ -75,10 +75,15 @@ than in the model's opinion of itself: the message read as a duplicate charge, a
 charged at least twice. Anything else is handed to a person — handed over, not queued for
 approval, because there is no payment the agent can stand behind for someone to approve.
 
-The amount is deliberately not one of those conditions. The ledger already refuses a refund
-larger than the order was charged, the limit bounds what runs without a person, and refunds split
-into parts are judged as the total they add up to — so requiring the amount to equal one charge
-exactly would refuse legitimate partial refunds and add no safety.
+The amount is a condition too: it must equal a charge the order was duplicated at. A duplicate is
+owed back at what it was charged, and nothing the run established says what a smaller number
+should be, so a person chooses that instead of the model. Measured, this cost no completion —
+every golden case that expects a refund expects one of the order's charges — and it removed
+`tool_misuse` entirely, because a refund the ledger would have refused is now refused before it
+ever reaches the ledger. Two consequences worth stating: an automatic refund can no longer exceed
+what the order took, so the ledger's cap is only reachable by paying the same duplicate back more
+times than it was charged; and a prompt telling the model to double every refund can no longer
+get anything paid, only fail to complete.
 
 What that change moved, measured the same way on the same 150 cases: task completion 0.5933 →
 0.7200, safety violations 19 → 0, escalation recall 0.8468 → 1.0000, `wrong_escalation` 41 → 22,
@@ -109,9 +114,9 @@ outage or an expired lock — those are already named by `failure_class` and the
 
 | Category | Cases | What it means | What we would fix |
 |---|---|---|---|
-| `wrong_escalation` | 22 | A person rejected what the agent proposed, or it paid where a person should decide | Decide from policy conditions in code, not from confidence: a duplicate needs two ledger charges; change-of-mind and damaged items go to a person. |
+| `wrong_escalation` | 25 | A person rejected what the agent proposed, or it paid where a person should decide | Decide from policy conditions in code, not from confidence: a duplicate needs two ledger charges; change-of-mind and damaged items go to a person. |
 | `loop` | 13 | The planner repeated a step, spent the whole step budget, or was deferred until a person had to take it | Give the planner a way to decide: when it repeats a lookup whose result is shown, ask once more with that result marked, then hand over. |
-| `tool_misuse` | 3 | A tool that does not run here, arguments the ledger refused, a lookup of an unknown order, a refund for an order never looked up | Check arguments before proposing: a refund must be for an order this run looked up; the ledger already refuses more than was charged. |
+| `tool_misuse` | 0 | A tool that does not run here, arguments the ledger refused, a lookup of an unknown order, a refund for an order never looked up | Check arguments before proposing: a refund must be for an order this run looked up; the ledger already refuses more than was charged. |
 | `hallucinated_field` | 0 | An order id or amount in neither the message, the policy it was shown, nor any tool result | Tighten extraction: an order id or amount must be quoted from the message or a lookup; refuse the proposal otherwise. |
 | `context_overflow` | 0 | The customer's text was too long for the prompt and was cut | Chunk or summarise a long message before the prompt; today anything over the cap is cut. |
 | `drift` | 0 | The same case, the same prompts, a different reply than last time | Pin the model version and the prompt hashes; record again and compare each case against the last accepted baseline. |
@@ -138,6 +143,7 @@ that a change made worse is visible before anything is deployed.
 | 2026-09-15 | `9303535` | 89 / 150 | 0 | 3 | 17 | 0 | 41 | 0 |
 | 2026-09-16 | `cb9dd23` | 108 / 150 | 0 | 3 | 17 | 0 | 22 | 0 |
 | 2026-09-16 | `34ac5fe` | 112 / 150 | 0 | 3 | 13 | 0 | 22 | 0 |
+| 2026-09-16 | `4551a40` | 112 / 150 | 0 | 0 | 13 | 0 | 25 | 0 |
 
 ## The judge
 
