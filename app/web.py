@@ -313,6 +313,16 @@ def create_app(
             },
         )
 
+    @app.get("/")
+    def front_door() -> RedirectResponse:
+        """
+        Every page is on a named path, so the root had nothing and answered a JSON 404.
+
+        A person who types the host and nothing else is the common case, not the odd one, and
+        approvals is what they came for: it is the only page where something is waiting on them.
+        """
+        return RedirectResponse("/approvals")
+
     @app.get("/costs", response_class=HTMLResponse)
     def costs(request: Request) -> Response:
         with connect(dsn) as connection:
