@@ -528,3 +528,27 @@ def test_the_mention_check_says_nothing_about_whose_order_it_is(db):
     stranger = insert_run(db, sender="dev@example.com", body="hello")
 
     assert execute(db, owner, 1, lookup()).result == execute(db, stranger, 1, lookup()).result
+
+
+def test_a_hyphen_beside_the_number_is_punctuation(db):
+    """
+    'order-4821' is how some people write order 4821, and refusing it would be a false refusal.
+
+    The first version counted a hyphen as part of the number, which kept 4821 from matching inside a
+    different id like A-4821 -- a real concern for a ledger with ids like that. This ledger has none:
+    every order id in both ledgers is plain digits. So a hyphen is read as the separator it is here,
+    and the ownership check still stands between a mention and anybody else's order.
+    """
+    insert_order(db)
+    for n, body in enumerate(["order-4821", "ref-4821 please refund", "4821-"], start=1):
+        run_id = insert_run(db, body=body)
+
+        assert execute(db, run_id, n, lookup()).result.get("order_id") == "4821", body
+
+
+def test_digits_typed_in_another_width_are_the_same_number(db):
+    """Full-width digits come from CJK input methods. The model reads them as 4821, and so must this."""
+    insert_order(db)
+    run_id = insert_run(db, body="注文 ４８２１ が二重請求されました")
+
+    assert execute(db, run_id, 1, lookup()).result.get("order_id") == "4821"

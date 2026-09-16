@@ -32,6 +32,7 @@ Only the ledger tools run here. search_policy is the graph's retrieve step.
 """
 
 import re
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -105,15 +106,18 @@ def mentioned(connection: psycopg.Connection, run_id: UUID, order_id: str) -> bo
     model to behave better is a request; this is a check.
 
     Whole numbers only: 48210 contains 4821, and counting it would let a typo reach an order that
-    belongs to someone else. Letters and hyphens are part of an order number, so they bound it too.
-    Checked before ownership, and blind to the ledger, so the answer says nothing about whether the
-    order exists or whose it is.
+    belongs to someone else. A hyphen is not part of the number -- 'order-4821' is a way of writing
+    4821, and every order id in both ledgers is plain digits -- so only letters and digits bound it.
+    The text is NFKC-normalised first, so digits typed full-width by a CJK input method are the same
+    digits the model read. Checked before ownership, and blind to the ledger, so the answer says
+    nothing about whether the order exists or whose it is.
     """
     row = connection.execute(WRITTEN, (run_id,)).fetchone()
     if row is None:
         return False
-    written = f"{row[0]}\n{row[1]}"
-    return re.search(rf"(?<![A-Za-z0-9-]){re.escape(order_id)}(?![A-Za-z0-9-])", written, re.IGNORECASE) is not None
+    written = unicodedata.normalize("NFKC", f"{row[0]}\n{row[1]}")
+    pattern = rf"(?<![A-Za-z0-9]){re.escape(order_id)}(?![A-Za-z0-9])"
+    return re.search(pattern, written, re.IGNORECASE) is not None
 
 
 def unmentioned(order_id: str) -> str:

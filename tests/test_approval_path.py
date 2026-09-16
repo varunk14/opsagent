@@ -623,3 +623,36 @@ def test_a_run_that_refused_nothing_says_so_rather_than_inventing_a_refusal(fres
     work(fresh_database, refund_model(360_000))
 
     assert row(fresh_database, run_id)["state"]["agent"]["refused"] is None
+
+
+def test_a_refund_on_an_order_she_never_mentioned_is_not_put_in_front_of_a_person(fresh_database):
+    """
+    Found by review after the executor learned to refuse an order the customer never wrote.
+
+    Priya writes about 4902. The model looks 4902 up and then proposes Rs 7,200 back on 4903 -- also
+    hers, charged twice, and never mentioned. The executor would refuse to pay it. But the guardrail
+    runs first, and it read and locked 4903, found Rs 7,200 over the limit, and opened an approval:
+    a filled-in refund on an order the customer never named, and one button. Whoever pressed it
+    would have been told afterwards that the ledger refused.
+
+    So the check lives where the decision is made, not only where the money moves. The run is handed
+    over as a case, with nothing to approve.
+    """
+    ledger(fresh_database)
+    run_id = queue_about(fresh_database, "4902", "asked-about-4902")
+    model = ScriptedModel(
+        classify=CLASSIFIED_DUPLICATE,
+        extract=json.dumps({"order_id": "4902", "amount_paise": None, "reason": "charged twice"}),
+        plan=[
+            json.dumps({"tool": "get_order", "args": {"order_id": "4902"}, "confidence": 0.8, "reasoning": "confirm"}),
+            proposed_refund(720_000, "0.9", order_id="4903"),
+        ],
+    )
+
+    work(fresh_database, model)
+
+    assert approvals_of(fresh_database, run_id) == [], "nobody may be asked to approve an order never mentioned"
+    assert refunds(fresh_database) == []
+    with psycopg.connect(fresh_database) as connection:
+        state = connection.execute("SELECT state FROM runs WHERE id = %s", (run_id,)).fetchone()[0]
+    assert "did not mention order 4903" in json.dumps(state)
