@@ -458,3 +458,23 @@ def test_a_ceiling_switched_off_says_so_rather_than_showing_zero(fresh_database)
     page = client_for(fresh_database).get("/guardrails").text
 
     assert "no ceiling" in page.lower()
+
+
+def test_the_front_door_leads_somewhere(fresh_database):
+    """
+    Opening the screen at its root used to answer `{"detail":"Not Found"}`.
+
+    Every page is on a named path, so a person who types the host and nothing else -- which is what
+    a person does -- got a JSON 404 from a tool whose whole job is to be opened in a hurry.
+    """
+    landing = client_for(fresh_database).get("/", follow_redirects=False)
+
+    assert landing.status_code == 307
+    assert landing.headers["location"] == "/approvals"
+
+
+def test_the_front_door_is_the_page_a_person_came_for(fresh_database):
+    page = client_for(fresh_database).get("/", follow_redirects=True)
+
+    assert page.status_code == 200
+    assert "Waiting for a decision" in page.text
