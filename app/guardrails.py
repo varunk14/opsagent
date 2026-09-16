@@ -160,6 +160,27 @@ def evidence_of(intent: Intent | None, steps: Sequence[Mapping[str, Any]], order
     return Evidence(intent=intent, charges_paise=tuple(charges))
 
 
+def not_a_duplicate(evidence: Evidence) -> Verdict | None:
+    """
+    Refuses a refund on an order the run did not read as charged twice. None means it did.
+
+    Kept apart from the rest of `justified` because it is asked in one more place than the others.
+    The ledger conditions decide whether a refund may pay itself; this one decides whether there is
+    a refund to talk about at all, and that question is worth asking even when a person is already
+    going to be asked. Handing a case over and queueing an approval both end with a person, but an
+    approval hands them a filled-in refund and one button, and people approve what is put in front
+    of them far more readily than they would have proposed it.
+    """
+    if evidence.intent == Intent.DUPLICATE_CHARGE:
+        return None
+    return Verdict(
+        runs=False,
+        reason=f"this reads as {READING_OF[evidence.intent] if evidence.intent else 'a message that was never read'}, "
+        "not a duplicate charge, so a person decides whether it is owed",
+        refused=True,
+    )
+
+
 def justified(action: ProposedAction, evidence: Evidence) -> Verdict:
     """
     Whether the conditions for paying this refund without a person hold in the ledger.
@@ -183,13 +204,8 @@ def justified(action: ProposedAction, evidence: Evidence) -> Verdict:
     Nothing established here is forbidden -- it is a person's to decide.
     """
     order_id = action.args["order_id"]
-    if evidence.intent != Intent.DUPLICATE_CHARGE:
-        return Verdict(
-            runs=False,
-            reason=f"this reads as {READING_OF[evidence.intent] if evidence.intent else 'a message that was never read'}, "
-            "not a duplicate charge, so a person decides whether it is owed",
-            refused=True,
-        )
+    if refusal := not_a_duplicate(evidence):
+        return refusal
     if not evidence.charges_paise:
         return Verdict(
             runs=False,

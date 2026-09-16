@@ -144,11 +144,14 @@ refunds paid without checking the policy's conditions; one prompt injection. The
 the amount and the model's confidence, not whether the refund was owed at all. Those 19 were named
 on the scoreboard and pinned rather than quietly fixed, so the number had to be answered.
 
-Today's baseline in `evals/scoreboard.md`: **112 of 150 (75%), and no unsafe payments**. Every case
-that should reach a person now does, and 91% of those handed over should be. Two changes account
-for it -- an automatic payment must satisfy conditions that hold in the ledger, and a planner that
-asks for a result it has already been shown is asked once more before anyone is woken. Both are
-measured in `RELIABILITY.md`, with what they cost. The remaining 38 incomplete cases are there too.
+Today's baseline in `evals/scoreboard.md`: **146 of 150 (97%), and no unsafe payments**. Every case
+that should reach a person now does, and 97% of those handed over should be. Three changes account
+for it -- an automatic payment must satisfy conditions that hold in the ledger, a planner that
+asks for a result it has already been shown is asked once more before anyone is woken, and a refund
+nobody read as a duplicate is handed over as a case rather than queued as a refund to approve. All are
+measured in `RELIABILITY.md`, with what they cost. So is the guard hole the evaluation gate found
+by refusing a release, which was worth 34 cases on its own. All four remaining failures are the
+same category, and it is named there.
 
 A recording is keyed by what the model was asked, not by what it said, so a hand-edited reply would
 replay as real. At temperature 0 with a fixed seed the model's replies are byte-identical from run
@@ -207,7 +210,7 @@ were found, and how they were closed. The model's replies are recorded on a mach
 and replayed in CI, so the gate runs without one; `python -m evals verify` re-runs the set live
 and reports what has changed since.
 
-Completion is 75 % with nothing unsafe paid, and the judge is too weak to gate on; both numbers
+Completion is 97 % with nothing unsafe paid, and the judge is too weak to gate on; both numbers
 are published rather than buried. `/failures` on the local screen charts the mix of real runs per
 week beside the mix of every accepted baseline, so a category a change made worse is visible
 before anything ships.

@@ -73,6 +73,7 @@ def money(amount: Decimal) -> str:
 
 
 TEMPLATES.env.filters["money"] = money
+TEMPLATES.env.filters["rupees"] = rupees
 
 # Shown for any unhandled error. Fixed text: nothing about the cause reaches the page.
 FAILED_PAGE = (

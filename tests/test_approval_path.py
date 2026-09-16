@@ -534,3 +534,92 @@ def test_an_approved_refund_the_ledger_refuses_goes_back_to_a_person(fresh_datab
     (approved,) = approvals_of(fresh_database, run_id)
     assert approved["executed_at"] is not None, "attempted once; its refusal is the recorded result"
     assert work(fresh_database, MustNotBeAsked()) is None
+
+
+# --- the conditions are asked about every refund, not only the ones that would pay themselves ------
+
+
+CLASSIFIED_REFUND = '{"intent": "refund_request", "confidence": 0.9, "reasoning": "wants money back"}'
+
+
+def refund_request_model(amount_paise: int, confidence: str = "0.9") -> ScriptedModel:
+    """A plain refund request -- not a duplicate charge -- proposing a refund for order 4821."""
+    return ScriptedModel(
+        classify=CLASSIFIED_REFUND,
+        extract=EXTRACTED_4821,
+        plan=[PROPOSED_LOOKUP, proposed_refund(amount_paise, confidence)],
+    )
+
+
+def test_a_refund_the_conditions_refuse_is_handed_over_even_when_a_person_was_already_being_asked(
+    fresh_database,
+):
+    """
+    Low confidence used to send a refund round the conditions instead of through them.
+
+    The guard ran only where a payment would otherwise have executed itself, on the reading that a
+    refund already going to a person is a person's to judge. But the two outcomes are not the same
+    thing: handing over gives someone the case, while an approval gives them a filled-in refund and
+    one button, and people approve what is put in front of them far more readily than they would
+    have proposed it. A refund the ledger cannot justify is not a better question for having a
+    person attached to it.
+    """
+    ledger(fresh_database)
+    limit(fresh_database, 1_000_000)
+    run_id = queue(fresh_database)
+
+    outcome = work(fresh_database, refund_request_model(90_000, confidence="0.1"))
+
+    assert outcome.status == "waiting_approval", "it rests with a person either way"
+    assert approvals_of(fresh_database, run_id) == [], "but with nothing to approve"
+    assert refunds(fresh_database) == []
+    assert "the conditions for paying it were not met" in (outcome.failure or "")
+
+
+def test_the_conditions_can_refuse_a_refund_but_never_pay_one(fresh_database):
+    """
+    A duplicate that satisfies every condition, proposed with confidence too low to pay it.
+
+    The conditions may only ever take a payment away. If satisfying them could put one back, this
+    guard would become a way around the confidence floor rather than a check on top of it.
+    """
+    ledger(fresh_database)
+    limit(fresh_database, 1_000_000)
+    run_id = queue_about(fresh_database, "4902", "conditions-cannot-pay")
+
+    outcome = work(fresh_database, duplicate_model("4902", 90_000, confidence="0.1"))
+
+    assert outcome.status == "waiting_approval"
+    assert refunds(fresh_database) == [], "the confidence floor still stops it"
+    (asked,) = approvals_of(fresh_database, run_id)
+    assert "confidence" in asked["reason"], "and it is still the confidence that a person is told about"
+
+
+def test_a_refund_that_was_refused_is_still_on_the_record(fresh_database):
+    """
+    Handing over replaces the refund with an escalation before the run is stored.
+
+    Without keeping it, the amount the agent was about to pay is nowhere a person can find it: a
+    guarded tool never reaches the steps, there is no approval row, and the proposal has been
+    overwritten by the escalation. Someone picking the case up would see that something was refused
+    and not what -- on the one path where the agent came closest to moving money on its own.
+    """
+    ledger(fresh_database)
+    limit(fresh_database, 1_000_000)
+    run_id = queue(fresh_database)
+
+    work(fresh_database, refund_request_model(90_000, confidence="0.1"))
+
+    refused = row(fresh_database, run_id)["state"]["agent"]["refused"]
+    assert refused["tool"] == "issue_refund"
+    assert refused["args"]["amount_paise"] == 90_000
+    assert refused["args"]["order_id"] == "4821"
+
+
+def test_a_run_that_refused_nothing_says_so_rather_than_inventing_a_refusal(fresh_database):
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+
+    work(fresh_database, refund_model(360_000))
+
+    assert row(fresh_database, run_id)["state"]["agent"]["refused"] is None

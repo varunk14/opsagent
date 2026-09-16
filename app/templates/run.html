@@ -10,6 +10,12 @@
   <dt>Steps</dt><dd>{{ run.steps }}</dd>
   <dt>Prompts</dt><dd>{{ run.prompt_version or "" }}</dd>
   <dt>Run</dt><dd>{{ run.id }}</dd>
+{% if run.refused_paise is not none %}
+  {# The guardrail replaced this refund with an escalation, so it appears nowhere else on the page:
+     not in the steps, because a guarded tool never runs, and not in an approval, because none was
+     opened. It is the closest this run came to moving money on its own. #}
+  <dt>Would not pay</dt><dd>{{ run.refused_paise | rupees }} on order {{ run.refused_order_id }}</dd>
+{% endif %}
 </dl>
 {% if langfuse_url %}
 <p><a href="{{ langfuse_url }}">The same trace in Langfuse</a></p>

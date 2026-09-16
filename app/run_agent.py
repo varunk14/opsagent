@@ -85,7 +85,15 @@ from app.graph.build import (
 from app.graph.nodes import escalation
 from app.graph.prompts import run_prompt_version
 from app.graph.state import AgentState
-from app.guardrails import Evidence, Verdict, evidence_of, judge, justified, over_budget
+from app.guardrails import (
+    Evidence,
+    Verdict,
+    evidence_of,
+    judge,
+    justified,
+    not_a_duplicate,
+    over_budget,
+)
 from app.guardrails import load as load_guardrails
 from app.llm import DEFAULT_MODEL, Ollama, Reply, ServiceUnavailable
 from app.retrieval import PolicyRetriever
@@ -508,8 +516,16 @@ def summarise_agent(
     proposal: ProposedAction,
     failure: str | None,
     steps: list[dict[str, Any]],
+    refused: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, Any], Decimal]:
-    """What gets stored on the run after this tick, and what the tick cost."""
+    """
+    What gets stored on the run after this tick, and what the tick cost.
+
+    `refused` is the refund the guardrail would not allow, kept because handing over replaces the
+    proposal with an escalation before it reaches here. It is the one action the agent came closest
+    to paying on its own, and a guarded tool leaves no step and no approval row behind, so without
+    it a person reads that something was refused and never what.
+    """
     replies = state.get("replies", [])
     cost, prompt_tokens, completion_tokens = charge(before, replies)
     spent = tokens_by_model(before, replies)
@@ -522,6 +538,7 @@ def summarise_agent(
         "policy": state.get("policy", []),
         "policy_sources": state.get("policy_sources", []),
         "proposal": proposal.model_dump(mode="json"),
+        "refused": dict(refused) if refused else None,
         "failure": failure,
         "steps": steps,
         "deferrals": before.get("deferrals", 0),
@@ -715,10 +732,18 @@ def judged(
         limits = load_guardrails(connection)
         verdict = judge(proposal, limits, refunded_so_far(connection, run_id, proposal))
         # The limit and the confidence decide whether a person is asked; the conditions decide
-        # whether there is anything to ask about. Only a payment that would otherwise have run on
-        # its own is checked against them: one already going to a person is a person's to judge.
+        # whether there is anything to ask about.
         if verdict.runs:
             verdict = justified(proposal, evidence)
+        else:
+            # One of those conditions is worth asking about a refund already bound for a person:
+            # whether this was read as a duplicate charge at all. The ledger conditions decide
+            # whether a payment may run on its own, and one going to a person is a person's to
+            # judge -- but a refund on a message nobody read as a duplicate is not a better
+            # question for having a person attached to it. Queueing it hands them a filled-in
+            # refund and one button; handing over gives them the case. Refusal only: satisfying
+            # this can never put back a payment the judge stopped.
+            verdict = not_a_duplicate(evidence) or verdict
         span.set_attributes(
             {
                 Attr.VERDICT: "runs" if verdict.runs else "needs a person",
@@ -767,8 +792,11 @@ def act(
             record_step(connection, claimed.run_id, steps, proposal)
 
         verdict = judged(connection, claimed.run_id, proposal, evidence_in(state, steps, proposal)) if proposal.tool in GUARDED else None
+        refused_refund: dict[str, Any] | None = None
         if verdict is not None and verdict.refused:
             # Nothing to approve: the agent cannot say this refund is owed, so the case goes to a person.
+            # Kept before it is replaced: this is the only record of what was nearly paid.
+            refused_refund = proposal.model_dump(mode="json")
             proposal, failure = hand_over("the conditions for paying it were not met", verdict.reason or "")
             span.set_attribute(Attr.TOOL, proposal.tool)
             # Dropped deliberately, and the rest of this function depends on it: from here on there is
@@ -778,7 +806,7 @@ def act(
         if verdict is not None and verdict.runs:
             failure = pay(connection, claimed.run_id, steps, proposal)
 
-        agent, cost = summarise_agent(state, before, proposal, failure, steps)
+        agent, cost = summarise_agent(state, before, proposal, failure, steps, refused=refused_refund)
         stored = (Jsonb({"agent": agent}), cost, version, claimed.run_id, claimed.worker)
         if proposal.tool == "get_order":
             status, result = "running", "looked up"
