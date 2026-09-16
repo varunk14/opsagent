@@ -41,7 +41,7 @@ python -m evals verify     # live re-run, reports drift against the recordings
 | Measure | Value |
 |---|---|
 | Cases | 150 |
-| Task completion | 0.7200 (108 of 150) |
+| Task completion | 0.7467 (112 of 150) |
 | Intent accuracy | 0.8600 |
 | Extraction accuracy | 0.7800 |
 | Escalation precision | 0.9118 |
@@ -49,18 +49,15 @@ python -m evals verify     # live re-run, reports drift against the recordings
 | False-positive rate | 0.4615 |
 | Safety violations | 0 |
 | Unresolved runs | 0 |
-| Model calls | 560 |
-| Reference cost | $0.062746 |
+| Model calls | 644 |
+| Reference cost | $0.077111 |
 
-Completion is 72 %, and nothing unsafe is paid. The largest remaining cause is the planner asking
-for a lookup it has already been shown; the run then exhausts its step budget and goes to a
-person. That is a safe failure — nothing is paid — but it is a failure, and it is what the next
-change addresses.
+Completion is 75 %, and nothing unsafe is paid.
 
-Weakest categories, from `evals/scoreboard.md`: `confidence_pressure` 0.00, `inflated_amount`
-0.00, `change_of_mind` 0.42, `damaged_item` 0.50. Strongest: `duplicate_not_confirmed`,
-`multiple_orders`, `order_status`, `payment_question`, `unknown_order`, `wrong_owner`, `garbled`,
-`general`, all 1.00.
+Weakest categories, from `evals/scoreboard.md`: `inflated_amount` 0.00, `change_of_mind` 0.42,
+`damaged_item` 0.50, `duplicate_over_limit` 0.50. Strongest: `confidence_pressure`,
+`duplicate_not_confirmed`, `multiple_orders`, `order_status`, `payment_question`,
+`unknown_order`, `wrong_owner`, `garbled`, `general`, all 1.00.
 
 ### The nineteen unsafe payments, and how they were closed
 
@@ -87,6 +84,21 @@ What that change moved, measured the same way on the same 150 cases: task comple
 0.7200, safety violations 19 → 0, escalation recall 0.8468 → 1.0000, `wrong_escalation` 41 → 22,
 and `duplicate_not_confirmed` from 0.20 to 1.00. Nothing got worse.
 
+### Asking again before waking anyone
+
+The next largest cause of incomplete runs was the planner asking for a lookup whose result was
+already in front of it. The run then spent its step budget and went to a person — a safe failure,
+since nothing is paid, but a failure. That reads as not having noticed the answer rather than as
+being stuck, so the run is now asked once more with that result marked, and only a second repeat
+hands the case over. Every earlier step is already on record, so asking again costs one model
+call, not four, and the run is charged for both.
+
+Measured: task completion 0.7200 → 0.7467, `loop` 17 → 13, `confidence_pressure` 0.00 → 1.00,
+`duplicate_over_limit` 0.40 → 0.50, still nothing unsafe. It is a real gain and a partial one:
+four of the seventeen looping runs recovered, and the other thirteen asked for the same thing
+twice. The price is honest too — model calls rose from 560 to 644 and the reference cost from
+$0.0627 to $0.0771 for the set, because runs that used to stop now carry on.
+
 ## The failure taxonomy
 
 Every failed run is classified into exactly one of six fixed categories, by deterministic rules
@@ -98,7 +110,7 @@ outage or an expired lock — those are already named by `failure_class` and the
 | Category | Cases | What it means | What we would fix |
 |---|---|---|---|
 | `wrong_escalation` | 22 | A person rejected what the agent proposed, or it paid where a person should decide | Decide from policy conditions in code, not from confidence: a duplicate needs two ledger charges; change-of-mind and damaged items go to a person. |
-| `loop` | 17 | The planner repeated a step, spent the whole step budget, or was deferred until a person had to take it | Give the planner a way to decide: when it repeats a lookup whose result is shown, ask once more with that result marked, then hand over. |
+| `loop` | 13 | The planner repeated a step, spent the whole step budget, or was deferred until a person had to take it | Give the planner a way to decide: when it repeats a lookup whose result is shown, ask once more with that result marked, then hand over. |
 | `tool_misuse` | 3 | A tool that does not run here, arguments the ledger refused, a lookup of an unknown order, a refund for an order never looked up | Check arguments before proposing: a refund must be for an order this run looked up; the ledger already refuses more than was charged. |
 | `hallucinated_field` | 0 | An order id or amount in neither the message, the policy it was shown, nor any tool result | Tighten extraction: an order id or amount must be quoted from the message or a lookup; refuse the proposal otherwise. |
 | `context_overflow` | 0 | The customer's text was too long for the prompt and was cut | Chunk or summarise a long message before the prompt; today anything over the cap is cut. |
@@ -125,6 +137,7 @@ that a change made worse is visible before anything is deployed.
 |---|---|---|---|---|---|---|---|---|
 | 2026-09-15 | `9303535` | 89 / 150 | 0 | 3 | 17 | 0 | 41 | 0 |
 | 2026-09-16 | `cb9dd23` | 108 / 150 | 0 | 3 | 17 | 0 | 22 | 0 |
+| 2026-09-16 | `34ac5fe` | 112 / 150 | 0 | 3 | 13 | 0 | 22 | 0 |
 
 ## The judge
 

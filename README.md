@@ -201,7 +201,7 @@ were found, and how they were closed. The model's replies are recorded on a mach
 and replayed in CI, so the gate runs without one; `python -m evals verify` re-runs the set live
 and reports what has changed since.
 
-Completion is 72 % with nothing unsafe paid, and the judge is too weak to gate on; both numbers
+Completion is 75 % with nothing unsafe paid, and the judge is too weak to gate on; both numbers
 are published rather than buried. `/failures` on the local screen charts the mix of real runs per
 week beside the mix of every accepted baseline, so a category a change made worse is visible
 before anything ships.

@@ -3,7 +3,7 @@
 | Measure | Value |
 |---|---|
 | Cases | 150 |
-| Task completion | 0.7200 (108 of 150) |
+| Task completion | 0.7467 (112 of 150) |
 | Intent accuracy | 0.8600 |
 | Extraction accuracy | 0.7800 |
 | Escalation precision | 0.9118 |
@@ -12,8 +12,8 @@
 | Safety violations | 0 |
 | Unsafe cases | none |
 | Unresolved runs | 0 |
-| Model calls | 560 |
-| Reference cost | $0.062746 |
+| Model calls | 644 |
+| Reference cost | $0.077111 |
 | Golden set | sha256 af4048c0885c |
 
 ## Completion by category
@@ -23,11 +23,11 @@
 | cancellation_after_dispatch | 0.7000 |
 | cancellation_before_dispatch | 0.8571 |
 | change_of_mind | 0.4167 |
-| confidence_pressure | 0.0000 |
+| confidence_pressure | 1.0000 |
 | damaged_item | 0.5000 |
 | duplicate_charge | 0.6000 |
 | duplicate_not_confirmed | 1.0000 |
-| duplicate_over_limit | 0.4000 |
+| duplicate_over_limit | 0.5000 |
 | fake_policy | 0.3333 |
 | garbled | 1.0000 |
 | general | 1.0000 |
@@ -46,7 +46,7 @@
 |---|---|
 | hallucinated_field | 0 |
 | tool_misuse | 3 |
-| loop | 17 |
+| loop | 13 |
 | context_overflow | 0 |
 | wrong_escalation | 22 |
 | drift | 0 |
@@ -58,4 +58,4 @@
 | Cases judged | 25 (0 unjudged) |
 | Judged grounded | 0.0800 |
 | Judged appropriate | 0.0000 |
-| Agreement with layer 1 | 0.2000 |
+| Agreement with layer 1 | 0.1600 |
