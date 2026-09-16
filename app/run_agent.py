@@ -402,6 +402,13 @@ def marked_observations(steps: Sequence[Mapping[str, Any]], proposal: ProposedAc
     than as being stuck, so the run is asked once more with that answer marked, and only a second
     repeat wakes a person. The mark is added to a copy: what the run stores is what its tools
     actually returned, never a note the driver wrote for one prompt.
+
+    Two known bounds. The observations block is truncated to MAX_OBSERVATIONS before it reaches
+    the prompt, so a mark on a late step among unusually long results could be cut off, and the
+    run would simply behave as it did before this existed. And a planner circling several
+    different earlier lookups can earn one extra call per tick; MAX_STEPS caps that at four for
+    the life of a run, which is why the ceiling on what a single run may spend belongs with the
+    budget work rather than here.
     """
     return [{**step, "note": ALREADY_SHOWN} if repeats(proposal, step) else dict(step) for step in steps]
 
@@ -735,11 +742,19 @@ def plan_once_more(
     Ask the planner again with the repeated result marked, and keep what both asks cost.
 
     Every earlier step is already on record, so the walk starts at planning: one more model call,
-    not four. The replies of both asks are carried, because a run is charged for every call made
-    on its behalf whether or not the answer was used.
+    not four. That holds because a repeat can only be seen once a step has been committed, which
+    means an earlier tick already classified, extracted and retrieved -- so `before` satisfies
+    what the graph needs to resume. The replies of both asks are carried, because a run is
+    charged for every call made on its behalf whether or not the answer was used.
     """
     prior = {**prior_from(before), "observations": marked_observations(before.get("steps", []), asked_for)}
-    again = run_graph(graph, claimed.subject, claimed.body, cast(AgentState, prior))
+    try:
+        again = run_graph(graph, claimed.subject, claimed.body, cast(AgentState, prior))
+    except ServiceUnavailable as outage:
+        # The ask that surfaced the repeat had already finished and been paid for. Carried onto the
+        # outage so the tick charges for it, rather than spending it and recording nothing.
+        outage.replies = list(state.get("replies", [])) + outage.replies
+        raise
     return cast(AgentState, {**again, "replies": list(state.get("replies", [])) + list(again.get("replies", []))})
 
 
@@ -749,8 +764,15 @@ def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_st
         before = agent_of(connection, claimed.run_id)
         # Read before the walk: the version this tick's prompts were built from.
         version = run_prompt_version()
+        steps = list(before.get("steps", []))
         try:
             state = run_graph(graph, claimed.subject, claimed.body, prior_from(before))
+            proposal, failure = decide(state, steps, max_steps)
+            if failure == f"plan: {REPEATED_STEP}":
+                # Asked once more, with the result it repeated pointed at. Only this tick's own
+                # first repeat gets the second chance, so a planner that will not move on stops.
+                state = plan_once_more(graph, claimed, before, state, state["proposal"])
+                proposal, failure = decide(state, steps, max_steps)
         except ServiceUnavailable as outage:
             # Failed, to be tried again later: charged for the calls that did complete, steps kept.
             with connection.transaction():
@@ -778,14 +800,6 @@ def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_st
                     close_tick(connection, claimed.run_id, tick_span, released[0], outage.failure_class)
             raise
 
-        steps = list(before.get("steps", []))
-        asked_for = state.get("proposal")
-        proposal, failure = decide(state, steps, max_steps)
-        if failure == f"plan: {REPEATED_STEP}" and asked_for is not None:
-            # Asked once more, with the result it repeated pointed at. Only this tick's own first
-            # repeat is given the second chance, so a planner that will not move on still stops.
-            state = plan_once_more(graph, claimed, before, state, asked_for)
-            proposal, failure = decide(state, steps, max_steps)
         with connection.transaction():
             if connection.execute(HOLD_CLAIM, (claimed.run_id, claimed.worker)).fetchone() is None:
                 raise LostClaim(f"run {claimed.run_id} was reclaimed before this worker could act on it")

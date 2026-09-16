@@ -800,6 +800,7 @@ def test_both_asks_are_charged_for(fresh_database):
 
     agent = row(fresh_database, run_id)["state"]["agent"]
     assert agent["model_calls"] == 5, "classify, extract and plan, then plan and plan again"
+    assert (agent["prompt_tokens"], agent["completion_tokens"]) == (50, 25), "the tokens of both asks"
 
 
 def test_the_marker_is_never_written_into_what_the_run_stores(fresh_database):
@@ -812,3 +813,26 @@ def test_the_marker_is_never_written_into_what_the_run_stores(fresh_database):
 
     steps = row(fresh_database, run_id)["state"]["agent"]["steps"]
     assert all(ALREADY_SHOWN not in json.dumps(step) for step in steps)
+
+
+def test_an_outage_during_the_second_ask_charges_for_both_and_returns_the_run(fresh_database):
+    """
+    The second ask is a model call like any other, so an outage in it is an outage in the tick.
+
+    The run goes back to the queue with the calls that did complete charged -- including the ask
+    that surfaced the repeat, which finished before the outage and would otherwise be spent and
+    never recorded.
+    """
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    model = repeating_model(OUTAGE)
+
+    with psycopg.connect(fresh_database) as connection, pytest.raises(ModelUnavailable):
+        work_next(connection, graph_of(model))
+
+    run = row(fresh_database, run_id)
+    assert run["status"] == "failed", "returned to the queue, not left claimed"
+    assert run["locked_by"] is None
+    billing = run["state"]["billing"]
+    assert billing["model_calls"] == 4, "classify, extract, the plan that repeated, and the retry"
+    assert (billing["prompt_tokens"], billing["completion_tokens"]) == (40, 20)
