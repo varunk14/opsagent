@@ -666,6 +666,9 @@ def act(
             # Nothing to approve: the agent cannot say this refund is owed, so the case goes to a person.
             proposal, failure = hand_over("the conditions for paying it were not met", verdict.reason or "")
             span.set_attribute(Attr.TOOL, proposal.tool)
+            # Dropped deliberately, and the rest of this function depends on it: from here on there is
+            # no refund under consideration, so the run must be recorded exactly like any other
+            # hand-over. Everything below reads `verdict is None` as "no refund to pay or approve".
             verdict = None
         if verdict is not None and verdict.runs:
             failure = pay(connection, claimed.run_id, steps, proposal)

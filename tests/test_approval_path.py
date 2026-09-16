@@ -302,9 +302,10 @@ def test_a_refund_on_someone_elses_order_is_refused_not_paid(fresh_database):
     Order 3310 is Dev's. Priya's run looked up 4821 and asks to refund 3310 instead.
 
     Two things refuse it now, and the earlier one wins: nothing this run looked up says 3310 was
-    charged at all, so the refund never reaches the ledger. Were it to, the executor answers as
-    if the order were missing -- which the approved path still proves, since a person can push a
-    refund past the conditions and the ledger refuses it there.
+    charged at all, so the refund never reaches the ledger. The executor's own refusal -- an order
+    another customer placed looks exactly like no order -- is unchanged and tested where it lives,
+    in tests/test_executor.py. A refusal on the conditions never becomes an approval, so there is
+    no path by which a person can wave one of these past the conditions.
     """
     ledger(fresh_database)
     queue(fresh_database)

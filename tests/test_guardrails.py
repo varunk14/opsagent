@@ -16,7 +16,7 @@ from decimal import Decimal
 import psycopg
 import pytest
 
-from app.contracts import ProposedAction
+from app.contracts import Intent, ProposedAction
 from app.guardrails import (
     Evidence,
     Guardrails,
@@ -248,7 +248,7 @@ def test_a_bad_change_is_refused_before_it_reaches_the_database(db, changes, mes
 # --- justified: is this refund owed at all? --------------------------------------
 
 
-def duplicate(*charges_paise: int, intent: str = "duplicate_charge") -> Evidence:
+def duplicate(*charges_paise: int, intent: Intent | None = Intent.DUPLICATE_CHARGE) -> Evidence:
     """What a run established about order 4821 before proposing to pay."""
     return Evidence(intent=intent, charges_paise=charges_paise)
 
@@ -260,7 +260,7 @@ def test_a_confirmed_duplicate_refunded_at_one_of_its_charges_is_owed():
 
 def test_a_refund_for_anything_but_a_duplicate_is_a_persons_decision():
 
-    verdict = justified(refund(90_000), duplicate(360_000, 360_000, intent="refund_request"))
+    verdict = justified(refund(90_000), duplicate(360_000, 360_000, intent=Intent.REFUND_REQUEST))
 
     assert verdict.runs is False
     assert "duplicate" in (verdict.reason or "")
@@ -300,7 +300,7 @@ def test_the_charges_are_read_from_the_lookup_of_that_order_only():
         {"tool": "get_order", "args": {"order_id": "4821"}, "result": {"order_id": "4821", "charges_paise": [360_000, 360_000]}},
     ]
 
-    found = evidence_of("duplicate_charge", steps, "4821")
+    found = evidence_of(Intent.DUPLICATE_CHARGE, steps, "4821")
 
     assert found.charges_paise == (360_000, 360_000)
     assert found.intent == "duplicate_charge"
@@ -310,7 +310,7 @@ def test_a_lookup_that_returned_nothing_leaves_no_charges():
 
     steps = [{"tool": "get_order", "args": {"order_id": "4821"}, "result": None}]
 
-    assert evidence_of("duplicate_charge", steps, "4821").charges_paise == ()
+    assert evidence_of(Intent.DUPLICATE_CHARGE, steps, "4821").charges_paise == ()
 
 
 def test_a_refund_step_is_not_a_lookup_and_confirms_nothing():
@@ -318,4 +318,30 @@ def test_a_refund_step_is_not_a_lookup_and_confirms_nothing():
         {"tool": "issue_refund", "args": {"order_id": "4821"}, "result": {"order_id": "4821", "refunded": True}},
     ]
 
-    assert evidence_of("duplicate_charge", steps, "4821").charges_paise == ()
+    assert evidence_of(Intent.DUPLICATE_CHARGE, steps, "4821").charges_paise == ()
+
+
+def test_an_order_charged_twice_for_different_things_holds_no_duplicate():
+    """
+    Being charged more than once is not being charged twice. An order billed for the item and
+    then for shipping has two charges and no duplicate, and the only thing left saying it is a
+    duplicate would be the model's reading of an email the customer wrote -- which is the input
+    this check exists to stop trusting. Two charges of the same amount is the evidence.
+    """
+    verdict = justified(refund(90_000), duplicate(360_000, 12_000))
+
+    assert verdict.runs is False
+    assert "same amount" in (verdict.reason or "")
+
+
+def test_a_repeated_charge_among_others_is_still_a_duplicate():
+    assert justified(refund(90_000), duplicate(12_000, 360_000, 360_000)).runs is True
+
+
+def test_an_order_id_is_matched_exactly_and_never_normalised():
+    """A lookup of 04821 says nothing about 4821: the ids are compared as they are, not as numbers."""
+    steps = [
+        {"tool": "get_order", "args": {"order_id": "04821"}, "result": {"order_id": "04821", "charges_paise": [10, 10]}}
+    ]
+
+    assert evidence_of(Intent.DUPLICATE_CHARGE, steps, "4821").charges_paise == ()

@@ -32,7 +32,15 @@ from app.db import connect
 
 JUDGED = "issue_refund"
 LOOKUP = "get_order"
-DUPLICATE_CHARGE = Intent.DUPLICATE_CHARGE.value
+
+# The reason a refusal gives is read by the person who picks the case up, so it says what the
+# message was taken to be in their words, never the enum's.
+READING_OF = {
+    Intent.DUPLICATE_CHARGE: "a duplicate charge",
+    Intent.REFUND_REQUEST: "a refund request",
+    Intent.ORDER_STATUS: "a question about an order",
+    Intent.OTHER: "something else",
+}
 
 LOAD = "SELECT auto_refund_limit_paise, min_confidence FROM guardrails WHERE singleton"
 
@@ -76,11 +84,11 @@ class Verdict:
 class Evidence:
     """What the run established about the order before it proposed to pay: the reading, and the ledger."""
 
-    intent: str | None
+    intent: Intent | None
     charges_paise: tuple[int, ...] = ()
 
 
-def evidence_of(intent: str | None, steps: Sequence[Mapping[str, Any]], order_id: str) -> Evidence:
+def evidence_of(intent: Intent | None, steps: Sequence[Mapping[str, Any]], order_id: str) -> Evidence:
     """The evidence a run's own steps give about one order. A lookup of any other order says nothing about it."""
     charges: list[int] = []
     for step in steps:
@@ -100,7 +108,10 @@ def justified(action: ProposedAction, evidence: Evidence) -> Verdict:
     own confidence means a confident model can have any small refund paid by asserting it is
     owed -- and a model reading a customer's email is exactly the thing an email can talk round.
     Confidence is not evidence. An automatic payment needs the duplicate to be real: the message
-    read as a duplicate charge, and the order charged at least twice in the ledger.
+    read as a duplicate charge, and the ledger showing two charges of the same amount on that
+    order. Being charged more than once is not being charged twice -- an order billed for the
+    item and then for shipping has two charges and no duplicate, and taking that as one would
+    leave the whole decision resting on the model's reading of an email again.
 
     The amount is deliberately not a condition. The ledger refuses a refund larger than the order
     was charged, the limit bounds what runs without a person, and refunds split into parts are
@@ -110,11 +121,11 @@ def justified(action: ProposedAction, evidence: Evidence) -> Verdict:
     Nothing established here is forbidden -- it is a person's to decide.
     """
     order_id = action.args["order_id"]
-    if evidence.intent != DUPLICATE_CHARGE:
+    if evidence.intent != Intent.DUPLICATE_CHARGE:
         return Verdict(
             runs=False,
-            reason=f"this reads as {evidence.intent or 'no refund at all'}, not a duplicate charge, "
-            "so a person decides whether it is owed",
+            reason=f"this reads as {READING_OF[evidence.intent] if evidence.intent else 'a message that was never read'}, "
+            "not a duplicate charge, so a person decides whether it is owed",
             refused=True,
         )
     if not evidence.charges_paise:
@@ -127,6 +138,13 @@ def justified(action: ProposedAction, evidence: Evidence) -> Verdict:
         return Verdict(
             runs=False,
             reason=f"order {order_id} was charged once, so there is no duplicate to refund",
+            refused=True,
+        )
+    if not any(evidence.charges_paise.count(amount) > 1 for amount in evidence.charges_paise):
+        return Verdict(
+            runs=False,
+            reason=f"order {order_id} was charged {len(evidence.charges_paise)} times but no two charges are "
+            "the same amount, so none of them is a duplicate of another",
             refused=True,
         )
     return Verdict(runs=True, reason=None)
