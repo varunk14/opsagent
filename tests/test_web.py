@@ -36,8 +36,8 @@ XSS = "<script>alert('pwned')</script>"
 OVER_THE_LIMIT = "Rs 7,200 is not under the Rs 5,000 limit for automatic refunds"
 
 
-def client_for(dsn: str, operator: str | None = "asha") -> TestClient:
-    return TestClient(create_app(dsn=dsn, operator=operator), base_url=LOCAL)
+def client_for(dsn: str, operator: str | None = "asha", history_path: Path | None = None) -> TestClient:
+    return TestClient(create_app(dsn=dsn, operator=operator, history_path=history_path), base_url=LOCAL)
 
 
 def insert_run(connection, *, status: str, node: str, state: dict, key: str, locked_by: str | None = None) -> str:

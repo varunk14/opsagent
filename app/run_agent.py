@@ -20,9 +20,11 @@ with the limits in force at that moment: allowed, it is paid through the keyed
 executor and the run is done; not allowed, an approval is opened and the run
 waits for a person. Once a person approves, the next worker to claim the run
 pays exactly what was approved, asking no model and judging nothing again. A
-refund the ledger refuses, however it was allowed, goes to a person. A proposal that
-repeats an earlier step, a run past its step budget, or a tool this worker does
-not run are all handed to a person instead of executed. A sender who has caused
+refund the ledger refuses, however it was allowed, goes to a person. A run past
+its step budget, or one proposing a tool this worker does not run, is handed to a
+person instead of executed. A proposal repeating an earlier step is not, yet: the
+planner is asked once more with the result it repeated pointed at, and only a
+second repeat is handed over. A sender who has caused
 RATE_LIMIT lookups within RATE_WINDOW has further lookups deferred: the run goes
 back to the queue until the window frees, executing nothing and spending no
 attempt.
@@ -46,12 +48,12 @@ import os
 import random
 import socket
 import sys
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import psycopg
@@ -73,11 +75,12 @@ from app.contracts import Classification, ExtractedRefund, ProposedAction, StepR
 from app.db import apply_migrations, connect
 from app.embeddings import OllamaEmbedder
 from app.executor import OWNED_ORDER, ToolOutcome, execute
+from app.failures import record_category
 from app.graph.build import build_graph, failure_recorded, run_graph
 from app.graph.nodes import escalation
 from app.graph.prompts import run_prompt_version
 from app.graph.state import AgentState
-from app.guardrails import Verdict, judge
+from app.guardrails import Evidence, Verdict, evidence_of, judge, justified
 from app.guardrails import load as load_guardrails
 from app.llm import Ollama, Reply, ServiceUnavailable
 from app.retrieval import PolicyRetriever
@@ -383,6 +386,35 @@ def hand_over(why: str, reason: str) -> tuple[ProposedAction, str]:
     return escalated["proposal"], escalated["failure"]
 
 
+REPEATED_STEP = "repeated an earlier step"
+ALREADY_SHOWN = "already shown above; decide from this rather than asking for it again"
+
+
+def repeats(proposal: ProposedAction, step: Mapping[str, Any]) -> bool:
+    """Whether this step is the one the planner has just asked for again."""
+    return bool(step["tool"] == proposal.tool and step["args"] == dict(proposal.args))
+
+
+def marked_observations(steps: Sequence[Mapping[str, Any]], proposal: ProposedAction) -> list[dict[str, Any]]:
+    """
+    The run's observations with the one it asked for again pointed at.
+
+    The planner asking for a lookup whose result is already in front of it is the single largest
+    cause of runs that end with nobody helped. It reads as not having noticed the answer rather
+    than as being stuck, so the run is asked once more with that answer marked, and only a second
+    repeat wakes a person. The mark is added to a copy: what the run stores is what its tools
+    actually returned, never a note the driver wrote for one prompt.
+
+    Two known bounds. The observations block is truncated to MAX_OBSERVATIONS before it reaches
+    the prompt, so a mark on a late step among unusually long results could be cut off, and the
+    run would simply behave as it did before this existed. And a planner circling several
+    different earlier lookups can earn one extra call per tick; MAX_STEPS caps that at four for
+    the life of a run, which is why the ceiling on what a single run may spend belongs with the
+    budget work rather than here.
+    """
+    return [{**step, "note": ALREADY_SHOWN} if repeats(proposal, step) else dict(step) for step in steps]
+
+
 def decide(state: AgentState, steps: list[dict[str, Any]], max_steps: int) -> tuple[ProposedAction, str | None]:
     """The action this tick takes: the proposal, or a hand-over to a person in its place."""
     proposal = state["proposal"]
@@ -395,8 +427,8 @@ def decide(state: AgentState, steps: list[dict[str, Any]], max_steps: int) -> tu
             f"{proposal.tool} is not a tool this worker runs",
             f"The planner asked for {proposal.tool}, which does not run here.",
         )
-    if any(step["tool"] == proposal.tool and step["args"] == dict(proposal.args) for step in steps):
-        return hand_over("repeated an earlier step", f"The planner asked for {proposal.tool} again with the same arguments.")
+    if any(repeats(proposal, step) for step in steps):
+        return hand_over(REPEATED_STEP, f"The planner asked for {proposal.tool} again with the same arguments.")
     if proposal.tool in RUNS_NOW and len(steps) >= max_steps:
         return hand_over(f"step budget of {max_steps} used", f"The run used all {max_steps} of its steps without deciding.")
     return proposal, None
@@ -591,12 +623,28 @@ def defer(
     return cost
 
 
-def judged(connection: psycopg.Connection, run_id: UUID, proposal: ProposedAction) -> Verdict:
+def evidence_in(state: AgentState, steps: list[dict[str, Any]], proposal: ProposedAction) -> Evidence:
+    """What this run established about the order it proposes to refund: how it read the message, and what it looked up."""
+    classification = state.get("classification")
+    return evidence_of(classification.intent if classification else None, steps, str(proposal.args["order_id"]))
+
+
+def judged(
+    connection: psycopg.Connection,
+    run_id: UUID,
+    proposal: ProposedAction,
+    evidence: Evidence,
+) -> Verdict:
     """The guardrail's verdict on a refund, recorded as the act's guardrail span."""
     with failure_recorded("guardrail", "guardrail") as span:
         # Read now, inside this transaction: a limit changed a second ago applies.
         limits = load_guardrails(connection)
         verdict = judge(proposal, limits, refunded_so_far(connection, run_id, proposal))
+        # The limit and the confidence decide whether a person is asked; the conditions decide
+        # whether there is anything to ask about. Only a payment that would otherwise have run on
+        # its own is checked against them: one already going to a person is a person's to judge.
+        if verdict.runs:
+            verdict = justified(proposal, evidence)
         span.set_attributes(
             {
                 Attr.VERDICT: "runs" if verdict.runs else "needs a person",
@@ -644,7 +692,15 @@ def act(
         if proposal.tool in RUNS_NOW:
             record_step(connection, claimed.run_id, steps, proposal)
 
-        verdict = judged(connection, claimed.run_id, proposal) if proposal.tool in GUARDED else None
+        verdict = judged(connection, claimed.run_id, proposal, evidence_in(state, steps, proposal)) if proposal.tool in GUARDED else None
+        if verdict is not None and verdict.refused:
+            # Nothing to approve: the agent cannot say this refund is owed, so the case goes to a person.
+            proposal, failure = hand_over("the conditions for paying it were not met", verdict.reason or "")
+            span.set_attribute(Attr.TOOL, proposal.tool)
+            # Dropped deliberately, and the rest of this function depends on it: from here on there is
+            # no refund under consideration, so the run must be recorded exactly like any other
+            # hand-over. Everything below reads `verdict is None` as "no refund to pay or approve".
+            verdict = None
         if verdict is not None and verdict.runs:
             failure = pay(connection, claimed.run_id, steps, proposal)
 
@@ -669,7 +725,39 @@ def act(
             node = failure.split(":", 1)[0] if failure else "plan"
             connection.execute(PARK, (node, *stored))
         span.set_attribute(Attr.RESULT, result)
+        if status != "running":
+            # The run has rested: name how it failed, if it did, in this same transaction.
+            category = record_category(connection, claimed.run_id)
+            if category is not None:
+                span.set_attribute(Attr.FAILURE_CATEGORY, category.value)
     return status, proposal, failure, cost
+
+
+def plan_once_more(
+    graph: Any,
+    claimed: ClaimedRun,
+    before: Mapping[str, Any],
+    state: AgentState,
+    asked_for: ProposedAction,
+) -> AgentState:
+    """
+    Ask the planner again with the repeated result marked, and keep what both asks cost.
+
+    Every earlier step is already on record, so the walk starts at planning: one more model call,
+    not four. That holds because a repeat can only be seen once a step has been committed, which
+    means an earlier tick already classified, extracted and retrieved -- so `before` satisfies
+    what the graph needs to resume. The replies of both asks are carried, because a run is
+    charged for every call made on its behalf whether or not the answer was used.
+    """
+    prior = {**prior_from(before), "observations": marked_observations(before.get("steps", []), asked_for)}
+    try:
+        again = run_graph(graph, claimed.subject, claimed.body, cast(AgentState, prior))
+    except ServiceUnavailable as outage:
+        # The ask that surfaced the repeat had already finished and been paid for. Carried onto the
+        # outage so the tick charges for it, rather than spending it and recording nothing.
+        outage.replies = list(state.get("replies", [])) + outage.replies
+        raise
+    return cast(AgentState, {**again, "replies": list(state.get("replies", [])) + list(again.get("replies", []))})
 
 
 def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_steps: int) -> RunOutcome:
@@ -678,8 +766,15 @@ def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_st
         before = agent_of(connection, claimed.run_id)
         # Read before the walk: the version this tick's prompts were built from.
         version = run_prompt_version()
+        steps = list(before.get("steps", []))
         try:
             state = run_graph(graph, claimed.subject, claimed.body, prior_from(before))
+            proposal, failure = decide(state, steps, max_steps)
+            if failure == f"plan: {REPEATED_STEP}":
+                # Asked once more, with the result it repeated pointed at. Only this tick's own
+                # first repeat gets the second chance, so a planner that will not move on stops.
+                state = plan_once_more(graph, claimed, before, state, state["proposal"])
+                proposal, failure = decide(state, steps, max_steps)
         except ServiceUnavailable as outage:
             # Failed, to be tried again later: charged for the calls that did complete, steps kept.
             with connection.transaction():
@@ -707,8 +802,6 @@ def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_st
                     close_tick(connection, claimed.run_id, tick_span, released[0], outage.failure_class)
             raise
 
-        steps = list(before.get("steps", []))
-        proposal, failure = decide(state, steps, max_steps)
         with connection.transaction():
             if connection.execute(HOLD_CLAIM, (claimed.run_id, claimed.worker)).fetchone() is None:
                 raise LostClaim(f"run {claimed.run_id} was reclaimed before this worker could act on it")
@@ -764,6 +857,9 @@ def act_on_approval(connection: psycopg.Connection, claimed: ClaimedRun, approve
                 else:
                     status = "waiting_approval"
                     connection.execute(PARK, ("act", *stored))
+                category = record_category(connection, claimed.run_id)
+                if category is not None:
+                    act.set_attribute(Attr.FAILURE_CATEGORY, category.value)
             close_tick(connection, claimed.run_id, tick_span, status)
 
     return RunOutcome(

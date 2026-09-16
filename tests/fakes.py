@@ -39,7 +39,13 @@ def task_of(prompt: str) -> str:
 
 CLASSIFIED_DUPLICATE = '{"intent": "duplicate_charge", "confidence": 0.9, "reasoning": "charged twice"}'
 CLASSIFIED_STATUS = '{"intent": "order_status", "confidence": 0.9, "reasoning": "asks when"}'
+CLASSIFIED_REFUND_REQUEST = '{"intent": "refund_request", "confidence": 0.9, "reasoning": "changed their mind"}'
 EXTRACTED_4821 = '{"order_id": "4821", "amount_paise": null, "reason": "charged twice"}'
+EXTRACTED_3310 = '{"order_id": "3310", "amount_paise": null, "reason": "charged twice"}'
+PROPOSED_LOOKUP_3310 = (
+    '{"tool": "get_order", "args": {"order_id": "3310"}, "confidence": 0.8,'
+    ' "reasoning": "confirm both charges first"}'
+)
 PROPOSED_LOOKUP = (
     '{"tool": "get_order", "args": {"order_id": "4821"}, "confidence": 0.8,'
     ' "reasoning": "confirm both charges first"}'

@@ -11,6 +11,15 @@ refund with no code change and no restart.
 "Under Rs 5,000" is strict: exactly the limit needs a person, and a limit of zero
 makes every refund manual. That is the kill switch.
 
+Being small enough is not reason enough to pay. A refund that would run on its own
+must also be owed, which `justified` decides from what the run established rather
+than from what the model says about itself: the message read as a duplicate charge,
+and the ledger showing two charges of the same amount on that order. A refund that
+fails those conditions is refused outright and goes to a person with nothing to
+approve, since there is no payment the agent can stand behind. Confidence is the
+model's opinion of its own work, and an email it is reading can change it; the
+ledger cannot be talked round either.
+
 Nothing here commits; the caller owns the transaction.
 
 Run:  .venv/bin/python -m app.guardrails show
@@ -20,15 +29,27 @@ Run:  .venv/bin/python -m app.guardrails show
 
 import argparse
 import sys
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any
 
 import psycopg
 
-from app.contracts import ProposedAction
+from app.contracts import Intent, ProposedAction
 from app.db import connect
 
 JUDGED = "issue_refund"
+LOOKUP = "get_order"
+
+# The reason a refusal gives is read by the person who picks the case up, so it says what the
+# message was taken to be in their words, never the enum's.
+READING_OF = {
+    Intent.DUPLICATE_CHARGE: "a duplicate charge",
+    Intent.REFUND_REQUEST: "a refund request",
+    Intent.ORDER_STATUS: "a question about an order",
+    Intent.OTHER: "something else",
+}
 
 LOAD = "SELECT auto_refund_limit_paise, min_confidence FROM guardrails WHERE singleton"
 
@@ -53,10 +74,89 @@ class Guardrails:
 
 @dataclass(frozen=True)
 class Verdict:
-    """Whether an action may run without a person, and if not, what to tell them."""
+    """
+    Whether an action may run without a person, and if not, what to tell them.
+
+    `refused` means the guardrail refuses the proposal itself: a person takes the case and there
+    is nothing to approve. A refund that is merely large is still one the agent stands behind, so
+    it goes to the approval queue for someone to say yes or no to. A refund whose conditions were
+    never established is different in kind -- there is no payment to approve, only a case to look
+    at -- so it is handed over instead of queued.
+    """
 
     runs: bool
     reason: str | None
+    refused: bool = False
+
+
+@dataclass(frozen=True)
+class Evidence:
+    """What the run established about the order before it proposed to pay: the reading, and the ledger."""
+
+    intent: Intent | None
+    charges_paise: tuple[int, ...] = ()
+
+
+def evidence_of(intent: Intent | None, steps: Sequence[Mapping[str, Any]], order_id: str) -> Evidence:
+    """The evidence a run's own steps give about one order. A lookup of any other order says nothing about it."""
+    charges: list[int] = []
+    for step in steps:
+        if step.get("tool") != LOOKUP:
+            continue
+        result = step.get("result") or {}
+        if str(result.get("order_id", "")) == order_id:
+            charges += [amount for amount in result.get("charges_paise") or [] if isinstance(amount, int)]
+    return Evidence(intent=intent, charges_paise=tuple(charges))
+
+
+def justified(action: ProposedAction, evidence: Evidence) -> Verdict:
+    """
+    Whether the conditions for paying this refund without a person hold in the ledger.
+
+    This is the check the guardrail was missing. Judging a refund on its amount and the model's
+    own confidence means a confident model can have any small refund paid by asserting it is
+    owed -- and a model reading a customer's email is exactly the thing an email can talk round.
+    Confidence is not evidence. An automatic payment needs the duplicate to be real: the message
+    read as a duplicate charge, and the ledger showing two charges of the same amount on that
+    order. Being charged more than once is not being charged twice -- an order billed for the
+    item and then for shipping has two charges and no duplicate, and taking that as one would
+    leave the whole decision resting on the model's reading of an email again.
+
+    The amount is deliberately not a condition. The ledger refuses a refund larger than the order
+    was charged, the limit bounds what runs without a person, and refunds split into parts are
+    judged as the total they add up to, so requiring the amount to equal one charge exactly would
+    refuse legitimate partial refunds and add no safety.
+
+    Nothing established here is forbidden -- it is a person's to decide.
+    """
+    order_id = action.args["order_id"]
+    if evidence.intent != Intent.DUPLICATE_CHARGE:
+        return Verdict(
+            runs=False,
+            reason=f"this reads as {READING_OF[evidence.intent] if evidence.intent else 'a message that was never read'}, "
+            "not a duplicate charge, so a person decides whether it is owed",
+            refused=True,
+        )
+    if not evidence.charges_paise:
+        return Verdict(
+            runs=False,
+            reason=f"order {order_id} was never looked up, so nothing confirms a duplicate charge",
+            refused=True,
+        )
+    if len(evidence.charges_paise) < 2:
+        return Verdict(
+            runs=False,
+            reason=f"order {order_id} was charged once, so there is no duplicate to refund",
+            refused=True,
+        )
+    if not any(evidence.charges_paise.count(amount) > 1 for amount in evidence.charges_paise):
+        return Verdict(
+            runs=False,
+            reason=f"order {order_id} was charged {len(evidence.charges_paise)} times but no two charges are "
+            "the same amount, so none of them is a duplicate of another",
+            refused=True,
+        )
+    return Verdict(runs=True, reason=None)
 
 
 def rupees(paise: int) -> str:

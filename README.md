@@ -43,6 +43,7 @@ to fail first, because the failure is the part worth seeing.
 | `app/guardrails.py` | Which refunds run without a person: under a limit on the order's total refunds, and at or above a confidence. Both are a row in Postgres, read at the moment of deciding, so `python -m app.guardrails set` changes behaviour with no code change; a limit of Rs 0 stops automatic refunds. |
 | `app/approvals.py`, `app/web.py` | The approval queue, and a local screen on `127.0.0.1:8055` to approve or reject with the evidence in front of you. It also lists every run waiting for a person with nothing to approve. Everything shown is escaped, every decision needs the page's token, and the screen cannot pay anything itself. |
 | `app/tracing.py`, `app/traces.py` | Every run as one OpenTelemetry trace: spans written with the steps they describe, read back as a tree for the `/runs` pages, and copied to a Langfuse on this machine when one is configured. `python -m app.tracing env` writes that Langfuse's secrets. |
+| `app/failures.py` | Why a failed run failed, in one of six fixed categories, decided by rules over what the run left behind rather than by a model. Written when the run rests; `python -m app.failures show` charts the mix, `backfill` names runs that rested before the column existed. |
 | `app/dead_letters.py` | Runs that ran out of attempts, and quarantined messages, each with the reason. `python -m app.dead_letters` lists them and requeues a run. |
 | `app/seed.py` | Loads a small fictional ledger: customers, orders, and the charges behind them. |
 | `app/baseline.py` | What a run costs before any optimisation, so later cost work has something to compare against. |
@@ -60,6 +61,7 @@ pay back more than an order was charged. `policies/` holds six short fictional s
     .venv/bin/python -m app.poll fixtures/inbox.jsonl     # messages become runs
     .venv/bin/python -m app.run_agent                     # work each run until it is done or waits
     .venv/bin/python -m app.guardrails show               # the limits in force
+    .venv/bin/python -m app.failures show                 # how the failed runs failed, per week
     OPSAGENT_OPERATOR=yourname .venv/bin/python -m app.web  # approve or reject on http://127.0.0.1:8055/approvals
 
 Priya's email ("charged twice for order #4821") is classified `duplicate_charge` and retrieves the
@@ -135,14 +137,18 @@ scoreboard, with how often the judge agrees with the exact checks beside its sco
 nothing: small local models are poor judges, and this one has not earned it yet.
 `python -m evals full` judges every case before a release and writes `evals/full.md`.
 
-The first recording, on llama3.1:8b, is the baseline in `evals/scoreboard.md`, and it is not flattering.
-The agent completes 89 of the 150 cases (59%). When a case should reach a person it does 85% of the
-time, and 90% of the cases it hands over should be. It also made 19 unsafe payments: refunds under the
-limit, paid with no person involved, that a person should have decided -- a claimed double charge
-with one charge on the ledger, change-of-mind and damaged-item refunds paid without checking the
-policy's conditions, one prompt injection. The guardrail checks the amount and the model's confidence,
-not whether the policy allows the refund. Those 19 cases are named on the scoreboard and pinned: a
-case that is safe today becoming unsafe fails the gate, and fixing the 19 is the next piece of work.
+The first recording, on llama3.1:8b, was not flattering: 89 of the 150 cases complete (59%), and 19
+unsafe payments -- refunds under the limit, paid with nobody involved, that a person should have
+decided. A claimed double charge with one charge on the ledger; change-of-mind and damaged-item
+refunds paid without checking the policy's conditions; one prompt injection. The guardrail checked
+the amount and the model's confidence, not whether the refund was owed at all. Those 19 were named
+on the scoreboard and pinned rather than quietly fixed, so the number had to be answered.
+
+Today's baseline in `evals/scoreboard.md`: **112 of 150 (75%), and no unsafe payments**. Every case
+that should reach a person now does, and 91% of those handed over should be. Two changes account
+for it -- an automatic payment must satisfy conditions that hold in the ledger, and a planner that
+asks for a result it has already been shown is asked once more before anyone is woken. Both are
+measured in `RELIABILITY.md`, with what they cost. The remaining 38 incomplete cases are there too.
 
 A recording is keyed by what the model was asked, not by what it said, so a hand-edited reply would
 replay as real. At temperature 0 with a fixed seed the model's replies are byte-identical from run
@@ -192,6 +198,20 @@ and a cost derived from a fixed reference rate. Cost optimisation is measured ag
 The rate is arbitrary and says so; it is the same on both sides, so the ratio is
 what survives.
 
+## Reliability
+
+`RELIABILITY.md` holds what the agent gets right and wrong, measured over 150 labelled cases:
+task completion, escalation precision and recall, the failure mix across six fixed categories,
+and the nineteen refunds an earlier version paid that a person should have decided — how they
+were found, and how they were closed. The model's replies are recorded on a machine with a GPU
+and replayed in CI, so the gate runs without one; `python -m evals verify` re-runs the set live
+and reports what has changed since.
+
+Completion is 75 % with nothing unsafe paid, and the judge is too weak to gate on; both numbers
+are published rather than buried. `/failures` on the local screen charts the mix of real runs per
+week beside the mix of every accepted baseline, so a category a change made worse is visible
+before anything ships.
+
 ## Why the durability is hand-rolled
 
 A run is a row in Postgres, not a workflow in Temporal. Workers claim runs with
@@ -215,8 +235,7 @@ failure modes are the interesting part, and each one is pinned by a test.
 
 ## Planned
 
-A live deployment, a failure taxonomy, and cost routing measured against
-`BASELINE.md`.
+A live deployment, and cost routing measured against `BASELINE.md`.
 
 ## Running the experiments
 

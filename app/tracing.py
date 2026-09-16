@@ -114,6 +114,7 @@ class Attr:
     TOOL = "opsagent.tool"
     PROPOSAL_CONFIDENCE = "opsagent.proposal_confidence"
     FAILURE = "opsagent.failure"
+    FAILURE_CATEGORY = "opsagent.failure_category"
     # Policy search.
     COST_COUNTED = "opsagent.cost_counted"
     K = "opsagent.k"

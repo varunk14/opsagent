@@ -24,6 +24,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from app.contracts import ProposedAction
+from app.failures import record_category
 
 MAX_NOTE = 1000
 
@@ -176,6 +177,9 @@ def decide(
     moved = connection.execute(
         DECIDE, {"id": approval_id, "approved": approved, "by": name, "note": note}
     ).fetchone()
+    if moved is not None and not approved:
+        # A rejected run rests here, done with nothing paid: name it, in this same transaction.
+        record_category(connection, moved[0])
     return moved is not None
 
 

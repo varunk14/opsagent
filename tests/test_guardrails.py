@@ -16,8 +16,16 @@ from decimal import Decimal
 import psycopg
 import pytest
 
-from app.contracts import ProposedAction
-from app.guardrails import Guardrails, judge, load, set_limits
+from app.contracts import Intent, ProposedAction
+from app.guardrails import (
+    Evidence,
+    Guardrails,
+    evidence_of,
+    judge,
+    justified,
+    load,
+    set_limits,
+)
 
 DEFAULTS = Guardrails(auto_refund_limit_paise=500_000, min_confidence=Decimal("0.85"))
 
@@ -235,3 +243,110 @@ def test_a_bad_change_is_refused_before_it_reaches_the_database(db, changes, mes
         set_limits(db, **kwargs)
 
     assert load(db) == DEFAULTS
+
+
+# --- justified: is this refund owed at all? --------------------------------------
+
+
+def duplicate(*charges_paise: int, intent: Intent | None = Intent.DUPLICATE_CHARGE) -> Evidence:
+    """What a run established about order 4821 before proposing to pay."""
+    return Evidence(intent=intent, charges_paise=charges_paise)
+
+
+def test_a_confirmed_duplicate_refunded_at_one_of_its_charges_is_owed():
+
+    assert justified(refund(360_000), duplicate(360_000, 360_000)).runs is True
+
+
+def test_a_refund_for_anything_but_a_duplicate_is_a_persons_decision():
+
+    verdict = justified(refund(90_000), duplicate(360_000, 360_000, intent=Intent.REFUND_REQUEST))
+
+    assert verdict.runs is False
+    assert "duplicate" in (verdict.reason or "")
+
+
+def test_an_order_charged_once_has_no_duplicate_to_refund():
+
+    verdict = justified(refund(360_000), duplicate(360_000))
+
+    assert verdict.runs is False
+    assert verdict.reason == "order 4821 was charged once, so there is no duplicate to refund"
+
+
+def test_a_refund_proposed_before_any_lookup_is_not_owed_by_anything():
+
+    verdict = justified(refund(360_000), duplicate())
+
+    assert verdict.runs is False
+    assert "looked up" in (verdict.reason or "")
+
+
+def test_part_of_a_confirmed_duplicate_is_still_owed():
+    """
+    The amount is deliberately not a condition. The ledger already refuses a refund larger
+    than the order was charged, the limit bounds what runs without a person, and a refund
+    split into parts is judged as the total it adds up to -- so requiring the amount to equal
+    a charge exactly would refuse legitimate partial refunds while adding no safety.
+    """
+
+    assert justified(refund(90_000), duplicate(360_000, 360_000)).runs is True
+
+
+def test_the_charges_are_read_from_the_lookup_of_that_order_only():
+
+    steps = [
+        {"tool": "get_order", "args": {"order_id": "9999"}, "result": {"order_id": "9999", "charges_paise": [10, 10]}},
+        {"tool": "get_order", "args": {"order_id": "4821"}, "result": {"order_id": "4821", "charges_paise": [360_000, 360_000]}},
+    ]
+
+    found = evidence_of(Intent.DUPLICATE_CHARGE, steps, "4821")
+
+    assert found.charges_paise == (360_000, 360_000)
+    assert found.intent == "duplicate_charge"
+
+
+def test_a_lookup_that_returned_nothing_leaves_no_charges():
+
+    steps = [{"tool": "get_order", "args": {"order_id": "4821"}, "result": None}]
+
+    assert evidence_of(Intent.DUPLICATE_CHARGE, steps, "4821").charges_paise == ()
+
+
+def test_a_refund_step_is_not_a_lookup_and_confirms_nothing():
+    """Only a lookup reports what the ledger holds. Any other step saying so is not asked."""
+    steps = [
+        {
+            "tool": "issue_refund",
+            "args": {"order_id": "4821"},
+            "result": {"order_id": "4821", "refunded": True, "charges_paise": [360_000, 360_000]},
+        },
+    ]
+
+    assert evidence_of(Intent.DUPLICATE_CHARGE, steps, "4821").charges_paise == ()
+
+
+def test_an_order_charged_twice_for_different_things_holds_no_duplicate():
+    """
+    Being charged more than once is not being charged twice. An order billed for the item and
+    then for shipping has two charges and no duplicate, and the only thing left saying it is a
+    duplicate would be the model's reading of an email the customer wrote -- which is the input
+    this check exists to stop trusting. Two charges of the same amount is the evidence.
+    """
+    verdict = justified(refund(90_000), duplicate(360_000, 12_000))
+
+    assert verdict.runs is False
+    assert "same amount" in (verdict.reason or "")
+
+
+def test_a_repeated_charge_among_others_is_still_a_duplicate():
+    assert justified(refund(90_000), duplicate(12_000, 360_000, 360_000)).runs is True
+
+
+def test_an_order_id_is_matched_exactly_and_never_normalised():
+    """A lookup of 04821 says nothing about 4821: the ids are compared as they are, not as numbers."""
+    steps = [
+        {"tool": "get_order", "args": {"order_id": "04821"}, "result": {"order_id": "04821", "charges_paise": [10, 10]}}
+    ]
+
+    assert evidence_of(Intent.DUPLICATE_CHARGE, steps, "4821").charges_paise == ()
