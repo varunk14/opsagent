@@ -7,6 +7,8 @@ docstring -- there are no implementations in the registry to call, so proposing
 a refund cannot issue one even by mistake.
 """
 
+import re
+
 from app.tools import TOOLS, describe_tools, described_argument
 
 
@@ -93,11 +95,40 @@ def test_the_prompt_says_once_which_arguments_are_required():
 
 
 def test_the_tool_list_keeps_the_hints_the_model_cannot_guess():
-    """Paise against rupees is a factor of a hundred, and an example order id shows the shape."""
+    """Paise against rupees is a factor of a hundred, and nothing in a message says which one."""
     described = describe_tools()
 
-    assert "360000" in described and "paise" in described.lower()
-    assert "4821" in described
+    assert "123400" in described and "paise" in described.lower()
+
+
+def test_the_tool_list_names_no_number_the_model_could_copy_into_a_real_case():
+    """
+    This used to require the opposite: an example order id, "e.g. 4821", to show the shape.
+
+    The model copied it. Replayed against a check that the customer wrote the order, 19 of the 150
+    recorded cases changed -- "Can I pay with UPI?", "hi", "What time does support work until?" --
+    because in every one the planner had looked up 4821, and none of those messages mention it.
+    The test ledger has no 4821, so each lookup quietly found nothing and all 150 still passed. The
+    demo ledger does have one, and it is Priya's.
+
+    So no order number and no amount from either ledger may appear here. An example that happens to
+    match a real entry is not an illustration; it is a value waiting to be pasted into a real case.
+    """
+    import json
+    from pathlib import Path
+
+    from app.seed import LEDGER
+
+    described = describe_tools()
+    root = Path(__file__).resolve().parent.parent
+    for ledger in (LEDGER, root / "evals" / "ledger.json"):
+        for order in json.loads(ledger.read_text())["orders"]:
+            assert re.search(rf"\b{re.escape(str(order['id']))}\b", described) is None, (
+                f"order {order['id']} from {ledger.name} is in the tool list"
+            )
+            assert str(order["amount_paise"]) not in described, (
+                f"{order['amount_paise']}, order {order['id']}'s amount in {ledger.name}, is in the tool list"
+            )
 
 
 def test_the_tool_list_does_not_carry_the_validation_the_code_enforces():

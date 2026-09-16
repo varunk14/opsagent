@@ -51,7 +51,7 @@ TOOLS: tuple[ToolDescription, ...] = (
                     "type": "string",
                     "maxLength": 32,
                     "pattern": ORDER_ID_PATTERN,
-                    "description": "The order number, e.g. 4821",
+                    "description": "The order number exactly as the customer wrote it. Never one they did not write",
                 }
             },
             "required": ["order_id"],
@@ -90,9 +90,11 @@ TOOLS: tuple[ToolDescription, ...] = (
                     "type": "string",
                     "maxLength": 32,
                     "pattern": ORDER_ID_PATTERN,
-                    # Without this the argument renders as a bare `order_id (string)`. The raw
-                    # schema used to show the pattern; the prose does not, so say the shape here.
-                    "description": "The order number you looked up, e.g. 4821",
+                    # Without this the argument renders as a bare `order_id (string)`. It used to
+                    # end "e.g. 4821", and the model copied that number into lookups for messages
+                    # that named no order at all -- 4821 was asked for in 19 of 150 recorded cases,
+                    # none of which mention it. A concrete example in a prompt is a suggestion.
+                    "description": "The order number you looked up, exactly as the customer wrote it",
                 },
                 "amount_paise": {
                     "type": "integer",
@@ -100,7 +102,9 @@ TOOLS: tuple[ToolDescription, ...] = (
                     "maximum": MAX_AMOUNT_PAISE,
                     "description": (
                         "Whole paise, never rupees and never a decimal. "
-                        "Rs 3,600 is 360000."
+                        # Not 3,600: that is exactly what order 4821 was charged, and an example
+                        # that matches a real ledger entry is one the model can copy into a refund.
+                        "Rs 1,234 is 123400."
                     ),
                 },
                 "reason": {
