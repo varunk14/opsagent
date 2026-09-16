@@ -25,7 +25,14 @@ from app.graph.prompts import run_prompt_version
 from app.intake import accept
 from app.llm import DEFAULT_MODEL, ModelUnavailable, Reply
 from app.retrieval import PolicySearchUnavailable
-from app.run_agent import ALREADY_SHOWN, MICRO_DOLLAR, LostClaim, claim_next, work_next
+from app.run_agent import (
+    ALREADY_SHOWN,
+    MICRO_DOLLAR,
+    LostClaim,
+    claim_next,
+    tokens_by_model,
+    work_next,
+)
 from app.seed import load_ledger
 from tests.fakes import (
     CLASSIFIED_DUPLICATE,
@@ -955,3 +962,54 @@ def test_the_larger_count_per_model_wins_whichever_side_holds_it():
     assert most_spent({"a": [10, 2]}, {"a": [4, 5]}) == {"a": [10, 5]}
     assert most_spent({"a": [1, 1]}, {"b": [2, 2]}) == {"a": [1, 1], "b": [2, 2]}
     assert most_spent({}, {"a": [3, 4]}) == {"a": [3, 4]}
+
+
+def test_a_model_nobody_priced_costs_nothing_rather_than_failing_the_run(fresh_database):
+    """
+    The span records an unpriced call and omits its cost; the billing must agree.
+
+    Refusing to price is right. Refusing to finish a customer's refund because an accounting
+    convention is missing is not: the tokens are still recorded against the model, so the gap is
+    visible, and the run goes on.
+    """
+    from app.llm import Reply
+    from app.run_agent import charge
+
+    replies = [Reply(text="{}", prompt_tokens=1_000, completion_tokens=100, latency_ms=1, model="nobody-priced-this")]
+
+    cost, prompt_tokens, completion_tokens = charge({}, replies)
+
+    assert cost == Decimal("0.000000")
+    assert (prompt_tokens, completion_tokens) == (1_000, 100), "the tokens are still counted"
+    assert tokens_by_model({}, replies) == {"nobody-priced-this": [1_000, 100]}, "and still attributed"
+
+
+def test_a_run_that_started_before_the_split_keeps_what_it_had_spent():
+    """
+    A run mid-flight when this landed has totals but no per-model split.
+
+    Only one model had ever run, so its totals are that model's. Starting the split from nothing
+    would quietly throw away everything the run had already been charged for.
+    """
+    from app.llm import DEFAULT_MODEL, Reply
+    from app.run_agent import tokens_by_model
+
+    before = {"prompt_tokens": 5_000, "completion_tokens": 400, "model_calls": 4}
+    reply = Reply(text="{}", prompt_tokens=10, completion_tokens=1, latency_ms=1)
+
+    assert tokens_by_model(before, [reply]) == {DEFAULT_MODEL: [5_010, 401]}
+
+
+def test_a_replayed_reply_says_which_model_was_recorded():
+    """
+    A recording knows which model produced it -- it is half the key it is stored under.
+
+    Dropping it on the way back means every replayed call is priced as the default model, which
+    would erase exactly the saving this work exists to measure.
+    """
+    from app.llm import SMALL_MODEL
+    from evals.recording import RecordedReply, replayed
+
+    found = RecordedReply(model=SMALL_MODEL, task="classify", text="{}", prompt_tokens=10, completion_tokens=2)
+
+    assert replayed(found).model == SMALL_MODEL
