@@ -85,7 +85,15 @@ from app.graph.build import (
 from app.graph.nodes import escalation
 from app.graph.prompts import run_prompt_version
 from app.graph.state import AgentState
-from app.guardrails import Evidence, Verdict, evidence_of, judge, justified, over_budget
+from app.guardrails import (
+    Evidence,
+    Verdict,
+    evidence_of,
+    judge,
+    justified,
+    not_a_duplicate,
+    over_budget,
+)
 from app.guardrails import load as load_guardrails
 from app.llm import DEFAULT_MODEL, Ollama, Reply, ServiceUnavailable
 from app.retrieval import PolicyRetriever
@@ -715,10 +723,18 @@ def judged(
         limits = load_guardrails(connection)
         verdict = judge(proposal, limits, refunded_so_far(connection, run_id, proposal))
         # The limit and the confidence decide whether a person is asked; the conditions decide
-        # whether there is anything to ask about. Only a payment that would otherwise have run on
-        # its own is checked against them: one already going to a person is a person's to judge.
+        # whether there is anything to ask about.
         if verdict.runs:
             verdict = justified(proposal, evidence)
+        else:
+            # One of those conditions is worth asking about a refund already bound for a person:
+            # whether this was read as a duplicate charge at all. The ledger conditions decide
+            # whether a payment may run on its own, and one going to a person is a person's to
+            # judge -- but a refund on a message nobody read as a duplicate is not a better
+            # question for having a person attached to it. Queueing it hands them a filled-in
+            # refund and one button; handing over gives them the case. Refusal only: satisfying
+            # this can never put back a payment the judge stopped.
+            verdict = not_a_duplicate(evidence) or verdict
         span.set_attributes(
             {
                 Attr.VERDICT: "runs" if verdict.runs else "needs a person",

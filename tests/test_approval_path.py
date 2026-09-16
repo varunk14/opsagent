@@ -573,7 +573,7 @@ def test_a_refund_the_conditions_refuse_is_handed_over_even_when_a_person_was_al
     assert outcome.status == "waiting_approval", "it rests with a person either way"
     assert approvals_of(fresh_database, run_id) == [], "but with nothing to approve"
     assert refunds(fresh_database) == []
-    assert "not a duplicate charge" in (outcome.failure or "")
+    assert "the conditions for paying it were not met" in (outcome.failure or "")
 
 
 def test_the_conditions_can_refuse_a_refund_but_never_pay_one(fresh_database):
