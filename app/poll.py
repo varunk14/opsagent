@@ -29,7 +29,9 @@ nothing downstream could tell that apart from a quiet inbox. The bound above is
 what keeps that honest rather than expensive.
 
 Run:  .venv/bin/python -m app.poll fixtures/inbox.jsonl   one pass over a file
+      .venv/bin/python -m app.poll --check                reach every channel, change nothing
       .venv/bin/python -m app.poll --mailbox              one pass over a real mailbox
+      .venv/bin/python -m app.poll --telegram             one pass over the bot
 """
 
 import os
@@ -53,7 +55,15 @@ from app.adapters.mailbox import (
     settings_from_env,
     unread_messages,
 )
-from app.adapters.telegram import MAX_UPDATES, Bot, confirm_updates, unread_updates
+from app.adapters.telegram import (
+    MAX_UPDATES,
+    TOKEN_VAR,
+    Bot,
+    TelegramBot,
+    confirm_updates,
+    unread_updates,
+)
+from app.adapters.telegram import settings_from_env as telegram_settings_from_env
 from app.contracts import IncomingMessage
 from app.db import connect
 from app.intake import accept
@@ -291,8 +301,12 @@ def quarantine_refusal(connection: psycopg.Connection, item: Fetched) -> None:
 
 
 def main(argv: list[str]) -> int:  # pragma: no cover - the interactive driver
+    if len(argv) > 1 and argv[1] == "--check":
+        return check_channels()
     if len(argv) > 1 and argv[1] == "--mailbox":
         return poll_the_mailbox()
+    if len(argv) > 1 and argv[1] == "--telegram":
+        return poll_the_bot()
 
     inbox = Path(argv[1] if len(argv) > 1 else "fixtures/inbox.jsonl")
 
@@ -312,6 +326,80 @@ def main(argv: list[str]) -> int:  # pragma: no cover - the interactive driver
         print("\n  More waiting. Run it again.")
     elif summary.accepted == 0 and summary.seen:
         print("\n  Nothing new. Run it again as often as you like; that is the point.")
+    return 0
+
+
+def check_channels() -> int:  # pragma: no cover - needs the real services
+    """
+    Say whether each channel can be reached, and change nothing at all.
+
+    This exists because the first real test is the dangerous one. A pass over the mailbox marks mail
+    read; a pass over the bot moves a cursor that cannot be moved back. Neither is a thing to
+    discover a typo with. So this connects, counts, and stops.
+
+    It is safe by construction rather than by care: `unread_messages` does the SELECT and the SEARCH
+    when it is called and fetches nothing until its messages are iterated, and they are not iterated
+    here. The bot is asked for one update with no offset, and an offset is the only thing that
+    confirms anything.
+    """
+    ok = True
+
+    try:
+        settings = settings_from_env(os.environ)
+    except ValueError as exc:
+        print(f"  mail      {exc}")
+        ok = False
+    else:
+        try:
+            mailbox = open_mailbox(settings)
+            try:
+                waiting = unread_messages(mailbox).waiting
+            finally:
+                mailbox.logout()
+            print(f"  mail      OK, {waiting} unread in {settings.user}")
+        except ValueError as exc:
+            print(f"  mail      {exc}")
+            ok = False
+
+    try:
+        bot_settings = telegram_settings_from_env(os.environ)
+    except ValueError as exc:
+        print(f"  telegram  {exc}")
+        ok = False
+    else:
+        try:
+            waiting = len(TelegramBot(bot_settings).get_updates(offset=None, limit=1))
+            print(f"  telegram  OK, {'something' if waiting else 'nothing'} waiting for {bot_settings!r}")
+        except ValueError as exc:
+            print(f"  telegram  {exc}")
+            ok = False
+
+    print("\n  Nothing was read, marked, or confirmed." if ok else "\n  Fix the above, then run it again.")
+    return 0 if ok else 1
+
+
+def poll_the_bot() -> int:  # pragma: no cover - needs the real Bot API
+    """One pass over the bot the environment describes."""
+    try:
+        settings = telegram_settings_from_env(os.environ)
+    except ValueError as exc:
+        print(f"  {exc}")
+        print(f"  Set it in .env, which is not committed. {TOKEN_VAR} comes from @BotFather.")
+        return 1
+
+    with connect() as connection:
+        summary = poll_telegram(connection, TelegramBot(settings))
+
+    print(f"  read      {summary.seen} update(s) from {settings!r}")
+    print(f"  accepted  {summary.accepted}")
+    print(f"  duplicate {summary.duplicates}")
+    if summary.ignored:
+        print(f"  ignored   {summary.ignored}  (not messages: joins, edits, poll answers)")
+    if summary.refused:
+        print(f"\n  REFUSED   {summary.refused}")
+        print("  An update could not be read. `python -m app.dead_letters` lists it.")
+    if summary.more_waiting:
+        print("\n  More waiting. Run it again.")
     return 0
 
 

@@ -74,6 +74,40 @@ refund waits for a person instead, with no code change:
 
 Approved on the screen, the next worker pays exactly what was approved; rejected, nothing is paid.
 
+### Real channels
+
+`fixtures/inbox.jsonl` is a file we wrote. Email and Telegram are written by whoever finds the
+address, so both adapters refuse far more than they parse: a message with no id stable across a
+redelivery, no sender, no readable date, no text part, a body past the contract's limit, headers
+past 32 KB. Each refusal is recorded in `dead_letters` rather than retried forever.
+
+Settings live in `.env`, which is not committed:
+
+    OPSAGENT_IMAP_HOST="imap.gmail.com"
+    OPSAGENT_IMAP_USER="you@example.com"
+    OPSAGENT_IMAP_PASSWORD="abcd efgh ijkl mnop"   # an app password, not the account password
+    OPSAGENT_TELEGRAM_TOKEN="8012345678:AAH..."    # from @BotFather
+
+**Quote the values.** `.env` is sourced by the shell, so an app password with spaces in it is
+otherwise split, and the shell tries to run the rest of it as a command. The adapter deliberately
+does not strip whitespace from a password -- some providers issue them with spaces, and one
+helpfully removed space is an authentication failure with no visible cause.
+
+    set -a; . ./.env; set +a                  # this shell only; a new window needs it again
+    .venv/bin/python -m app.poll --check      # reach both channels, change nothing at all
+    .venv/bin/python -m app.poll --mailbox    # one pass over the mailbox
+    .venv/bin/python -m app.poll --telegram   # one pass over the bot
+
+`--check` exists because the first real run is the dangerous one: a mailbox pass marks mail read,
+and a Telegram pass moves a cursor that cannot be moved back. It connects, counts what is waiting,
+and stops -- safe by construction rather than by care, since the adapter fetches nothing until its
+messages are iterated and an offset is the only thing that confirms an update.
+
+Both channels are at-least-once on purpose. Nothing is marked read or confirmed until the
+transaction holding its run has committed, so a pass that dies half way offers the same messages
+again and intake recognises them. Confirming first would be tidier and would lose a customer in
+silence the first time a pass rolled back.
+
 ### Tracing
 
 Every run is one OpenTelemetry trace, and its trace id is the run's own id. However many ticks a run
