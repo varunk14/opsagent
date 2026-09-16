@@ -53,6 +53,7 @@ from app.adapters.mailbox import (
     settings_from_env,
     unread_messages,
 )
+from app.adapters.telegram import MAX_UPDATES, Bot, confirm_updates, unread_updates
 from app.contracts import IncomingMessage
 from app.db import connect
 from app.intake import accept
@@ -77,10 +78,11 @@ class PollSummary:
     collisions: int
     more_waiting: bool
     refused: int = 0
+    ignored: int = 0
 
     @property
     def seen(self) -> int:
-        return self.accepted + self.duplicates + self.collisions + self.refused
+        return self.accepted + self.duplicates + self.collisions + self.refused + self.ignored
 
 
 def has_more(messages: Iterator[IncomingMessage]) -> bool:
@@ -168,6 +170,27 @@ def poll_mailbox(connection: psycopg.Connection, mailbox: Mailbox) -> PollSummar
     )
 
 
+def poll_telegram(connection: psycopg.Connection, bot: Bot) -> PollSummary:
+    """
+    Take one pass over a bot: record what it offers, then move its cursor past what was recorded.
+
+    Everything the mailbox pass does, with a coarser and less forgiving confirmation. Telegram keeps
+    one number rather than a flag per message, and asking for updates past it discards everything
+    below it for good -- there is no unread flag to put back. So the ordering that matters for a
+    mailbox matters more here: confirmed early, a pass that then rolled back would have destroyed
+    the only copy of those messages.
+
+    How many a pass takes is MAX_UPDATES, in the adapter. Commits.
+    """
+    return poll_source(
+        connection,
+        unread_updates(bot),
+        confirm=lambda handled: confirm_updates(bot, handled),
+        cap=MAX_UPDATES,
+        name="poll_telegram",
+    )
+
+
 def poll_source(
     connection: psycopg.Connection,
     unread: Unread,
@@ -206,12 +229,16 @@ def poll_source(
             "connection with no work already open"
         )
 
-    accepted = duplicates = collisions = refused = 0
+    accepted = duplicates = collisions = refused = ignored = 0
     handled: list[str] = []
 
     with connection.transaction():
         for item in unread.messages:
-            if item.message is None:
+            if item.ignored is not None:
+                # Not a customer writing in. Confirmed so the channel moves past it, counted so a
+                # pass that saw nothing else does not look like a pass that saw nothing.
+                ignored += 1
+            elif item.message is None:
                 quarantine_refusal(connection, item)
                 refused += 1
             else:
@@ -234,6 +261,7 @@ def poll_source(
         duplicates=duplicates,
         collisions=collisions,
         refused=refused,
+        ignored=ignored,
         # What the channel listed, not what came back. An item that was offered and then not
         # delivered is still waiting, and counting only what we read would report a drained channel
         # with a backlog sitting behind it.

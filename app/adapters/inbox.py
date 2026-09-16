@@ -24,11 +24,21 @@ PREVIEW_CHARS = 2_000
 @dataclass(frozen=True)
 class Fetched:
     """
-    One item a channel offered, read or refused, with the handle that confirms it.
+    One item a channel offered, with the handle that confirms it.
 
-    Exactly one of `message` and `refusal` is set. Both outcomes are carried rather than one being
-    dropped, because a refusal is something a person needs to see -- and the caller cannot confirm
-    anything without the handle, which is the point of handing it back.
+    Exactly one of `message`, `refusal` and `ignored` is set, and the three are genuinely different
+    things rather than degrees of the same one:
+
+      - `message` read, and it becomes a run
+      - `refusal` someone wrote in and we could not read it. A person needs to see this, so it is
+        recorded in dead_letters
+      - `ignored` not a customer writing in at all -- somebody added the bot to a group, a poll was
+        answered. Recording these would bury the refusals that matter under noise nobody can act
+        on; passing over them silently would leave them offered forever, because the channel's
+        cursor never moves past what is never handled. So they are confirmed, counted, and dropped
+
+    A refusal is carried rather than dropped because it is the outcome a person needs. The caller
+    cannot confirm anything without the handle, which is the point of handing that back too.
 
     `handle` is the channel's own name for the item, opaque to everyone but the adapter that issued
     it: an IMAP message number, a Telegram update id. Whoever polls collects the handles of the work
@@ -45,6 +55,7 @@ class Fetched:
     preview: str
     message: IncomingMessage | None = None
     refusal: str | None = None
+    ignored: str | None = None
 
 
 @dataclass(frozen=True)
