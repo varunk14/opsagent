@@ -44,6 +44,7 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.approvals import PendingApproval, decide, list_handed_over, list_pending
+from app.costs import spend_by_day, spend_chart, tokens_by_model
 from app.db import connect
 from app.failures import FIXES, GOLDEN_HISTORY, failure_chart, golden_trend, mix_by_week
 from app.guardrails import Budgets, load, rupees
@@ -311,6 +312,13 @@ def create_app(
                 "fixes": FIXES,
             },
         )
+
+    @app.get("/costs", response_class=HTMLResponse)
+    def costs(request: Request) -> Response:
+        with connect(dsn) as connection:
+            days = spend_chart(spend_by_day(connection))
+            models = tokens_by_model(connection)
+        return page(request, "costs.html", {"days": days, "models": models})
 
     @app.get("/runs", response_class=HTMLResponse)
     def runs(request: Request) -> Response:
