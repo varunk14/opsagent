@@ -103,6 +103,12 @@ and a Telegram pass moves a cursor that cannot be moved back. It connects, count
 and stops -- safe by construction rather than by care, since the adapter fetches nothing until its
 messages are iterated and an offset is the only thing that confirms an update.
 
+**Telegram answers questions; refunds come by email.** An order is only ever shown to, or refunded
+to, the address it belongs to. A Telegram sender is an account number, not an address, so it owns no
+order and every lookup finds nothing -- deliberately. Linking a Telegram account to a customer would
+need that customer to prove the address once, and taking an email typed into the chat would let
+anyone claim anyone's refund.
+
 Both channels are at-least-once on purpose. Nothing is marked read or confirmed until the
 transaction holding its run has committed, so a pass that dies half way offers the same messages
 again and intake recognises them. Confirming first would be tidier and would lose a customer in
