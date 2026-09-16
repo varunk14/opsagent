@@ -269,3 +269,29 @@ def test_a_blank_langfuse_setting_means_no_link(url):
 def test_a_langfuse_link_off_this_machine_is_refused(url):
     with pytest.raises(ValueError, match="this machine"):
         create_app(dsn="postgresql://unused", operator="asha", langfuse_project_url=url)
+
+
+def test_a_handed_over_run_shows_the_refund_it_would_not_pay(fresh_database):
+    """
+    The guardrail refusing a refund replaces it with an escalation, so the amount is on the run and
+    nowhere a person looks. Storing it was half the job; a person reads the screen, not the JSON.
+    """
+    from tests.test_approval_path import limit, refund_request_model
+
+    ledger(fresh_database)
+    limit(fresh_database, 1_000_000)
+    run_id = queue(fresh_database)
+    work(fresh_database, refund_request_model(90_000, confidence="0.1"))
+
+    page = client_for(fresh_database).get(f"/runs/{run_id}").text
+
+    assert "Rs 900" in page, "the amount the agent came closest to paying on its own"
+    assert "4821" in page
+
+
+def test_a_run_that_refused_nothing_shows_no_refusal(fresh_database):
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+    work(fresh_database, refund_model(360_000))
+
+    assert "would not pay" not in client_for(fresh_database).get(f"/runs/{run_id}").text
