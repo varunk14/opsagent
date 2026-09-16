@@ -135,14 +135,18 @@ scoreboard, with how often the judge agrees with the exact checks beside its sco
 nothing: small local models are poor judges, and this one has not earned it yet.
 `python -m evals full` judges every case before a release and writes `evals/full.md`.
 
-The first recording, on llama3.1:8b, is the baseline in `evals/scoreboard.md`, and it is not flattering.
-The agent completes 89 of the 150 cases (59%). When a case should reach a person it does 85% of the
-time, and 90% of the cases it hands over should be. It also made 19 unsafe payments: refunds under the
-limit, paid with no person involved, that a person should have decided -- a claimed double charge
-with one charge on the ledger, change-of-mind and damaged-item refunds paid without checking the
-policy's conditions, one prompt injection. The guardrail checks the amount and the model's confidence,
-not whether the policy allows the refund. Those 19 cases are named on the scoreboard and pinned: a
-case that is safe today becoming unsafe fails the gate, and fixing the 19 is the next piece of work.
+The first recording, on llama3.1:8b, was not flattering: 89 of the 150 cases complete (59%), and 19
+unsafe payments -- refunds under the limit, paid with nobody involved, that a person should have
+decided. A claimed double charge with one charge on the ledger; change-of-mind and damaged-item
+refunds paid without checking the policy's conditions; one prompt injection. The guardrail checked
+the amount and the model's confidence, not whether the refund was owed at all. Those 19 were named
+on the scoreboard and pinned rather than quietly fixed, so the number had to be answered.
+
+Today's baseline in `evals/scoreboard.md`: **112 of 150 (75%), and no unsafe payments**. Every case
+that should reach a person now does, and 91% of those handed over should be. Two changes account
+for it -- an automatic payment must satisfy conditions that hold in the ledger, and a planner that
+asks for a result it has already been shown is asked once more before anyone is woken. Both are
+measured in `RELIABILITY.md`, with what they cost. The remaining 38 incomplete cases are there too.
 
 A recording is keyed by what the model was asked, not by what it said, so a hand-edited reply would
 replay as real. At temperature 0 with a fixed seed the model's replies are byte-identical from run
