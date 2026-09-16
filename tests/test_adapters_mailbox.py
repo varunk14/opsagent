@@ -9,12 +9,19 @@ No network. The IMAP conversation is faked, because what is under test is the pa
 imaplib -- and a test that needs a mailbox is a test nobody runs.
 """
 
+import time
 from datetime import UTC, datetime
 from email.message import EmailMessage
 
 import pytest
 
-from app.adapters.mailbox import MAX_FETCHED, message_from_bytes, unread_messages
+from app.adapters.mailbox import (
+    MAX_FETCHED,
+    MAX_HEADER_BYTES,
+    MAX_RAW_BYTES,
+    message_from_bytes,
+    unread_messages,
+)
 from app.contracts import Channel
 
 
@@ -155,6 +162,72 @@ def test_a_body_in_a_charset_nobody_has_is_refused_like_any_other_unreadable_bod
         message_from_bytes(raw)
 
 
+def test_a_date_with_no_timezone_is_refused():
+    """
+    A time with no offset is not a time. 09:15 in Mumbai is not 09:15 in Dublin.
+
+    This is refused by the contract rather than here, and it is tested at this level on purpose:
+    the refusal only reaches the poll loop because pydantic's ValidationError happens to subclass
+    ValueError. That is load-bearing and invisible, so it gets a test of its own.
+    """
+    with pytest.raises(ValueError):
+        message_from_bytes(an_email(date="Tue, 15 Sep 2026 09:15:00"))
+
+
+def test_a_pile_of_encoded_words_is_refused_before_anything_decodes_it():
+    """
+    One small email must not be able to stop the poll by being slow rather than malformed.
+
+    Python's header parser is worse than quadratic in the number of RFC 2047 encoded-words: a 664 KB
+    Subject takes 13 seconds to read, and 332 KB takes 0.6, on this machine. Nothing else here
+    defends against it -- the message is well-formed, so no refusal fires, and `unread_messages`
+    catches ValueError, not slowness. The cap is on the headers because that is where the cost is:
+    parsing the same message is a millisecond until a header is actually touched.
+    """
+    word = b"=?utf-8?B?QQ==?="
+    raw = (
+        b"From: priya@example.com\r\n"
+        b"Message-ID: <bomb@example.com>\r\n"
+        b"Date: Tue, 15 Sep 2026 09:15:00 +0000\r\n"
+        b"Subject: " + b" ".join([word] * 40_000) + b"\r\n"
+        b"\r\n"
+        b"I was charged twice.\r\n"
+    )
+
+    started = time.perf_counter()
+    with pytest.raises(ValueError, match="headers"):
+        message_from_bytes(raw)
+    spent = time.perf_counter() - started
+
+    # Unguarded this call takes about 13 seconds. The bound is loose because it is a slow-CI
+    # assertion, not a benchmark: anything under it means the header was never decoded.
+    assert spent < 2.0, f"the headers were decoded after all: {spent:.1f}s"
+
+
+def test_a_message_larger_than_the_cap_is_refused_unread():
+    """
+    The count cap bounds how many messages a poll takes; nothing bounded how large one could be.
+
+    The cost of this is real and worth stating: an email carrying a large attachment is refused
+    whole, and the sentence we wanted goes with it. That is the trade this project keeps making --
+    it reads text, the refusal is visible, and the message stays in the mailbox for a person.
+    """
+    with pytest.raises(ValueError, match="too large"):
+        message_from_bytes(b"x" * (MAX_RAW_BYTES + 1))
+
+
+def test_the_caps_are_small_enough_to_be_caps():
+    """
+    Pinned because every other test here is written relative to the constants.
+
+    A cap raised to something absurd would leave all of them green while the protection was gone.
+    The numbers that matter: at MAX_FETCHED a poll may hold MAX_FETCHED * MAX_RAW_BYTES in memory,
+    and the header parser's worst case grows faster than the square of MAX_HEADER_BYTES.
+    """
+    assert MAX_FETCHED * MAX_RAW_BYTES <= 100_000_000, "one poll could exhaust memory"
+    assert MAX_HEADER_BYTES <= 64 * 1024, "the header parser's worst case stops being bounded"
+
+
 def test_a_subject_in_another_charset_is_decoded_not_mangled():
     message = EmailMessage()
     message["From"] = "priya@example.com"
@@ -223,6 +296,29 @@ def test_one_unreadable_message_does_not_stop_the_others():
 
     assert [message.external_id for message in found] == ["good@example.com"]
     assert mailbox.seen == [b"2"], "the unreadable one is left unread"
+
+
+def test_a_message_that_cannot_be_marked_read_is_still_handed_on(caplog):
+    """
+    Failing to mark it read must not mean failing to answer it.
+
+    Dropping it would lose a real customer to a transient IMAP error. Handing it on costs a repeat
+    on the next poll, and intake is idempotent on the Message-ID, so the repeat is a lookup and
+    nothing written. It is logged because the cheap outcome and the expensive one -- a mailbox that
+    never accepts a flag, quietly spending every slot of every poll on the same message -- look
+    identical from here.
+    """
+
+    class WillNotMarkRead(FakeMailbox):
+        def store(self, number: bytes, command: str, flags: str):
+            return "NO", [b"over quota"]
+
+    mailbox = WillNotMarkRead({b"1": an_email(message_id="<stuck@example.com>")})
+
+    found = list(unread_messages(mailbox))
+
+    assert [message.external_id for message in found] == ["stuck@example.com"]
+    assert "stuck@example.com" in caplog.text
 
 
 def test_only_so_many_are_taken_from_one_poll():

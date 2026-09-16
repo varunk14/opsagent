@@ -9,6 +9,7 @@ The module is called `mailbox` rather than `email` on purpose -- it has to impor
 library's `email` package, and a sibling of that name would shadow it.
 """
 
+import logging
 from collections.abc import Iterator
 from datetime import datetime
 from email import message_from_bytes as parse_bytes
@@ -19,10 +20,24 @@ from typing import Any, Protocol
 
 from app.contracts import Channel, IncomingMessage
 
+log = logging.getLogger(__name__)
+
 # One poll is one batch of work, not the whole backlog. Without a cap a mailbox holding ten thousand
 # unread messages becomes ten thousand queued runs in a single pass, and the rate limits that protect
 # the agent are all per sender -- none of them would stop it.
 MAX_FETCHED = 50
+
+# A cap on the count bounds how many messages a poll takes, and nothing else. These two bound how
+# large one of them may be, which is a separate axis and was open until a security review closed it.
+#
+# The header cap is the one that matters. Python's structured header parser is worse than quadratic
+# in the number of RFC 2047 encoded-words, and the cost lands on *reading* a header, not on parsing
+# the message: a 664 KB Subject parses in a millisecond and then takes thirteen seconds to look at.
+# So the check is on the raw bytes, before any header is touched. At this cap the worst case
+# measured about eleven milliseconds, and real mail -- DKIM signatures, a long Received chain --
+# fits inside it comfortably.
+MAX_HEADER_BYTES = 32_768
+MAX_RAW_BYTES = 2_000_000
 
 
 class Mailbox(Protocol):
@@ -46,6 +61,7 @@ def message_from_bytes(raw: bytes) -> IncomingMessage:
     an invented id makes a redelivery a second run, a defaulted date files a three-week-old complaint
     as new, a body read out of an image is a misquoted customer.
     """
+    _refuse_if_oversize(raw)
     message = parse_bytes(raw, policy=default_policy)
 
     external_id = _identifier(message)
@@ -62,6 +78,28 @@ def message_from_bytes(raw: bytes) -> IncomingMessage:
         body=body,
         received_at=received_at,
     )
+
+
+def _refuse_if_oversize(raw: bytes) -> None:
+    """
+    Refuse a message too large to read, measured on the bytes, before anything parses them.
+
+    Both refusals cost something real. An email carrying a large attachment is turned away whole,
+    and the sentence we actually wanted goes with it; so is one with an unusually long header block.
+    Both are visible -- the message stays unread in the mailbox and a person can go and look -- which
+    is the trade this project keeps making. The alternative is an intake that anyone who can send
+    mail can stop, and a stopped intake is silent.
+    """
+    if len(raw) > MAX_RAW_BYTES:
+        raise ValueError(f"the email is too large to read: {len(raw)} bytes")
+
+    end_of_headers = raw.find(b"\r\n\r\n")
+    if end_of_headers == -1:
+        end_of_headers = raw.find(b"\n\n")
+    headers = raw if end_of_headers == -1 else raw[:end_of_headers]
+
+    if len(headers) > MAX_HEADER_BYTES:
+        raise ValueError(f"the email's headers are too large to read: {len(headers)} bytes")
 
 
 def _identifier(message: EmailMessage) -> str:
@@ -158,7 +196,19 @@ def unread_messages(mailbox: Mailbox) -> Iterator[IncomingMessage]:
         except ValueError:
             continue
 
-        mailbox.store(number, "+FLAGS", "\\Seen")
+        status, _ = mailbox.store(number, "+FLAGS", "\\Seen")
+        if status != "OK":
+            # Handed on regardless. Dropping it would lose a real customer to a transient IMAP
+            # error, where keeping it costs one repeat on the next poll that intake recognises and
+            # does not write. Logged because a transient failure and a mailbox that never accepts a
+            # flag -- quietly spending every slot of every poll on the same message -- look the same
+            # from here, and only the second one needs a person.
+            log.warning(
+                "could not mark %s read (%s); it will be offered again next poll",
+                message.external_id,
+                status,
+            )
+
         yield message
 
 
