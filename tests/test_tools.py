@@ -7,7 +7,7 @@ docstring -- there are no implementations in the registry to call, so proposing
 a refund cannot issue one even by mistake.
 """
 
-from app.tools import TOOLS, describe_tools
+from app.tools import TOOLS, describe_tools, described_argument
 
 
 def test_the_agent_knows_about_the_tools_it_will_need():
@@ -103,8 +103,8 @@ def test_the_tool_list_keeps_the_hints_the_model_cannot_guess():
 def test_the_tool_list_does_not_carry_the_validation_the_code_enforces():
     """
     maxLength, pattern, minimum and maximum are checked in app/contracts.py whatever the prompt
-    says, so sending them buys nothing. They were 45% of the plan prompt, and the plan prompt is
-    82% of everything this agent reads.
+    says, so sending them buys nothing. Measured across the four plan snapshots they were 19% of
+    the prompt, the tool list as a whole 49%, and the plan prompt is 82% of all this agent reads.
     """
     described = describe_tools()
 
@@ -121,3 +121,25 @@ def test_the_tool_list_is_materially_smaller_than_the_schema_it_replaces():
 
 def test_a_tool_left_out_is_left_out():
     assert "search_policy" not in describe_tools(exclude={"search_policy"})
+
+
+def test_an_argument_that_may_be_left_out_says_so():
+    """
+    The prompt promises "required unless it says optional", and nothing else keeps that promise.
+
+    Every argument on every tool is required today, so no real schema reaches this branch and no
+    snapshot covers it. Were it to break, the first tool with an optional argument would be
+    described to the model as demanding one it does not need -- and the prompt's one-line
+    convention, which is what the per-tool `required` lists were traded away for, would be a lie.
+    """
+    assert described_argument("note", {"type": "string"}, required=False) == "    note (string, optional)"
+    assert described_argument("note", {"type": "string"}, required=True) == "    note (string)"
+
+
+def test_an_argument_with_no_description_still_names_its_shape():
+    """A schema need not describe every argument; the line must not end on a dangling colon."""
+    assert described_argument("count", {"type": "integer"}, required=True) == "    count (integer)"
+
+
+def test_an_argument_of_no_stated_type_is_not_described_as_nothing():
+    assert described_argument("thing", {}, required=True) == "    thing (value)"
