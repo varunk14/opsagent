@@ -593,3 +593,33 @@ def test_the_conditions_can_refuse_a_refund_but_never_pay_one(fresh_database):
     assert refunds(fresh_database) == [], "the confidence floor still stops it"
     (asked,) = approvals_of(fresh_database, run_id)
     assert "confidence" in asked["reason"], "and it is still the confidence that a person is told about"
+
+
+def test_a_refund_that_was_refused_is_still_on_the_record(fresh_database):
+    """
+    Handing over replaces the refund with an escalation before the run is stored.
+
+    Without keeping it, the amount the agent was about to pay is nowhere a person can find it: a
+    guarded tool never reaches the steps, there is no approval row, and the proposal has been
+    overwritten by the escalation. Someone picking the case up would see that something was refused
+    and not what -- on the one path where the agent came closest to moving money on its own.
+    """
+    ledger(fresh_database)
+    limit(fresh_database, 1_000_000)
+    run_id = queue(fresh_database)
+
+    work(fresh_database, refund_request_model(90_000, confidence="0.1"))
+
+    refused = row(fresh_database, run_id)["state"]["agent"]["refused"]
+    assert refused["tool"] == "issue_refund"
+    assert refused["args"]["amount_paise"] == 90_000
+    assert refused["args"]["order_id"] == "4821"
+
+
+def test_a_run_that_refused_nothing_says_so_rather_than_inventing_a_refusal(fresh_database):
+    ledger(fresh_database)
+    run_id = queue(fresh_database)
+
+    work(fresh_database, refund_model(360_000))
+
+    assert row(fresh_database, run_id)["state"]["agent"]["refused"] is None
