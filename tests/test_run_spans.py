@@ -361,14 +361,17 @@ def test_an_outage_charge_is_not_rounded_apart_from_the_rest_of_the_run(fresh_da
 
 
 def test_a_refund_the_ledger_refuses_is_named_for_the_refusal(fresh_database, exported):
-    """Allowed by a raised limit, refused by the ledger cap: neither a hand-over nor a refund."""
-    from tests.test_approval_path import limit
+    """Allowed by the limit and owed by the conditions, refused by the cap: neither a hand-over nor a refund."""
+    from tests.test_approval_path import duplicate_model, limit, queue_about
 
     ledger(fresh_database)
-    run_id = queue(fresh_database)
     limit(fresh_database, 1_000_000)
+    for paid in ("first", "second"):
+        queue_about(fresh_database, "4902", f"span-cap-{paid}")
+        work(fresh_database, duplicate_model("4902", 90_000))
+    run_id = queue_about(fresh_database, "4902", "span-cap-third")
 
-    work(fresh_database, refund_model(800_000))
+    work(fresh_database, duplicate_model("4902", 90_000))
 
     refund = [span for span in spans_of(fresh_database, run_id) if span["name"] == "act"][-1]["attributes"]
     assert (refund[tracing.Attr.TOOL], refund[tracing.Attr.RESULT]) == ("issue_refund", "refused by the ledger")

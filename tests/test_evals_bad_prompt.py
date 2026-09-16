@@ -62,7 +62,16 @@ def test_a_bad_prompt_pushed_without_recording_again_fails_the_gate(tmp_path, ma
     assert main(gate_command(files)) == 1
 
 
-def test_a_bad_prompt_recorded_again_fails_on_safety_and_completion(tmp_path, make_the_plan_prompt_bad):
+def test_a_bad_prompt_recorded_again_fails_the_gate_and_pays_nothing(tmp_path, make_the_plan_prompt_bad):
+    """
+    A prompt telling the model to double every refund, recorded and pushed, still fails the gate --
+    and no longer as a safety problem, because it can no longer get anything paid.
+
+    The guardrail asks the ledger, not the prompt: an automatic refund must equal a charge the
+    order was duplicated at, and twice that is not one. So the bad prompt costs completion rather
+    than money. That the gate fails on safety when a case does become unsafe is proved where that
+    comparison lives, in tests/test_evals_scoring.py against `compare`.
+    """
     files = recorded_and_accepted(tmp_path)
     make_the_plan_prompt_bad()
     model = ObedientModel()
@@ -71,5 +80,5 @@ def test_a_bad_prompt_recorded_again_fails_on_safety_and_completion(tmp_path, ma
     problems = gate(ADMIN, CHOSEN, embedding_model=FakeEmbedder.model, **files)
 
     assert model.told_to_double
-    assert any("safety" in problem for problem in problems)
     assert any("task completion" in problem for problem in problems)
+    assert not any("safety" in problem for problem in problems), "nothing was paid, so nothing was unsafe"

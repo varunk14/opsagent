@@ -45,10 +45,10 @@
 | Failure | Cases |
 |---|---|
 | hallucinated_field | 0 |
-| tool_misuse | 3 |
+| tool_misuse | 0 |
 | loop | 13 |
 | context_overflow | 0 |
-| wrong_escalation | 22 |
+| wrong_escalation | 25 |
 | drift | 0 |
 
 ## Judge (smoke cases)

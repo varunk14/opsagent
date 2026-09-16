@@ -117,10 +117,12 @@ def justified(action: ProposedAction, evidence: Evidence) -> Verdict:
     own confidence means a confident model can have any small refund paid by asserting it is
     owed -- and a model reading a customer's email is exactly the thing an email can talk round.
     Confidence is not evidence. An automatic payment needs the duplicate to be real: the message
-    read as a duplicate charge, and the ledger showing two charges of the same amount on that
-    order. Being charged more than once is not being charged twice -- an order billed for the
-    item and then for shipping has two charges and no duplicate, and taking that as one would
-    leave the whole decision resting on the model's reading of an email again.
+    read as a duplicate charge, and the ledger showing exactly one amount charged twice on that
+    order, which is what the refund pays back. Being charged more than once is not being charged
+    twice -- an order billed for the item and then for shipping has two charges and no duplicate,
+    and taking that as one would leave the whole decision resting on the model's reading of an
+    email again. Nor is an order with two different amounts each charged twice: the ledger does
+    not say which of them the customer means, and only their message would, so a person reads it.
 
     The amount is deliberately not a condition. The ledger refuses a refund larger than the order
     was charged, the limit bounds what runs without a person, and refunds split into parts are
@@ -149,11 +151,28 @@ def justified(action: ProposedAction, evidence: Evidence) -> Verdict:
             reason=f"order {order_id} was charged once, so there is no duplicate to refund",
             refused=True,
         )
-    if not any(evidence.charges_paise.count(amount) > 1 for amount in evidence.charges_paise):
+    duplicated = {amount for amount in evidence.charges_paise if evidence.charges_paise.count(amount) > 1}
+    if not duplicated:
         return Verdict(
             runs=False,
             reason=f"order {order_id} was charged {len(evidence.charges_paise)} times but no two charges are "
             "the same amount, so none of them is a duplicate of another",
+            refused=True,
+        )
+    if len(duplicated) > 1:
+        return Verdict(
+            runs=False,
+            reason=f"order {order_id} has more than one amount charged twice "
+            f"({', '.join(rupees(amount) for amount in sorted(duplicated))}), and nothing here says which of "
+            "them the customer means, so a person decides",
+            refused=True,
+        )
+    if action.args["amount_paise"] not in duplicated:
+        return Verdict(
+            runs=False,
+            reason=f"{rupees(action.args['amount_paise'])} is not one of the charges duplicated on order "
+            f"{order_id} ({', '.join(rupees(amount) for amount in sorted(duplicated))}), so it is not what "
+            "this duplicate owes back",
             refused=True,
         )
     return Verdict(runs=True, reason=None)
