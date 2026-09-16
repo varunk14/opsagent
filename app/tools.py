@@ -128,10 +128,32 @@ TOOLS: tuple[ToolDescription, ...] = (
 )
 
 
+def described_argument(name: str, schema: dict, required: bool) -> str:
+    """One argument on one line: what to call it, what shape it is, and whether it must be there."""
+    shape = str(schema.get("type", "value"))
+    says = str(schema.get("description", "")).strip()
+    return f"    {name} ({shape}{'' if required else ', optional'})" + (f": {says}" if says else "")
+
+
 def describe_tools(exclude: Collection[str] = ()) -> str:
-    """The tool list as it appears in a prompt, leaving out tools that would be redundant."""
-    return "\n\n".join(
-        f"- {tool.name}: {tool.description}\n  arguments: {tool.parameters}"
-        for tool in TOOLS
-        if tool.name not in exclude
-    )
+    """
+    The tool list as it appears in a prompt, leaving out tools that would be redundant.
+
+    Written as prose rather than as the raw JSON schema. The schema's maxLength, pattern, minimum
+    and maximum are checked in app/contracts.py whatever a prompt says, so sending them to the model
+    buys nothing that is not already guaranteed -- and they were 45 % of the planning prompt, which
+    is itself 82 % of everything this agent reads. What stays is what the model cannot work out for
+    itself: what each tool does, when to reach for it, the arguments' names and shapes, and the few
+    facts a reader would otherwise have to guess, such as money being counted in paise.
+    """
+    described = []
+    for tool in TOOLS:
+        if tool.name in exclude:
+            continue
+        properties = tool.parameters.get("properties", {})
+        required = set(tool.parameters.get("required", ()))
+        arguments = [described_argument(name, schema, name in required) for name, schema in properties.items()]
+        # The convention is stated once by the prompt that uses this, not repeated per tool.
+        lines = [f"- {tool.name}: {tool.description}", *arguments]
+        described.append("\n".join(lines))
+    return "\n\n".join(described)

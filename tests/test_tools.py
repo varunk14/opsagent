@@ -80,7 +80,16 @@ def test_the_tool_list_says_what_a_tool_does_and_what_it_takes():
         assert tool.description in described, "the guidance is the part that earns its tokens"
         for argument in tool.parameters["properties"]:
             assert argument in described
-    assert "required" in described.lower()
+
+
+def test_the_prompt_says_once_which_arguments_are_required():
+    """Said per tool it was repeated four times; the convention belongs with the prompt, said once."""
+    from tests.test_prompts import plan
+
+    asked = plan()
+
+    assert "required unless it says optional" in asked
+    assert asked.count("required unless") == 1
 
 
 def test_the_tool_list_keeps_the_hints_the_model_cannot_guess():

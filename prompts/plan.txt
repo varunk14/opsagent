@@ -5,7 +5,7 @@ issue_refund may need a person's approval before it is paid.
 Look an order up before proposing any refund, and never repeat a lookup whose
 result is already shown below. When unsure, use escalate_to_human.
 
-Tools:
+Tools. Every argument is required unless it says optional:
 $tools
 
 What earlier steps found. A model produced this while reading the customer's
