@@ -230,3 +230,40 @@ def test_a_model_name_is_cut_to_a_bounded_length(exported):
     rows = walk(exported, LongNamed(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=PROPOSED_LOOKUP))
 
     assert named(rows, "classify.generate").model == "m" * 120
+
+
+# --- a call is recorded and priced as the model that answered it ------------------------------
+
+
+class SmallModel(ScriptedModel):
+    """A stand-in for the cheap tier: its replies say so, as the real client's do."""
+
+    def generate(self, prompt: str):
+        from dataclasses import replace
+
+        from app.llm import SMALL_MODEL
+
+        return replace(super().generate(prompt), model=SMALL_MODEL)
+
+
+def test_a_generation_is_named_for_the_model_that_answered_not_the_one_that_was_wrapped(exported):
+    """
+    With a ladder there is one wrapper and two models behind it, so the wrapper cannot say which
+    one answered. The reply can, and does.
+    """
+    from app.llm import SMALL_MODEL
+
+    rows = walk(exported, SmallModel(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=PROPOSED_LOOKUP))
+
+    assert named(rows, "classify.generate").model == SMALL_MODEL
+
+
+def test_a_generation_is_priced_at_the_rate_of_the_model_that_answered(exported):
+    from app.baseline import RATES
+    from app.llm import SMALL_MODEL
+
+    rows = walk(exported, SmallModel(classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=PROPOSED_LOOKUP))
+
+    call = named(rows, "classify.generate")
+    assert call.cost_usd == token_cost(IN, OUT, RATES[SMALL_MODEL])
+    assert call.cost_usd < token_cost(IN, OUT, REFERENCE_RATE), "the cheap tier is cheaper, or nothing is measurable"
