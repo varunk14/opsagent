@@ -1,7 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Costs — OpsAgent{% endblock %}
 {% block content %}
-<style>.bar { background: #456; height: 1em; min-width: 1px; }</style>
 <h1>What a run costs</h1>
 {% if not days %}
 <p>No runs yet.</p>
@@ -15,7 +14,7 @@ cost, which pulls its day down.</p>
 {% for day in days %}
   <tr>
     <td>{{ day.on }}</td>
-    <td><div class="bar" style="width: {{ day.width }}%"></div></td>
+    <td class="chart"><div class="bar" style="width: {{ day.width }}%"></div></td>
     <td>${{ day.each }}</td><td>{{ day.runs }}</td><td>${{ day.spent }}</td>
   </tr>
 {% endfor %}

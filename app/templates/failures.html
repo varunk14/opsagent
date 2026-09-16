@@ -1,7 +1,6 @@
 {% extends "base.html" %}
 {% block title %}Failures — OpsAgent{% endblock %}
 {% block content %}
-<style>.bar { background: #456; height: 1em; min-width: 1px; }</style>
 <h1>Failure mix</h1>
 {% if not weeks %}
 <p>No failed runs yet.</p>
@@ -11,7 +10,7 @@
 {% for week, rows in weeks %}
   <tr><th colspan="3">week of {{ week }}</th></tr>
   {% for category, count, width in rows %}
-  <tr><td>{{ category }}</td><td><div class="bar" style="width: {{ width }}%"></div></td><td>{{ count }}</td></tr>
+  <tr><td>{{ category }}</td><td class="chart"><div class="bar" style="width: {{ width }}%"></div></td><td>{{ count }}</td></tr>
   {% endfor %}
 {% endfor %}
 </table>
@@ -25,7 +24,7 @@
 {% for accepted in trend %}
   <tr><th colspan="3">{{ accepted.on }} &middot; {{ accepted.code }} &middot; {{ accepted.completed }} of {{ accepted.cases }} complete</th></tr>
   {% for category, count, width in accepted.mix %}
-  <tr><td>{{ category }}</td><td><div class="bar" style="width: {{ width }}%"></div></td><td>{{ count }}</td></tr>
+  <tr><td>{{ category }}</td><td class="chart"><div class="bar" style="width: {{ width }}%"></div></td><td>{{ count }}</td></tr>
   {% endfor %}
 {% endfor %}
 </table>
