@@ -28,9 +28,11 @@ would make the number of messages handled depend on where the file broke, and
 nothing downstream could tell that apart from a quiet inbox. The bound above is
 what keeps that honest rather than expensive.
 
-Run:  .venv/bin/python -m app.poll fixtures/inbox.jsonl
+Run:  .venv/bin/python -m app.poll fixtures/inbox.jsonl   one pass over a file
+      .venv/bin/python -m app.poll --mailbox              one pass over a real mailbox
 """
 
+import os
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -38,8 +40,19 @@ from pathlib import Path
 
 import psycopg
 from psycopg.pq import TransactionStatus
+from psycopg.types.json import Jsonb
 
 from app.adapters.fixture import read_messages
+from app.adapters.mailbox import (
+    MAX_FETCHED,
+    PASSWORD_VAR,
+    Fetched,
+    Mailbox,
+    mark_read,
+    open_mailbox,
+    settings_from_env,
+    unread_messages,
+)
 from app.contracts import IncomingMessage
 from app.db import connect
 from app.intake import accept
@@ -48,6 +61,14 @@ from app.intake import accept
 # transaction behind it stays short.
 DEFAULT_LIMIT = 500
 
+# The same unreadable message is kept once. The conflict target is migration 005's partial unique
+# index, which is what makes a redelivery free rather than another row.
+QUARANTINE_REFUSAL = """
+    INSERT INTO dead_letters (kind, idempotency_key, payload, reason)
+    VALUES ('message', %s, %s, %s)
+    ON CONFLICT (idempotency_key, md5(payload::text)) WHERE kind = 'message' DO NOTHING
+"""
+
 
 @dataclass(frozen=True)
 class PollSummary:
@@ -55,10 +76,11 @@ class PollSummary:
     duplicates: int
     collisions: int
     more_waiting: bool
+    refused: int = 0
 
     @property
     def seen(self) -> int:
-        return self.accepted + self.duplicates + self.collisions
+        return self.accepted + self.duplicates + self.collisions + self.refused
 
 
 def has_more(messages: Iterator[IncomingMessage]) -> bool:
@@ -115,7 +137,97 @@ def poll_once(
     )
 
 
+def poll_mailbox(connection: psycopg.Connection, mailbox: Mailbox) -> PollSummary:
+    """
+    Take one pass over a mailbox: record what it offers, then tell it what was recorded.
+
+    The ordering is the whole design, and it is the opposite way round from what is convenient.
+    Nothing is marked read until the transaction has committed. A pass that dies in the middle
+    therefore offers the same messages again, and the next pass recognises them and writes nothing
+    -- where marking first would leave an email read with no run behind it, which is a customer
+    dropped in silence and no record anywhere that it happened.
+
+    What it costs: delivery is at-least-once, so a crash between the commit and the marking means
+    a second look at work already done. Intake makes that cheap. It is the safe direction to be
+    wrong in, and the other direction has no safe version.
+
+    A message that cannot be read is written to dead_letters and then marked read like any other.
+    Left unread it would be re-fetched and re-parsed on every pass forever, spending one of the
+    pass's slots each time -- so one deliberately malformed email would degrade intake permanently.
+    Recorded, it is on the screen where someone will see it, which is the thing that mattered about
+    leaving it in the mailbox in the first place.
+
+    How many messages a pass takes is MAX_FETCHED, in the adapter. Commits.
+    """
+    if connection.pgconn.transaction_status != TransactionStatus.IDLE:
+        raise RuntimeError(
+            "poll_mailbox commits, so it needs its own transaction: call it on a "
+            "connection with no work already open"
+        )
+
+    accepted = duplicates = collisions = refused = 0
+    handled: list[bytes] = []
+
+    unread = unread_messages(mailbox)
+
+    with connection.transaction():
+        for item in unread.messages:
+            if item.message is None:
+                quarantine_refusal(connection, item)
+                refused += 1
+            else:
+                result = accept(connection, item.message)
+                if result.created:
+                    accepted += 1
+                elif result.collided:
+                    collisions += 1
+                else:
+                    duplicates += 1
+
+            handled.append(item.number)
+
+    # Only now, and outside the transaction: a failure here costs a repeat, where a failure inside
+    # it would roll back work the mailbox had already been told to forget.
+    for number in handled:
+        mark_read(mailbox, number)
+
+    return PollSummary(
+        accepted=accepted,
+        duplicates=duplicates,
+        collisions=collisions,
+        refused=refused,
+        # What the server listed, not what came back. A message that was listed and then not
+        # delivered is still waiting, and counting only what we read would report a drained mailbox
+        # with a backlog sitting behind it.
+        more_waiting=unread.waiting > MAX_FETCHED,
+    )
+
+
+def quarantine_refusal(connection: psycopg.Connection, item: Fetched) -> None:
+    """
+    Record a message that could not be read, once, however many times it arrives.
+
+    Keyed on the digest of the bytes rather than on anything inside the message. A message we
+    refused has no Message-ID we are willing to trust -- often that is precisely why it was refused
+    -- and a key taken from its contents would let one bad message stand in for another and hide it.
+
+    Does not commit; it belongs to the pass's transaction, so the letter and the run counts land
+    together or not at all.
+    """
+    connection.execute(
+        QUARANTINE_REFUSAL,
+        (
+            f"email-sha256:{item.digest}",
+            Jsonb({"preview": item.preview, "refusal": item.refusal}),
+            f"the message could not be read: {item.refusal}",
+        ),
+    )
+
+
 def main(argv: list[str]) -> int:  # pragma: no cover - the interactive driver
+    if len(argv) > 1 and argv[1] == "--mailbox":
+        return poll_the_mailbox()
+
     inbox = Path(argv[1] if len(argv) > 1 else "fixtures/inbox.jsonl")
 
     with connect() as connection:
@@ -134,6 +246,45 @@ def main(argv: list[str]) -> int:  # pragma: no cover - the interactive driver
         print("\n  More waiting. Run it again.")
     elif summary.accepted == 0 and summary.seen:
         print("\n  Nothing new. Run it again as often as you like; that is the point.")
+    return 0
+
+
+def poll_the_mailbox() -> int:  # pragma: no cover - needs a real mail server
+    """
+    One pass over the mailbox the environment describes.
+
+    Logs out in a finally, because an IMAP server holds the folder for a session that does not say
+    goodbye and the next pass would find it locked.
+    """
+    try:
+        settings = settings_from_env(os.environ)
+    except ValueError as exc:
+        print(f"  {exc}")
+        print(f"  Set them in .env, which is not committed. {PASSWORD_VAR} is an app password.")
+        return 1
+
+    mailbox = open_mailbox(settings)
+    try:
+        with connect() as connection:
+            summary = poll_mailbox(connection, mailbox)
+    finally:
+        mailbox.logout()
+
+    print(f"  read      {summary.seen} message(s) from {settings.user}")
+    print(f"  accepted  {summary.accepted}")
+    print(f"  duplicate {summary.duplicates}")
+
+    if summary.refused:
+        print(f"\n  REFUSED   {summary.refused}")
+        print("  A message could not be read -- no usable Message-ID, no text, an")
+        print("  unreadable date, or too large. It is recorded rather than retried")
+        print("  forever. `python -m app.dead_letters` lists it.")
+    if summary.collisions:
+        print(f"\n  COLLIDED  {summary.collisions}")
+        print("  A message arrived reusing a key that already exists, carrying")
+        print("  different text. `python -m app.dead_letters` lists it.")
+    if summary.more_waiting:
+        print("\n  More waiting. Run it again.")
     return 0
 
 

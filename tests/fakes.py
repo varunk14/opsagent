@@ -1,6 +1,7 @@
 """A model that answers from a script, chosen by the TASK line each prompt opens with."""
 
 import json
+from email.message import EmailMessage
 
 from app.llm import ModelUnavailable, Reply
 
@@ -127,3 +128,60 @@ class FakeRetriever:
     def search(self, question: str):
         self.questions.append(question)
         return list(self.passages)
+
+
+# --- a mailbox, without a mail server -------------------------------------------------------
+
+
+def an_email(
+    *,
+    sender: str = "priya@example.com",
+    subject: str | None = "Charged twice for order #4821",
+    body: str = "Hi, I think I was charged twice for order #4821.",
+    message_id: str | None = "<abc123@example.com>",
+    date: str = "Tue, 15 Sep 2026 09:15:00 +0000",
+) -> bytes:
+    """One plain-text email, as bytes off the wire."""
+    message = EmailMessage()
+    message["From"] = sender
+    if subject is not None:
+        message["Subject"] = subject
+    if message_id is not None:
+        message["Message-ID"] = message_id
+    message["Date"] = date
+    message.set_content(body)
+    return message.as_bytes()
+
+
+class FakeMailbox:
+    """
+    imaplib's shape, as much of it as the adapter uses.
+
+    No network, because what is under test is our parsing and our ordering, not imaplib -- and a
+    test that needs a real mailbox is a test nobody runs. It records what was marked read, which is
+    the assertion most of these tests are actually making.
+    """
+
+    def __init__(self, messages: dict[bytes, bytes], *, seen: list[bytes] | None = None) -> None:
+        self.messages = messages
+        self.seen = seen if seen is not None else []
+        self.selected: str | None = None
+        self.logged_out = False
+
+    def select(self, mailbox: str):
+        self.selected = mailbox
+        return "OK", [str(len(self.messages)).encode()]
+
+    def search(self, charset, *criteria):
+        return "OK", [b" ".join(self.messages)]
+
+    def fetch(self, number: bytes, parts: str):
+        return "OK", [(b"", self.messages[number])]
+
+    def store(self, number: bytes, command: str, flags: str):
+        self.seen.append(number)
+        return "OK", [b""]
+
+    def logout(self):
+        self.logged_out = True
+        return "BYE", [b""]
