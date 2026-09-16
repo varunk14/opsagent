@@ -86,7 +86,14 @@ TOOLS: tuple[ToolDescription, ...] = (
         parameters={
             "type": "object",
             "properties": {
-                "order_id": {"type": "string", "maxLength": 32, "pattern": ORDER_ID_PATTERN},
+                "order_id": {
+                    "type": "string",
+                    "maxLength": 32,
+                    "pattern": ORDER_ID_PATTERN,
+                    # Without this the argument renders as a bare `order_id (string)`. The raw
+                    # schema used to show the pattern; the prose does not, so say the shape here.
+                    "description": "The order number you looked up, e.g. 4821",
+                },
                 "amount_paise": {
                     "type": "integer",
                     "minimum": 1,
@@ -141,10 +148,12 @@ def describe_tools(exclude: Collection[str] = ()) -> str:
 
     Written as prose rather than as the raw JSON schema. The schema's maxLength, pattern, minimum
     and maximum are checked in app/contracts.py whatever a prompt says, so sending them to the model
-    buys nothing that is not already guaranteed -- and they were 45 % of the planning prompt, which
-    is itself 82 % of everything this agent reads. What stays is what the model cannot work out for
-    itself: what each tool does, when to reach for it, the arguments' names and shapes, and the few
-    facts a reader would otherwise have to guess, such as money being counted in paise.
+    buys nothing that is not already guaranteed -- and they were 19 % of the planning prompt, which
+    is itself 82 % of everything this agent reads. The tool list as a whole was 49 % of it.
+
+    What stays is what the model cannot work out for itself: what each tool does, when to reach for
+    it, the arguments' names and shapes, and the few facts a reader would otherwise have to guess,
+    such as money being counted in paise.
     """
     described = []
     for tool in TOOLS:

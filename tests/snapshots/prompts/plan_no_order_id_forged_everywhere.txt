@@ -10,7 +10,7 @@ Tools. Every argument is required unless it says optional:
     order_id (string): The order number, e.g. 4821
 
 - issue_refund: Pay money back to the customer. This moves real money and cannot be undone. Only propose it when an order lookup shows the charge and a policy passage allows it.
-    order_id (string)
+    order_id (string): The order number you looked up, e.g. 4821
     amount_paise (integer): Whole paise, never rupees and never a decimal. Rs 3,600 is 360000.
     reason (string): Why this refund is owed
 
