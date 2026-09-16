@@ -730,6 +730,7 @@ def test_outage_totals_are_folded_in_and_cleared_once_a_tick_records_its_own(fre
         "completion_tokens": 5,
         "model_calls": 1,
         "tokens_by_model": {DEFAULT_MODEL: [10, 5]},
+        "model_ms": 1,
     }
     with psycopg.connect(fresh_database) as connection:
         connection.execute("UPDATE runs SET next_retry_at = now() WHERE id = %s", (run_id,))
