@@ -223,6 +223,11 @@ are published rather than buried. `/failures` on the local screen charts the mix
 week beside the mix of every accepted baseline, so a category a change made worse is visible
 before anything ships.
 
+`DECISIONS.md` holds the reasoning behind the design — why durability is hand-rolled rather than
+Temporal, why Postgres is both the queue and the vector store, why the model may only propose, why
+the judge is published but gates nothing, and the two things that were planned, measured and then
+deliberately not built.
+
 ## Why the durability is hand-rolled
 
 A run is a row in Postgres, not a workflow in Temporal. Workers claim runs with
