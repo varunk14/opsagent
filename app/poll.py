@@ -34,7 +34,7 @@ Run:  .venv/bin/python -m app.poll fixtures/inbox.jsonl   one pass over a file
 
 import os
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,10 +43,10 @@ from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
 
 from app.adapters.fixture import read_messages
+from app.adapters.inbox import Fetched, Unread
 from app.adapters.mailbox import (
     MAX_FETCHED,
     PASSWORD_VAR,
-    Fetched,
     Mailbox,
     mark_read,
     open_mailbox,
@@ -159,16 +159,55 @@ def poll_mailbox(connection: psycopg.Connection, mailbox: Mailbox) -> PollSummar
 
     How many messages a pass takes is MAX_FETCHED, in the adapter. Commits.
     """
+    return poll_source(
+        connection,
+        unread_messages(mailbox),
+        confirm=lambda handled: [mark_read(mailbox, handle) for handle in handled],
+        cap=MAX_FETCHED,
+        name="poll_mailbox",
+    )
+
+
+def poll_source(
+    connection: psycopg.Connection,
+    unread: Unread,
+    *,
+    confirm: Callable[[list[str]], object],
+    cap: int,
+    name: str,
+) -> PollSummary:
+    """
+    Record what a channel offered, commit, and only then let the channel forget it.
+
+    This is the ordering, and it lives here once on purpose. Every channel needs it and every
+    channel confirms differently -- a mailbox sets a flag per message, a bot moves a cursor past
+    them all -- so what varies is `confirm` and what must not vary is when it is called. Written out
+    per adapter, this is the kind of rule that stays true in one copy and quietly stops being true
+    in the other.
+
+    Nothing is confirmed until the transaction has committed. A pass that dies in the middle
+    therefore sees the same items again, and the next pass recognises them and writes nothing --
+    where confirming first would leave an item the channel considers dealt with and no run behind
+    it, which is a customer dropped in silence and no record anywhere that it happened.
+
+    What it costs: delivery is at-least-once, so a crash between the commit and the confirmation
+    means a second look at work already done. Intake makes that cheap. It is the safe direction to
+    be wrong in, and the other direction has no safe version.
+
+    An item that cannot be read is written to dead_letters and then confirmed like any other. Left
+    unconfirmed it would be offered and re-parsed on every pass forever, spending one of the pass's
+    slots each time -- so one deliberately malformed message would degrade intake permanently.
+    Recorded, it is on the screen where someone will see it, which is the thing that mattered about
+    leaving it where it was in the first place.
+    """
     if connection.pgconn.transaction_status != TransactionStatus.IDLE:
         raise RuntimeError(
-            "poll_mailbox commits, so it needs its own transaction: call it on a "
+            f"{name} commits, so it needs its own transaction: call it on a "
             "connection with no work already open"
         )
 
     accepted = duplicates = collisions = refused = 0
-    handled: list[bytes] = []
-
-    unread = unread_messages(mailbox)
+    handled: list[str] = []
 
     with connection.transaction():
         for item in unread.messages:
@@ -184,22 +223,21 @@ def poll_mailbox(connection: psycopg.Connection, mailbox: Mailbox) -> PollSummar
                 else:
                     duplicates += 1
 
-            handled.append(item.number)
+            handled.append(item.handle)
 
     # Only now, and outside the transaction: a failure here costs a repeat, where a failure inside
-    # it would roll back work the mailbox had already been told to forget.
-    for number in handled:
-        mark_read(mailbox, number)
+    # it would roll back work the channel had already been told to forget.
+    confirm(handled)
 
     return PollSummary(
         accepted=accepted,
         duplicates=duplicates,
         collisions=collisions,
         refused=refused,
-        # What the server listed, not what came back. A message that was listed and then not
-        # delivered is still waiting, and counting only what we read would report a drained mailbox
+        # What the channel listed, not what came back. An item that was offered and then not
+        # delivered is still waiting, and counting only what we read would report a drained channel
         # with a backlog sitting behind it.
-        more_waiting=unread.waiting > MAX_FETCHED,
+        more_waiting=unread.waiting > cap,
     )
 
 

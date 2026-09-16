@@ -238,7 +238,7 @@ def test_every_unread_message_is_offered_with_the_number_that_marks_it():
     found = list(unread_messages(mailbox).messages)
 
     assert [item.message.external_id for item in found] == ["one@example.com", "two@example.com"]
-    assert [item.number for item in found] == [b"1", b"2"]
+    assert [item.handle for item in found] == ["1", "2"]
     assert mailbox.seen == [], "reading must not mark anything read"
     assert mailbox.selected == "INBOX"
 
@@ -258,7 +258,7 @@ def test_a_message_that_cannot_be_read_is_handed_back_as_a_refusal():
     assert len(found) == 2
     assert found[0].message is None
     assert "Message-ID" in found[0].refusal
-    assert found[0].number == b"1"
+    assert found[0].handle == "1"
     assert found[1].message.external_id == "good@example.com"
     assert found[1].refusal is None
 
@@ -286,9 +286,9 @@ def test_marking_a_message_read_says_whether_it_worked(caplog):
         def store(self, number: bytes, command: str, flags: str):
             return "NO", [b"over quota"]
 
-    assert mark_read(FakeMailbox({b"1": an_email()}), b"1") is True
+    assert mark_read(FakeMailbox({b"1": an_email()}), "1") is True
 
-    assert mark_read(WillNotMarkRead({b"1": an_email()}), b"1") is False
+    assert mark_read(WillNotMarkRead({b"1": an_email()}), "1") is False
     assert "NO" in caplog.text
 
 
@@ -306,7 +306,7 @@ def test_a_connection_that_drops_while_marking_is_reported_not_raised(caplog):
         def store(self, number: bytes, command: str, flags: str):
             raise OSError("connection reset by peer")
 
-    assert mark_read(DropsTheConnection({b"1": an_email()}), b"1") is False
+    assert mark_read(DropsTheConnection({b"1": an_email()}), "1") is False
     assert "OSError" in caplog.text
 
 
