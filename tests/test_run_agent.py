@@ -19,7 +19,7 @@ import pytest
 from psycopg import sql
 
 from app.baseline import REFERENCE_RATE, token_cost
-from app.contracts import Channel, IncomingMessage
+from app.contracts import Channel, IncomingMessage, ProposedAction
 from app.graph.build import build_graph
 from app.graph.prompts import run_prompt_version
 from app.intake import accept
@@ -836,3 +836,54 @@ def test_an_outage_during_the_second_ask_charges_for_both_and_returns_the_run(fr
     billing = run["state"]["billing"]
     assert billing["model_calls"] == 4, "classify, extract, the plan that repeated, and the retry"
     assert (billing["prompt_tokens"], billing["completion_tokens"]) == (40, 20)
+
+
+def test_a_hand_over_for_any_other_reason_is_not_asked_again(fresh_database):
+    """Only a repeat earns a second ask. A tool this worker does not run is settled, not confused."""
+    ledger(fresh_database)
+    queue(fresh_database)
+    model = ScriptedModel(
+        classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=[PROPOSED_LOOKUP, PROPOSED_SEARCH]
+    )
+
+    with psycopg.connect(fresh_database) as connection:
+        outcome = work_next(connection, graph_of(model))
+
+    assert outcome.failure == "plan: search_policy is not a tool this worker runs"
+    assert len(plan_prompts(model)) == 2, "the planner was asked once per tick and no more"
+
+
+def test_only_the_result_that_was_repeated_is_pointed_at(fresh_database):
+    """The mark says which answer the planner already has. Marking them all would say nothing."""
+    ledger(fresh_database)
+    queue(fresh_database)
+    model = ScriptedModel(
+        classify=CLASSIFIED_DUPLICATE,
+        extract=EXTRACTED_4821,
+        plan=[PROPOSED_LOOKUP, LOOKUP_3310, PROPOSED_LOOKUP, proposed_refund(360_000)],
+    )
+
+    with psycopg.connect(fresh_database) as connection:
+        work_next(connection, graph_of(model))
+
+    second = plan_prompts(model)[-1]
+    assert second.count(ALREADY_SHOWN) == 1, "one of the two lookups, not both"
+    assert '"order_id": "4821"' in second and '"order_id": "3310"' in second
+
+
+def test_a_step_is_the_same_step_only_when_the_tool_is_the_same_too():
+    """
+    A step is identified by what was called as well as how. Two tools given the same arguments
+    are two different things asked, and only the arguments matching is not a repeat -- otherwise
+    a tool added later that happens to take an order id would be mistaken for one already run.
+    """
+    from app.run_agent import repeats
+
+    arguments = {"order_id": "4821"}
+    lookup = ProposedAction(
+        tool="get_order", args=arguments, confidence=Decimal("0.9"), reasoning="confirm the charges"
+    )
+
+    assert repeats(lookup, {"tool": "get_order", "args": arguments, "result": {}}) is True
+    assert repeats(lookup, {"tool": "issue_refund", "args": arguments, "result": {}}) is False
+    assert repeats(lookup, {"tool": "get_order", "args": {"order_id": "3310"}, "result": {}}) is False
