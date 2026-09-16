@@ -27,15 +27,18 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
 from app.adapters.fixture import read_messages
+from app.llm import DEFAULT_MODEL, SMALL_MODEL
 
 OLLAMA = "http://localhost:11434/api/generate"
+# The model the first baseline happened to use. Kept as its own name: that measurement is a
+# fact about a past run, and must not change because the cheap tier is chosen differently later.
 NAIVE_MODEL = "llama3.2"
 
 # Sampling is pinned so the token counts are a property of the prompt rather than
@@ -80,6 +83,17 @@ REFERENCE_RATE = ReferenceRate(
     output_per_million=Decimal("0.60"),
 )
 
+# A rate per model, because otherwise routing work to a smaller one saves nothing that can be
+# measured: the token counts barely move, and a single rate would price them the same either way.
+# The ratio is what every provider's price list has in common -- a model a third the size costs
+# roughly a third as much -- and, like the rate itself, it cancels across a comparison.
+SMALL_RATE = ReferenceRate(
+    name="reference-2026-09-small (arbitrary, fixed, used on both sides of every comparison)",
+    input_per_million=Decimal("0.05"),
+    output_per_million=Decimal("0.20"),
+)
+
+RATES = {DEFAULT_MODEL: REFERENCE_RATE, SMALL_MODEL: SMALL_RATE}
 
 
 def token_cost(prompt_tokens: int, completion_tokens: int, rate: ReferenceRate) -> Decimal:
@@ -94,6 +108,26 @@ def token_cost(prompt_tokens: int, completion_tokens: int, rate: ReferenceRate) 
         Decimal(prompt_tokens) / million * rate.input_per_million
         + Decimal(completion_tokens) / million * rate.output_per_million
     )
+
+def rate_for(model: str) -> ReferenceRate:
+    """
+    The rate this model is priced at. A model with no rate is refused, never defaulted.
+
+    The same reasoning as refusing a reply that carries no token counts: a default would price an
+    unknown model at somebody else's rate, and the resulting figure would look entirely reasonable.
+    """
+    if model not in RATES:
+        raise KeyError(f"no reference rate for {model!r}: a model that cannot be priced cannot be measured")
+    return RATES[model]
+
+
+def cost_of(tokens_by_model: Mapping[str, tuple[int, int]]) -> Decimal:
+    """What a run cost, priced model by model. `tokens_by_model` maps each model to (prompt, completion)."""
+    return sum(
+        (token_cost(prompt, completion, rate_for(model)) for model, (prompt, completion) in tokens_by_model.items()),
+        Decimal(0),
+    )
+
 
 @dataclass(frozen=True)
 class StepMeasurement:

@@ -29,6 +29,10 @@ from pydantic import BaseModel, ValidationError
 OLLAMA = "http://localhost:11434/api/generate"
 DEFAULT_MODEL = "llama3.1:8b"
 
+# The cheap tier: big enough to read a message into a fixed shape, not to decide money. What it is
+# allowed to answer is chosen where the ladder is built, never here.
+SMALL_MODEL = "llama3.2"
+
 # Pinned, so a prompt change is the only thing that can move an answer.
 DETERMINISTIC = {"temperature": 0, "seed": 0}
 
