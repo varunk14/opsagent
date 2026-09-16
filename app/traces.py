@@ -30,7 +30,11 @@ _RUN_COLUMNS = """
            state -> 'untrusted' ->> 'sender',
            state -> 'untrusted' ->> 'subject',
            coalesce(jsonb_array_length(state -> 'agent' -> 'steps'), 0),
-           cost_usd, prompt_version, failure_class
+           cost_usd, prompt_version, failure_class,
+           -- The refund the guardrail would not allow, if there was one. Two named scalars rather
+           -- than the object: nothing under `agent` is safe to hand a template wholesale.
+           state -> 'agent' -> 'refused' -> 'args' ->> 'amount_paise',
+           state -> 'agent' -> 'refused' -> 'args' ->> 'order_id'
       FROM runs
 """
 LIST_RUNS = _RUN_COLUMNS + " ORDER BY created_at DESC, id LIMIT %s"
@@ -65,6 +69,10 @@ class RunSummary:
     cost_usd: Decimal
     prompt_version: str | None
     failure_class: str | None
+    # What the run proposed and the guardrail refused, so a person handed the case can see what it
+    # nearly paid. `None` on a run that proposed no refund, or whose refund was allowed.
+    refused_paise: int | None = None
+    refused_order_id: str | None = None
 
 
 @dataclass
@@ -168,10 +176,44 @@ def build_tree(spans: Sequence[TraceSpan]) -> list[TraceSpan]:
     return roots
 
 
+def whole_paise(value: Any) -> int | None:
+    """
+    The refused amount, which `->>` hands back as text.
+
+    Written by this code from an already-validated proposal, but it is read out of a JSON column,
+    and nothing that comes out of one is believed without being looked at. Anything that is not a
+    whole number of paise is no amount at all, rather than a number to put in front of a person.
+    """
+    if not isinstance(value, str) or not value.isdigit():
+        return None
+    return int(value)
+
+
+def run_from(values: Sequence[Any]) -> RunSummary:
+    """One row of _RUN_COLUMNS as a run, each column named. The refused amount arrives as text."""
+    (
+        run_id, status, created_at, sender, subject, steps,
+        cost_usd, prompt_version, failure_class, refused_paise, refused_order_id,
+    ) = values
+    return RunSummary(
+        id=run_id,
+        status=status,
+        received_at=created_at,
+        sender=sender,
+        subject=subject,
+        steps=steps,
+        cost_usd=cost_usd,
+        prompt_version=prompt_version,
+        failure_class=failure_class,
+        refused_paise=whole_paise(refused_paise),
+        refused_order_id=refused_order_id,
+    )
+
+
 def list_runs(connection: psycopg.Connection, limit: int = MAX_RUNS) -> list[RunSummary]:
     """The newest runs first, at most `limit` of them and never more than MAX_RUNS."""
     bounded = max(1, min(limit, MAX_RUNS))
-    return [RunSummary(*row) for row in connection.execute(LIST_RUNS, (bounded,)).fetchall()]
+    return [run_from(row) for row in connection.execute(LIST_RUNS, (bounded,)).fetchall()]
 
 
 def span_from(values: Sequence[Any]) -> TraceSpan:
@@ -205,4 +247,4 @@ def trace_of(connection: psycopg.Connection, run_id: UUID) -> RunTrace | None:
         return None
     spans = [span_from(values) for values in connection.execute(SPANS, (run_id,)).fetchall()]
     approvals = [ApprovalEvent(*values) for values in connection.execute(APPROVALS, (run_id,)).fetchall()]
-    return RunTrace(run=RunSummary(*row), roots=build_tree(spans), approvals=approvals)
+    return RunTrace(run=run_from(row), roots=build_tree(spans), approvals=approvals)
