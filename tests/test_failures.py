@@ -414,3 +414,82 @@ def test_the_mix_is_counted_per_week_and_category(fresh_database):
         rows = mix_by_week(connection)
 
     assert [(category, count) for _, category, count in rows] == [("loop", 1)]
+
+
+def history_file(path, *lines: dict) -> object:
+    """A history file holding these accepted baselines, in this order."""
+    path.write_text("".join(json.dumps(line, sort_keys=True) + "\n" for line in lines), encoding="utf-8")
+    return path
+
+
+def accepted(day: str, code: str, mix: dict[str, int], *, completed: int = 90) -> dict:
+    return {"accepted_on": day, "code": code, "cases": 150, "completed": completed, "failure_mix": mix}
+
+
+def test_no_history_file_is_no_trend_rather_than_an_error(tmp_path):
+    from app.failures import golden_trend
+
+    assert golden_trend(tmp_path / "never-written.jsonl") == []
+
+
+def test_every_accepted_baseline_is_a_row_of_all_six_categories_in_order(tmp_path):
+    from app.failures import golden_trend
+
+    path = history_file(
+        tmp_path / "history.jsonl",
+        accepted("2026-09-16", "c12eee8", {"loop": 17, "tool_misuse": 3, "wrong_escalation": 41}),
+        accepted("2026-09-17", "abc1234", {"loop": 17, "wrong_escalation": 0}, completed=131),
+    )
+
+    trend = golden_trend(path)
+
+    assert [(row.on, row.code, row.completed, row.cases) for row in trend] == [
+        ("2026-09-16", "c12eee8", 90, 150),
+        ("2026-09-17", "abc1234", 131, 150),
+    ]
+    for row in trend:
+        assert [category for category, _, _ in row.mix] == [category.value for category in FailureCategory]
+
+
+def test_a_missing_category_counts_zero_and_bars_scale_to_the_largest_anywhere(tmp_path):
+    from app.failures import golden_trend
+
+    path = history_file(
+        tmp_path / "history.jsonl",
+        accepted("2026-09-16", "c12eee8", {"loop": 20, "wrong_escalation": 40}),
+        accepted("2026-09-17", "abc1234", {"loop": 10}),
+    )
+
+    first, second = golden_trend(path)
+
+    assert dict((category, count) for category, count, _ in first.mix) == {
+        "hallucinated_field": 0, "tool_misuse": 0, "loop": 20, "context_overflow": 0, "wrong_escalation": 40, "drift": 0
+    }
+    assert dict((category, width) for category, _, width in first.mix)["wrong_escalation"] == 100  # 40 of 40
+    assert dict((category, width) for category, _, width in first.mix)["loop"] == 50  # 20 of 40
+    assert dict((category, width) for category, _, width in second.mix)["loop"] == 25  # 10 of 40, the largest anywhere
+
+
+def test_a_line_that_is_not_an_accepted_baseline_is_skipped_rather_than_read(tmp_path):
+    from app.failures import golden_trend
+
+    path = tmp_path / "history.jsonl"
+    path.write_text(
+        "not json at all\n"
+        + json.dumps({"accepted_on": "2026-09-16"}) + "\n"  # no mix: not a baseline
+        + json.dumps(accepted("2026-09-17", "abc1234", {"loop": 1}), sort_keys=True) + "\n"
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert [row.code for row in golden_trend(path)] == ["abc1234"]
+
+
+def test_a_trend_of_only_zeroes_draws_no_bar_rather_than_dividing_by_zero(tmp_path):
+    from app.failures import golden_trend
+
+    path = history_file(tmp_path / "history.jsonl", accepted("2026-09-16", "c12eee8", {}))
+
+    (row,) = golden_trend(path)
+
+    assert {width for _, _, width in row.mix} == {0}
