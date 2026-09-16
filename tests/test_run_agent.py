@@ -750,12 +750,12 @@ def repeating_model(*after_the_repeat: str) -> ScriptedModel:
 
 def test_a_repeated_lookup_is_asked_again_with_its_result_pointed_at(fresh_database):
     ledger(fresh_database)
-    run_id = queue(fresh_database)
+    queue(fresh_database)
     model = repeating_model(proposed_refund(360_000))
 
     with psycopg.connect(fresh_database) as connection:
-        work_next(connection, graph_of(model))  # the lookup
-        outcome = work_next(connection, graph_of(model))  # the repeat, then the second ask
+        # One call works the run to rest: the lookup, then the repeat and the second ask.
+        outcome = work_next(connection, graph_of(model))
 
     assert outcome.status == "done"
     assert outcome.failure is None
@@ -771,7 +771,6 @@ def test_the_second_ask_sees_the_result_it_asked_for_again(fresh_database):
 
     with psycopg.connect(fresh_database) as connection:
         work_next(connection, graph_of(model))
-        work_next(connection, graph_of(model))
 
     second = plan_prompts(model)[-1]
     assert '"charges_paise"' in second and "360000" in second
@@ -779,11 +778,10 @@ def test_the_second_ask_sees_the_result_it_asked_for_again(fresh_database):
 
 def test_repeating_a_second_time_hands_the_case_over(fresh_database):
     ledger(fresh_database)
-    run_id = queue(fresh_database)
+    queue(fresh_database)
     model = repeating_model(PROPOSED_LOOKUP)
 
     with psycopg.connect(fresh_database) as connection:
-        work_next(connection, graph_of(model))
         outcome = work_next(connection, graph_of(model))
 
     assert outcome.status == "waiting_approval"
@@ -799,7 +797,6 @@ def test_both_asks_are_charged_for(fresh_database):
 
     with psycopg.connect(fresh_database) as connection:
         work_next(connection, graph_of(model))
-        work_next(connection, graph_of(model))
 
     agent = row(fresh_database, run_id)["state"]["agent"]
     assert agent["model_calls"] == 5, "classify, extract and plan, then plan and plan again"
@@ -811,7 +808,6 @@ def test_the_marker_is_never_written_into_what_the_run_stores(fresh_database):
     model = repeating_model(proposed_refund(360_000))
 
     with psycopg.connect(fresh_database) as connection:
-        work_next(connection, graph_of(model))
         work_next(connection, graph_of(model))
 
     steps = row(fresh_database, run_id)["state"]["agent"]["steps"]

@@ -46,12 +46,12 @@ import os
 import random
 import socket
 import sys
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 import psycopg
@@ -384,6 +384,28 @@ def hand_over(why: str, reason: str) -> tuple[ProposedAction, str]:
     return escalated["proposal"], escalated["failure"]
 
 
+REPEATED_STEP = "repeated an earlier step"
+ALREADY_SHOWN = "already shown above; decide from this rather than asking for it again"
+
+
+def repeats(proposal: ProposedAction, step: Mapping[str, Any]) -> bool:
+    """Whether this step is the one the planner has just asked for again."""
+    return bool(step["tool"] == proposal.tool and step["args"] == dict(proposal.args))
+
+
+def marked_observations(steps: Sequence[Mapping[str, Any]], proposal: ProposedAction) -> list[dict[str, Any]]:
+    """
+    The run's observations with the one it asked for again pointed at.
+
+    The planner asking for a lookup whose result is already in front of it is the single largest
+    cause of runs that end with nobody helped. It reads as not having noticed the answer rather
+    than as being stuck, so the run is asked once more with that answer marked, and only a second
+    repeat wakes a person. The mark is added to a copy: what the run stores is what its tools
+    actually returned, never a note the driver wrote for one prompt.
+    """
+    return [{**step, "note": ALREADY_SHOWN} if repeats(proposal, step) else dict(step) for step in steps]
+
+
 def decide(state: AgentState, steps: list[dict[str, Any]], max_steps: int) -> tuple[ProposedAction, str | None]:
     """The action this tick takes: the proposal, or a hand-over to a person in its place."""
     proposal = state["proposal"]
@@ -396,8 +418,8 @@ def decide(state: AgentState, steps: list[dict[str, Any]], max_steps: int) -> tu
             f"{proposal.tool} is not a tool this worker runs",
             f"The planner asked for {proposal.tool}, which does not run here.",
         )
-    if any(step["tool"] == proposal.tool and step["args"] == dict(proposal.args) for step in steps):
-        return hand_over("repeated an earlier step", f"The planner asked for {proposal.tool} again with the same arguments.")
+    if any(repeats(proposal, step) for step in steps):
+        return hand_over(REPEATED_STEP, f"The planner asked for {proposal.tool} again with the same arguments.")
     if proposal.tool in RUNS_NOW and len(steps) >= max_steps:
         return hand_over(f"step budget of {max_steps} used", f"The run used all {max_steps} of its steps without deciding.")
     return proposal, None
@@ -702,6 +724,25 @@ def act(
     return status, proposal, failure, cost
 
 
+def plan_once_more(
+    graph: Any,
+    claimed: ClaimedRun,
+    before: Mapping[str, Any],
+    state: AgentState,
+    asked_for: ProposedAction,
+) -> AgentState:
+    """
+    Ask the planner again with the repeated result marked, and keep what both asks cost.
+
+    Every earlier step is already on record, so the walk starts at planning: one more model call,
+    not four. The replies of both asks are carried, because a run is charged for every call made
+    on its behalf whether or not the answer was used.
+    """
+    prior = {**prior_from(before), "observations": marked_observations(before.get("steps", []), asked_for)}
+    again = run_graph(graph, claimed.subject, claimed.body, cast(AgentState, prior))
+    return cast(AgentState, {**again, "replies": list(state.get("replies", [])) + list(again.get("replies", []))})
+
+
 def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_steps: int) -> RunOutcome:
     """Walk the graph from what the run holds, then act on one proposal in one transaction."""
     with traced_tick(claimed.run_id, {Attr.ATTEMPT: claimed.attempt}) as tick_span:
@@ -738,7 +779,13 @@ def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_st
             raise
 
         steps = list(before.get("steps", []))
+        asked_for = state.get("proposal")
         proposal, failure = decide(state, steps, max_steps)
+        if failure == f"plan: {REPEATED_STEP}" and asked_for is not None:
+            # Asked once more, with the result it repeated pointed at. Only this tick's own first
+            # repeat is given the second chance, so a planner that will not move on still stops.
+            state = plan_once_more(graph, claimed, before, state, asked_for)
+            proposal, failure = decide(state, steps, max_steps)
         with connection.transaction():
             if connection.execute(HOLD_CLAIM, (claimed.run_id, claimed.worker)).fetchone() is None:
                 raise LostClaim(f"run {claimed.run_id} was reclaimed before this worker could act on it")
