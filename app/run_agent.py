@@ -70,7 +70,7 @@ from app.approvals import (
     mark_executed,
     open_approval,
 )
-from app.baseline import REFERENCE_RATE, token_cost
+from app.baseline import REFERENCE_RATE, cost_of
 from app.contracts import Classification, ExtractedRefund, ProposedAction, StepRecord
 from app.db import apply_migrations, connect
 from app.embeddings import OllamaEmbedder
@@ -434,21 +434,37 @@ def decide(state: AgentState, steps: list[dict[str, Any]], max_steps: int) -> tu
     return proposal, None
 
 
+def tokens_by_model(before: Mapping[str, Any], replies: list[Reply]) -> dict[str, list[int]]:
+    """
+    What each model has spent on this run: this tick's replies added to what earlier ticks left.
+
+    Kept per model because that is the only way a run worked by more than one of them can be
+    priced. The rates differ, so totalled tokens no longer say what they cost.
+    """
+    spent = {model: list(counts) for model, counts in (before.get("tokens_by_model") or {}).items()}
+    for reply in replies:
+        running = spent.setdefault(reply.model, [0, 0])
+        running[0] += reply.prompt_tokens
+        running[1] += reply.completion_tokens
+    return spent
+
+
 def charge(before: Mapping[str, Any], replies: list[Reply]) -> tuple[Decimal, int, int]:
     """
     What this tick adds to the run's cost, and the run's token totals after it.
 
-    Charged as the difference between the rounded totals, so the stored cost is
-    always the whole run's tokens priced once, however many ticks it took.
+    Charged as the difference between the rounded totals, so the stored cost is always the whole
+    run's tokens priced once, however many ticks it took -- and now priced model by model, each at
+    its own rate.
     """
-    prompt_before = before.get("prompt_tokens", 0)
-    completion_before = before.get("completion_tokens", 0)
-    prompt_after = prompt_before + sum(reply.prompt_tokens for reply in replies)
-    completion_after = completion_before + sum(reply.completion_tokens for reply in replies)
-    delta = token_cost(prompt_after, completion_after, REFERENCE_RATE).quantize(MICRO_DOLLAR) - token_cost(
-        prompt_before, completion_before, REFERENCE_RATE
-    ).quantize(MICRO_DOLLAR)
-    return delta, prompt_after, completion_after
+    after = tokens_by_model(before, replies)
+    delta = priced(after).quantize(MICRO_DOLLAR) - priced(before.get("tokens_by_model") or {}).quantize(MICRO_DOLLAR)
+    return delta, sum(pair[0] for pair in after.values()), sum(pair[1] for pair in after.values())
+
+
+def priced(spent: Mapping[str, Sequence[int]]) -> Decimal:
+    """What those per-model token counts cost. Stored state arrives as lists; `cost_of` wants pairs."""
+    return cost_of({model: (counts[0], counts[1]) for model, counts in spent.items()})
 
 
 def summarise_agent(
@@ -461,6 +477,7 @@ def summarise_agent(
     """What gets stored on the run after this tick, and what the tick cost."""
     replies = state.get("replies", [])
     cost, prompt_tokens, completion_tokens = charge(before, replies)
+    spent = tokens_by_model(before, replies)
     classification = state.get("classification")
     extraction = state.get("extraction")
     agent = {
@@ -475,6 +492,7 @@ def summarise_agent(
         "model_calls": before.get("model_calls", 0) + len(replies),
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
+        "tokens_by_model": spent,
         "rate": REFERENCE_RATE.name,
     }
     return agent, cost
@@ -482,7 +500,7 @@ def summarise_agent(
 
 # What a run has been charged for so far. A tick records these with its agent state; an
 # outage has no agent state to record, so it records them alone, under state.billing.
-CHARGED = ("prompt_tokens", "completion_tokens", "model_calls")
+CHARGED = ("prompt_tokens", "completion_tokens", "model_calls", "tokens_by_model")
 
 
 def agent_of(connection: psycopg.Connection, run_id: UUID) -> dict[str, Any]:
@@ -499,9 +517,28 @@ def agent_of(connection: psycopg.Connection, run_id: UUID) -> dict[str, Any]:
     agent = dict(row[0]) if row[0] else {}
     billing = dict(row[1]) if row[1] else {}
     for key in CHARGED:
-        if key in billing:
+        if key not in billing:
+            continue
+        if key == "tokens_by_model":
+            agent[key] = most_spent(agent.get(key) or {}, billing[key])
+        else:
             agent[key] = max(agent.get(key, 0), billing[key])
     return agent
+
+
+def most_spent(recorded: Mapping[str, Sequence[int]], billed: Mapping[str, Sequence[int]]) -> dict[str, list[int]]:
+    """
+    The larger count per model, the same rule the other charged totals use.
+
+    Billing is written by a tick that failed, counting on from what the last tick that succeeded
+    recorded, so it is never behind -- but taking the larger of the two says so rather than
+    assuming it, and a model only one of them has seen is kept either way.
+    """
+    merged = {model: list(counts) for model, counts in recorded.items()}
+    for model, counts in billed.items():
+        held = merged.get(model, [0, 0])
+        merged[model] = [max(held[0], counts[0]), max(held[1], counts[1])]
+    return merged
 
 
 def record_step(
@@ -785,6 +822,9 @@ def tick(connection: psycopg.Connection, graph: Any, claimed: ClaimedRun, max_st
                     "prompt_tokens": prompt_tokens,
                     "completion_tokens": completion_tokens,
                     "model_calls": before.get("model_calls", 0) + len(outage.replies),
+                    # Per model as well, or the next tick would re-price this outage's tokens at
+                    # whichever model happened to answer next.
+                    "tokens_by_model": tokens_by_model(before, outage.replies),
                 }
                 released = connection.execute(
                     RELEASE,

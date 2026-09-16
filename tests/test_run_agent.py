@@ -23,7 +23,7 @@ from app.contracts import Channel, IncomingMessage, ProposedAction
 from app.graph.build import build_graph
 from app.graph.prompts import run_prompt_version
 from app.intake import accept
-from app.llm import ModelUnavailable, Reply
+from app.llm import DEFAULT_MODEL, ModelUnavailable, Reply
 from app.retrieval import PolicySearchUnavailable
 from app.run_agent import ALREADY_SHOWN, MICRO_DOLLAR, LostClaim, claim_next, work_next
 from app.seed import load_ledger
@@ -717,7 +717,12 @@ def test_outage_totals_are_folded_in_and_cleared_once_a_tick_records_its_own(fre
     run_id = queue(fresh_database)
     with psycopg.connect(fresh_database) as connection, pytest.raises(ModelUnavailable):
         work_next(connection, graph_of(ScriptedModel(classify=CLASSIFIED_DUPLICATE, extract=OUTAGE)))
-    assert row(fresh_database, run_id)["state"]["billing"] == {"prompt_tokens": 10, "completion_tokens": 5, "model_calls": 1}
+    assert row(fresh_database, run_id)["state"]["billing"] == {
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "model_calls": 1,
+        "tokens_by_model": {DEFAULT_MODEL: [10, 5]},
+    }
     with psycopg.connect(fresh_database) as connection:
         connection.execute("UPDATE runs SET next_retry_at = now() WHERE id = %s", (run_id,))
 

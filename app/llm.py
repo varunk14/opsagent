@@ -54,6 +54,9 @@ class Reply:
     prompt_tokens: int
     completion_tokens: int
     latency_ms: int
+    # Which model answered, because tokens alone do not say what they cost once more than one
+    # model is in play. Defaulted so a scripted stand-in is priced as the model it stands in for.
+    model: str = DEFAULT_MODEL
 
 
 class Model(Protocol):
@@ -187,7 +190,7 @@ def read_capped(stream: BinaryIO, limit: int) -> bytes:
 _REPLY_FIELDS = ("response", "prompt_eval_count", "eval_count")
 
 
-def parse_reply(body: bytes, latency_ms: int) -> Reply:
+def parse_reply(body: bytes, latency_ms: int, model: str = DEFAULT_MODEL) -> Reply:
     """
     Turn an Ollama response body into a Reply, or refuse.
 
@@ -209,6 +212,7 @@ def parse_reply(body: bytes, latency_ms: int) -> Reply:
         prompt_tokens=payload["prompt_eval_count"],
         completion_tokens=payload["eval_count"],
         latency_ms=latency_ms,
+        model=model,
     )
 
 
@@ -244,4 +248,4 @@ class Ollama:
             raise ModelUnavailable(f"cannot reach the model at {self.endpoint}: {exc}") from exc
         elapsed_ms = int((time.perf_counter() - started) * 1000)
 
-        return parse_reply(body, elapsed_ms)
+        return parse_reply(body, elapsed_ms, self.model)
