@@ -204,3 +204,32 @@ def test_more_models_than_the_page_draws_keeps_the_ones_that_spent(fresh_databas
         shown = tokens_by_model(connection, most=2)
 
     assert [name for name, _ in shown] == ["model-4", "model-5"], "the two that spent, still sorted by name"
+
+
+def test_the_cost_per_run_is_rounded_to_money_not_left_as_a_division():
+    """
+    Found by mutation: nothing pinned the rounding, because Decimal compares by value.
+
+    `Decimal("0.000333") == Decimal("0.00033333333...")` is False, but the test that looked at this
+    used values that divided exactly, so dropping the quantize changed nothing it could see. A
+    division that does not come out renders every digit it has onto the page.
+    """
+    chart = spend_chart([(TODAY, 3, Decimal("0.001000"))])
+
+    assert str(chart[0].each) == "0.000333"
+
+
+@pytest.mark.db
+def test_the_run_cap_loses_the_oldest_runs_not_the_newest(fresh_database: str):
+    """
+    Found by mutation: the earlier cap test used identical runs, so the order could not matter.
+
+    A burn-down that answered from the oldest rows would go stale the moment the table outgrew the
+    cap, and keep reporting a number from whenever that happened.
+    """
+    with psycopg.connect(fresh_database) as connection:
+        a_run(connection, on=TODAY - timedelta(days=3), tokens={"llama3.1:8b": [9000, 900]})
+        a_run(connection, on=TODAY - timedelta(days=1), tokens={"llama3.1:8b": [20, 2]})
+        a_run(connection, on=TODAY, tokens={"llama3.1:8b": [10, 1]})
+
+        assert tokens_by_model(connection, limit=2) == [("llama3.1:8b", (30, 3))]
