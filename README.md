@@ -196,10 +196,18 @@ that step without repeating it.
 
 ## Cost
 
-`BASELINE.md` holds what one run costs before any optimisation — tokens, latency,
-and a cost derived from a fixed reference rate. Cost optimisation is measured against it.
-The rate is arbitrary and says so; it is the same on both sides, so the ratio is
-what survives.
+`COSTS.md` holds what a run costs, measured before and after: **15.6 % fewer tokens, 12.6 % less
+money, and task completion up from 112 to 146 of 150** with no new safety violations. Cost is
+measured twice — twelve live runs and a deterministic replay of all 150 cases — because one figure
+from a laptop is not evidence. Latency is published as *not attributable*: this Mac throttles
+partway through any sample, and the note shows the run-by-run timings that say so.
+
+It also records the two things that were measured and then **not** built: a routing ladder worth at
+most 9.5 %, and a reply cache measured at 0.15 % of prompts. `/costs` on the screen is the live view.
+
+`BASELINE.md` holds the first, pre-optimisation measurement the comparison starts from. The
+reference rate is arbitrary and says so; it is the same on both sides, so the ratio is what
+survives.
 
 ## Reliability
 
@@ -238,7 +246,7 @@ failure modes are the interesting part, and each one is pinned by a test.
 
 ## Planned
 
-A live deployment, and cost routing measured against `BASELINE.md`.
+A live deployment.
 
 ## Running the experiments
 
