@@ -235,3 +235,80 @@ def test_a_bad_change_is_refused_before_it_reaches_the_database(db, changes, mes
         set_limits(db, **kwargs)
 
     assert load(db) == DEFAULTS
+
+
+# --- justified: is this refund owed at all? --------------------------------------
+
+
+def duplicate(*charges_paise: int, intent: str = "duplicate_charge") -> "Evidence":
+    """What a run established about order 4821 before proposing to pay."""
+    from app.guardrails import Evidence
+
+    return Evidence(intent=intent, charges_paise=charges_paise)
+
+
+def test_a_confirmed_duplicate_refunded_at_one_of_its_charges_is_owed():
+    from app.guardrails import justified
+
+    assert justified(refund(360_000), duplicate(360_000, 360_000)).runs is True
+
+
+def test_a_refund_for_anything_but_a_duplicate_is_a_persons_decision():
+    from app.guardrails import justified
+
+    verdict = justified(refund(90_000), duplicate(360_000, 360_000, intent="refund_request"))
+
+    assert verdict.runs is False
+    assert "duplicate" in (verdict.reason or "")
+
+
+def test_an_order_charged_once_has_no_duplicate_to_refund():
+    from app.guardrails import justified
+
+    verdict = justified(refund(360_000), duplicate(360_000))
+
+    assert verdict.runs is False
+    assert "4821" in (verdict.reason or "")
+
+
+def test_a_refund_proposed_before_any_lookup_is_not_owed_by_anything():
+    from app.guardrails import justified
+
+    verdict = justified(refund(360_000), duplicate())
+
+    assert verdict.runs is False
+    assert "looked up" in (verdict.reason or "")
+
+
+def test_part_of_a_confirmed_duplicate_is_still_owed():
+    """
+    The amount is deliberately not a condition. The ledger already refuses a refund larger
+    than the order was charged, the limit bounds what runs without a person, and a refund
+    split into parts is judged as the total it adds up to -- so requiring the amount to equal
+    a charge exactly would refuse legitimate partial refunds while adding no safety.
+    """
+    from app.guardrails import justified
+
+    assert justified(refund(90_000), duplicate(360_000, 360_000)).runs is True
+
+
+def test_the_charges_are_read_from_the_lookup_of_that_order_only():
+    from app.guardrails import evidence_of
+
+    steps = [
+        {"tool": "get_order", "args": {"order_id": "9999"}, "result": {"order_id": "9999", "charges_paise": [10, 10]}},
+        {"tool": "get_order", "args": {"order_id": "4821"}, "result": {"order_id": "4821", "charges_paise": [360_000, 360_000]}},
+    ]
+
+    found = evidence_of("duplicate_charge", steps, "4821")
+
+    assert found.charges_paise == (360_000, 360_000)
+    assert found.intent == "duplicate_charge"
+
+
+def test_a_lookup_that_returned_nothing_leaves_no_charges():
+    from app.guardrails import evidence_of
+
+    steps = [{"tool": "get_order", "args": {"order_id": "4821"}, "result": None}]
+
+    assert evidence_of("duplicate_charge", steps, "4821").charges_paise == ()
