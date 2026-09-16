@@ -4,36 +4,211 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}OpsAgent{% endblock %}</title>
+{# One inline sheet, by necessity: the CSP in app/web.py is `default-src 'none'` with only
+   `style-src 'unsafe-inline'`, so there is no stylesheet, font or image this page may fetch.
+   A system font stack for the same reason -- and because a console someone opens while
+   something is going wrong should render from cold with no reflow waiting on a webfont. #}
 <style>
-  :root { color-scheme: light; background: #fff; }
-  body { font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 60rem; padding: 0 1rem; color: #1a1a1a; background: #fff; line-height: 1.45; }
-  nav { margin-bottom: 1.5rem; }
-  nav a { margin-right: 1rem; }
-  h1 { font-size: 1.4rem; margin-top: 2rem; }
-  h2 { font-size: 1.1rem; margin: 0 0 .5rem; }
-  .card { border: 1px solid #ccc; border-radius: 6px; padding: 1rem 1.25rem; margin: 1rem 0; }
-  .reason { font-weight: 600; }
-  .customer { white-space: pre-wrap; background: #f6f6f6; padding: .75rem; border-radius: 4px; }
-  dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; }
-  dt { color: #555; }
+  :root {
+    color-scheme: light;
+    /* Near-black rather than black, hairline rules, off-white surfaces: the page reads as paper
+       with ink on it, so that colour still means something when it is finally used. */
+    --ink: #1a1a1e;
+    --ink-soft: #52555a;
+    --ink-faint: #8b8e94;
+    --paper: #ffffff;
+    --surface: #f9fbff;
+    --line: #e9ecf1;
+    --line-strong: #d7dbe3;
+    /* Spent on one thing only: what needs a person. */
+    --accent: #f0a202;
+    --accent-soft: #fff6e2;
+    --bad: #9b1c1c;
+    --bad-soft: #fdf2f2;
+    --radius: 10px;
+    --radius-sm: 6px;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    margin: 0;
+    color: var(--ink);
+    background: var(--paper);
+    line-height: 1.55;
+    font-size: 15px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  main { margin: 0 auto; max-width: 64rem; padding: 2.5rem 1.5rem 6rem; }
+
+  /* --- the bar across the top ------------------------------------------------------------ */
+
+  nav {
+    display: flex;
+    align-items: center;
+    gap: .15rem;
+    flex-wrap: wrap;
+    padding: .7rem 1.5rem;
+    border-bottom: 1px solid var(--line);
+    background: var(--paper);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  nav .wordmark {
+    font-weight: 620;
+    letter-spacing: -.015em;
+    margin-right: 1.25rem;
+  }
+  nav .wordmark::before {
+    content: "";
+    display: inline-block;
+    width: .5rem; height: .5rem;
+    margin-right: .5rem;
+    border-radius: 2px;
+    background: var(--accent);
+  }
+  nav a {
+    color: var(--ink-soft);
+    text-decoration: none;
+    padding: .3rem .65rem;
+    border-radius: var(--radius-sm);
+    font-size: .9rem;
+  }
+  nav a:hover { color: var(--ink); background: var(--surface); }
+
+  /* --- type ------------------------------------------------------------------------------ */
+
+  h1 { font-size: 1.6rem; letter-spacing: -.02em; font-weight: 620; margin: 0 0 .4rem; }
+  h2 { font-size: 1.05rem; letter-spacing: -.01em; font-weight: 600; margin: 2.5rem 0 .6rem; }
+  p { margin: 0 0 1rem; max-width: 46rem; }
+  a { color: var(--ink); text-underline-offset: 2px; }
+  code, td.cost, td.ms, td.tokens {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .88em;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* --- surfaces -------------------------------------------------------------------------- */
+
+  .card {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 1.2rem 1.4rem;
+    margin: 1rem 0;
+  }
+  .reason { font-weight: 600; letter-spacing: -.01em; }
+  .customer {
+    white-space: pre-wrap;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    padding: .85rem 1rem;
+    border-radius: var(--radius-sm);
+    font-size: .93rem;
+  }
+  .warning {
+    background: var(--accent-soft);
+    border: 1px solid #f3d9a0;
+    padding: .85rem 1rem;
+    border-radius: var(--radius-sm);
+  }
+  .note { color: var(--ink-soft); font-size: .9rem; }
+
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: .35rem 1.25rem; margin: 0; }
+  dt {
+    color: var(--ink-faint);
+    font-size: .78rem;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    padding-top: .15rem;
+  }
   dd { margin: 0; }
-  form { margin-top: .75rem; }
-  textarea { width: 100%; box-sizing: border-box; }
-  .warning { background: #fff4e5; border: 1px solid #f0b36b; padding: .75rem; border-radius: 4px; }
+
+  /* --- tables ---------------------------------------------------------------------------- */
+
   table { border-collapse: collapse; width: 100%; font-size: .9rem; }
-  th, td { text-align: left; padding: .3rem .5rem; border-bottom: 1px solid #eee; vertical-align: top; }
-  th { color: #555; font-weight: 600; }
-  .note { color: #555; font-size: .9rem; }
-  tr[data-depth="0"] { background: #f3f3f3; font-weight: 600; }
-  tr[data-depth="1"] td.name { padding-left: 1.5rem; }
-  tr[data-depth="2"] td.name { padding-left: 3rem; }
-  tr[data-depth="3"] td.name { padding-left: 4.5rem; }
-  tr.error td { color: #9b1c1c; }
+  th, td {
+    text-align: left;
+    padding: .5rem .65rem;
+    border-bottom: 1px solid var(--line);
+    vertical-align: top;
+  }
+  th {
+    color: var(--ink-faint);
+    font-weight: 600;
+    font-size: .76rem;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    border-bottom-color: var(--line-strong);
+  }
+  table tr:hover { background: var(--surface); }
   td.cost, td.ms, td.tokens { white-space: nowrap; }
+
+  /* The run list: everything except the subject is a short value that must not be broken across
+     lines. Left to wrap, seven columns each take a line of their own and the widest -- the cost --
+     is pushed off the edge. Nailing the short ones down gives the slack to the subject instead. */
+  table.runs td:not(:nth-child(3)) { white-space: nowrap; }
+  table.runs th, table.runs td { padding-left: .5rem; padding-right: .5rem; }
+  /* Below this the seven columns cannot all fit. Scrolling sideways keeps every value readable;
+     breaking an address across four lines to avoid the scrollbar does not. */
+  table.runs { min-width: 50rem; }
+  main { overflow-x: auto; }
+
+  /* The trace table: one row per span, indented by how deep it sits. */
+  tr[data-depth="0"], tr[data-depth="0"]:hover { background: var(--surface); font-weight: 600; }
+  tr[data-depth="1"] td.name { padding-left: 1.75rem; }
+  tr[data-depth="2"] td.name { padding-left: 3rem; }
+  tr[data-depth="3"] td.name { padding-left: 4.25rem; }
+  tr.error td, tr.error:hover td { color: var(--bad); background: var(--bad-soft); }
+
+  /* Shared by the failure mix and the burn-down, rather than defined once in each. The column is
+     given a width so the bars in it start and end in the same place and can be read against
+     each other; left to size itself around a bar it would be a few pixels wide. */
+  td.chart { width: 45%; padding-top: .8rem; }
+  .bar { background: var(--ink); height: .5rem; min-width: 2px; border-radius: 999px; opacity: .8; }
+
+  /* --- deciding -------------------------------------------------------------------------- */
+
+  form { margin-top: .85rem; display: inline-block; margin-right: .4rem; }
+  textarea, input[type="text"] {
+    width: 100%;
+    font: inherit;
+    padding: .55rem .7rem;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+    background: var(--paper);
+    color: var(--ink);
+  }
+  textarea:focus, input:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button {
+    font: inherit;
+    font-weight: 560;
+    padding: .5rem 1.1rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--ink);
+    background: var(--ink);
+    color: var(--paper);
+    cursor: pointer;
+  }
+  button:hover { background: #000; }
+  /* Only one of these moves money, and it is not the one that says no. */
+  form[action$="/reject"] button {
+    background: var(--paper);
+    color: var(--ink);
+    border-color: var(--line-strong);
+  }
+  form[action$="/reject"] button:hover { background: var(--surface); }
 </style>
 </head>
 <body>
-<nav><a href="/approvals">Approvals</a><a href="/guardrails">Guardrails</a><a href="/runs">Runs</a><a href="/failures">Failures</a></nav>
+<nav>
+  <span class="wordmark">OpsAgent</span>
+  <a href="/approvals">Approvals</a><a href="/guardrails">Guardrails</a><a href="/runs">Runs</a><a href="/failures">Failures</a><a href="/costs">Costs</a>
+</nav>
+<main>
 {% block content %}{% endblock %}
+</main>
 </body>
 </html>

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}Costs — OpsAgent{% endblock %}
+{% block content %}
+<h1>What a run costs</h1>
+{% if not days %}
+<p>No runs yet.</p>
+{% else %}
+<p>Cost per run, by the day it ran, over the last 30 days. A bar is that day&rsquo;s run against the dearest run
+on the chart, so a busy day does not look like a dear one. A run that has not finished is counted at no
+cost, which pulls its day down.</p>
+{# Not the `money` filter: it normalises away trailing zeros, and these columns are read down. #}
+<table>
+  <tr><th>day</th><th></th><th>per run</th><th>runs</th><th>spent</th></tr>
+{% for day in days %}
+  <tr>
+    <td>{{ day.on }}</td>
+    <td class="chart"><div class="bar" style="width: {{ day.width }}%"></div></td>
+    <td>${{ day.each }}</td><td>{{ day.runs }}</td><td>${{ day.spent }}</td>
+  </tr>
+{% endfor %}
+</table>
+{% endif %}
+
+<h2>Where the tokens went</h2>
+{% if not models %}
+<p>No run has recorded its tokens per model yet.</p>
+{% else %}
+<table>
+  <tr><th>model</th><th>prompt</th><th>completion</th></tr>
+{% for model, counts in models %}
+  <tr><td>{{ model }}</td><td>{{ counts[0] }}</td><td>{{ counts[1] }}</td></tr>
+{% endfor %}
+</table>
+{% endif %}
+
+<p><strong>Embedding tokens are not counted.</strong> Every policy search embeds its question with
+nomic-embed-text, and those tokens are in neither a run&rsquo;s cost nor this table. They are a small part
+of a run &mdash; one short call against several long ones &mdash; but the figures above are low by that
+much, and it is better to say so than to publish a number that looks complete.</p>
+{% endblock %}

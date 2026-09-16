@@ -322,24 +322,36 @@ def golden_trend(path: Path = GOLDEN_HISTORY) -> list[Accepted]:
             continue
         mix = found.get("failure_mix") if isinstance(found, dict) else None
         if isinstance(mix, dict):
-            accepted.append((found, [(category.value, _count(mix.get(category.value))) for category in FailureCategory]))
+            accepted.append((found, [(category.value, counted(mix.get(category.value))) for category in FailureCategory]))
     # The widths are scaled to the largest count the trend actually shows, so every bar on the page means the same thing.
     largest = max((count for _, mix in accepted for _, count in mix), default=0)
     return [
         Accepted(
             on=str(found.get("accepted_on", "")),
             code=str(found.get("code", "")),
-            completed=_count(found.get("completed")),
-            cases=_count(found.get("cases")),
+            completed=counted(found.get("completed")),
+            cases=counted(found.get("cases")),
             mix=[(category, count, round(100 * count / largest) if largest else 0) for category, count in mix],
         )
         for found, mix in accepted
     ]
 
 
-def _count(value: Any) -> int:
+def is_count(value: Any) -> bool:
+    """
+    Whether this is a whole number of things.
+
+    Asked separately from `counted` because a caller reading a pair of counts needs to know that a
+    value was rejected, not merely what it became. `counted(0.0)` and `counted(False)` are both 0,
+    and 0 == 0.0 == False, so a caller comparing the result back against the original cannot tell a
+    real zero from something that was never a number at all.
+    """
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def counted(value: Any) -> int:
     """A count read from a history line: anything that is not a whole number of things counts as none."""
-    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+    return value if is_count(value) else 0
 
 
 def main(argv: list[str]) -> int:  # pragma: no cover - the operator's command line
