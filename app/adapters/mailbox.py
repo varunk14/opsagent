@@ -11,6 +11,7 @@ library's `email` package, and a sibling of that name would shadow it.
 
 import logging
 from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import datetime
 from email import message_from_bytes as parse_bytes
 from email.message import EmailMessage
@@ -38,6 +39,21 @@ MAX_FETCHED = 50
 # fits inside it comfortably.
 MAX_HEADER_BYTES = 32_768
 MAX_RAW_BYTES = 2_000_000
+
+
+@dataclass(frozen=True)
+class Fetched:
+    """
+    One message the mailbox offered, read or refused, with the number that marks it.
+
+    Exactly one of `message` and `refusal` is set. Both outcomes are carried rather than one being
+    dropped, because a refusal is something a person needs to see -- and the caller cannot mark
+    anything read without the number, which is the point of handing it back.
+    """
+
+    number: bytes
+    message: IncomingMessage | None = None
+    refusal: str | None = None
 
 
 class Mailbox(Protocol):
@@ -167,16 +183,22 @@ def _text(message: EmailMessage) -> str:
         raise ValueError(f"the email's text cannot be decoded: {exc}") from exc
 
 
-def unread_messages(mailbox: Mailbox) -> Iterator[IncomingMessage]:
+def unread_messages(mailbox: Mailbox) -> Iterator[Fetched]:
     """
-    Yield every unread message in INBOX, up to MAX_FETCHED, marking each one read as it goes.
+    Yield every unread message in INBOX, up to MAX_FETCHED. Marks nothing read.
 
-    Marked *after* it parses, never before. A message the parser refuses is left unread, so it stays
-    in the mailbox where a person can look at it, rather than being silently consumed by the poll
-    that could not understand it.
+    Reading and marking are deliberately separate, and this is the reason: a message must not be
+    marked read until the run it became has actually been committed. Marked here, a pass that then
+    rolled back would leave the email read and no run anywhere -- a customer dropped in silence,
+    which is the failure this whole project is about. So the number comes back alongside the message
+    and the caller marks it once the work is durable.
 
-    One unreadable message does not stop the rest. A mailbox is not a file: whoever is behind the
-    malformed one is still waiting.
+    That trade is deliberate and it is not free: a pass that dies after committing and before
+    marking will offer the same message again. Intake is idempotent on the Message-ID, so the repeat
+    is a lookup that writes nothing. At-least-once is the safe direction to be wrong in.
+
+    A message that cannot be read comes back as a refusal rather than being skipped. One unreadable
+    message must not block the rest -- a mailbox is not a file, and whoever is behind it is waiting.
     """
     status, _ = mailbox.select("INBOX")
     if status != "OK":
@@ -189,27 +211,31 @@ def unread_messages(mailbox: Mailbox) -> Iterator[IncomingMessage]:
     for number in _numbers(data)[:MAX_FETCHED]:
         raw = _fetch(mailbox, number)
         if raw is None:
+            # The server offered the number and then would not produce the message. Nothing is
+            # marked, so the next poll asks again.
+            log.warning("message %r was listed but could not be fetched", number)
             continue
 
         try:
-            message = message_from_bytes(raw)
-        except ValueError:
-            continue
+            yield Fetched(number=number, message=message_from_bytes(raw))
+        except ValueError as exc:
+            yield Fetched(number=number, refusal=str(exc))
 
-        status, _ = mailbox.store(number, "+FLAGS", "\\Seen")
-        if status != "OK":
-            # Handed on regardless. Dropping it would lose a real customer to a transient IMAP
-            # error, where keeping it costs one repeat on the next poll that intake recognises and
-            # does not write. Logged because a transient failure and a mailbox that never accepts a
-            # flag -- quietly spending every slot of every poll on the same message -- look the same
-            # from here, and only the second one needs a person.
-            log.warning(
-                "could not mark %s read (%s); it will be offered again next poll",
-                message.external_id,
-                status,
-            )
 
-        yield message
+def mark_read(mailbox: Mailbox, number: bytes) -> bool:
+    """
+    Mark one message read, reporting whether the flag stuck.
+
+    Callers are expected to carry on when it did not: by the time this is called the run is written
+    and committed, and refusing to continue would lose that. It is logged because a transient
+    failure and a mailbox that never accepts a flag -- quietly spending every slot of every poll on
+    the same message -- look identical from here, and only the second one needs a person.
+    """
+    status, _ = mailbox.store(number, "+FLAGS", "\\Seen")
+    if status != "OK":
+        log.warning("could not mark message %r read (%s); it will be offered again", number, status)
+        return False
+    return True
 
 
 def _numbers(data: Any) -> list[bytes]:

@@ -19,6 +19,7 @@ from app.adapters.mailbox import (
     MAX_FETCHED,
     MAX_HEADER_BYTES,
     MAX_RAW_BYTES,
+    mark_read,
     message_from_bytes,
     unread_messages,
 )
@@ -270,55 +271,73 @@ class FakeMailbox:
         return "BYE", [b""]
 
 
-def test_every_unread_message_is_read_and_then_marked_read():
-    """Marked only after it is parsed, so a message the parser refuses is still there to look at."""
+def test_every_unread_message_is_offered_with_the_number_that_marks_it():
+    """
+    Reading does not mark anything read. That is the whole point of the split.
+
+    Whoever consumes these has to write the run down first and mark the message only once that
+    commit has landed. So the adapter hands back the number alongside the message and marks nothing
+    itself -- it cannot know whether the work behind the message survived.
+    """
     mailbox = FakeMailbox(
         {b"1": an_email(message_id="<one@example.com>"), b"2": an_email(message_id="<two@example.com>")}
     )
 
     found = list(unread_messages(mailbox))
 
-    assert [message.external_id for message in found] == ["one@example.com", "two@example.com"]
-    assert mailbox.seen == [b"1", b"2"]
+    assert [item.message.external_id for item in found] == ["one@example.com", "two@example.com"]
+    assert [item.number for item in found] == [b"1", b"2"]
+    assert mailbox.seen == [], "reading must not mark anything read"
     assert mailbox.selected == "INBOX"
 
 
-def test_one_unreadable_message_does_not_stop_the_others():
+def test_a_message_that_cannot_be_read_is_handed_back_as_a_refusal():
     """
-    A mailbox is not a file: one malformed message must not block every message behind it.
+    A refusal is an outcome, not an absence.
 
-    It is left unread deliberately, so it is still in the mailbox to be looked at rather than
-    silently consumed -- the same reasoning as the fixture adapter refusing a bad line.
+    Swallowing it here would leave the caller unable to tell a malformed message from a message that
+    was never there -- and the refusal is the thing a person needs to see. It carries its number too,
+    because whoever records it is the one who gets to mark it read.
     """
     mailbox = FakeMailbox({b"1": b"not an email at all", b"2": an_email(message_id="<good@example.com>")})
 
     found = list(unread_messages(mailbox))
 
-    assert [message.external_id for message in found] == ["good@example.com"]
-    assert mailbox.seen == [b"2"], "the unreadable one is left unread"
+    assert len(found) == 2
+    assert found[0].message is None
+    assert "Message-ID" in found[0].refusal
+    assert found[0].number == b"1"
+    assert found[1].message.external_id == "good@example.com"
+    assert found[1].refusal is None
 
 
-def test_a_message_that_cannot_be_marked_read_is_still_handed_on(caplog):
+def test_one_unreadable_message_does_not_stop_the_others():
+    """A mailbox is not a file: one malformed message must not block every message behind it."""
+    mailbox = FakeMailbox({b"1": b"not an email at all", b"2": an_email(message_id="<good@example.com>")})
+
+    readable = [item.message.external_id for item in unread_messages(mailbox) if item.message]
+
+    assert readable == ["good@example.com"]
+
+
+def test_marking_a_message_read_says_whether_it_worked(caplog):
     """
-    Failing to mark it read must not mean failing to answer it.
+    A flag that would not stick is worth a line in the log.
 
-    Dropping it would lose a real customer to a transient IMAP error. Handing it on costs a repeat
-    on the next poll, and intake is idempotent on the Message-ID, so the repeat is a lookup and
-    nothing written. It is logged because the cheap outcome and the expensive one -- a mailbox that
-    never accepts a flag, quietly spending every slot of every poll on the same message -- look
-    identical from here.
+    The caller carries on either way -- the run is already written, and intake is idempotent, so the
+    repeat next poll is a lookup that writes nothing. But a transient failure and a mailbox that
+    never accepts a flag, quietly spending every slot of every poll on the same message, look
+    identical from here, and only the second one needs a person.
     """
 
     class WillNotMarkRead(FakeMailbox):
         def store(self, number: bytes, command: str, flags: str):
             return "NO", [b"over quota"]
 
-    mailbox = WillNotMarkRead({b"1": an_email(message_id="<stuck@example.com>")})
+    assert mark_read(FakeMailbox({b"1": an_email()}), b"1") is True
 
-    found = list(unread_messages(mailbox))
-
-    assert [message.external_id for message in found] == ["stuck@example.com"]
-    assert "stuck@example.com" in caplog.text
+    assert mark_read(WillNotMarkRead({b"1": an_email()}), b"1") is False
+    assert "NO" in caplog.text
 
 
 def test_only_so_many_are_taken_from_one_poll():
