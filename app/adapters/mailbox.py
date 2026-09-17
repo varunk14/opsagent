@@ -19,9 +19,9 @@ from email import message_from_bytes as parse_bytes
 from email.message import EmailMessage
 from email.policy import default as default_policy
 from email.utils import parseaddr, parsedate_to_datetime
-from hashlib import sha256
 from typing import Any, Protocol
 
+from app.adapters.inbox import Fetched, Unread, described
 from app.contracts import Channel, IncomingMessage
 
 log = logging.getLogger(__name__)
@@ -51,34 +51,6 @@ USER_VAR = "OPSAGENT_IMAP_USER"
 PASSWORD_VAR = "OPSAGENT_IMAP_PASSWORD"
 PORT_VAR = "OPSAGENT_IMAP_PORT"
 DEFAULT_PORT = 993
-
-
-# How much of a message we could not read is kept so a person can recognise it. Enough to see a
-# subject line and the top of a body; not so much that a refusal costs what the message would have.
-PREVIEW_CHARS = 2_000
-
-
-@dataclass(frozen=True)
-class Fetched:
-    """
-    One message the mailbox offered, read or refused, with the number that marks it.
-
-    Exactly one of `message` and `refusal` is set. Both outcomes are carried rather than one being
-    dropped, because a refusal is something a person needs to see -- and the caller cannot mark
-    anything read without the number, which is the point of handing it back.
-
-    `digest` and `preview` describe the bytes rather than the message, which is what makes them
-    usable when there is no message. The digest is how a refusal gets recorded once however many
-    times it is delivered: a message we could not read has no Message-ID we are willing to trust --
-    that is frequently the very reason it was refused -- so the bytes are the only stable name it
-    has.
-    """
-
-    number: bytes
-    digest: str
-    preview: str
-    message: IncomingMessage | None = None
-    refusal: str | None = None
 
 
 class Mailbox(Protocol):
@@ -292,20 +264,6 @@ def open_mailbox(settings: MailboxSettings, connect: Callable[..., Any] = imapli
     return mailbox
 
 
-@dataclass(frozen=True)
-class Unread:
-    """
-    What one pass found: how many the server said were waiting, and the ones it will read.
-
-    `waiting` counts what was listed, not what was read, and the two are different numbers whenever
-    a message is listed and then not delivered. Reporting the second as though it were the first is
-    how a backlog gets hidden -- see the docstring on `unread_messages`.
-    """
-
-    waiting: int
-    messages: Iterator[Fetched]
-
-
 def unread_messages(mailbox: Mailbox) -> Unread:
     """
     Yield every unread message in INBOX, up to MAX_FETCHED. Marks nothing read.
@@ -350,20 +308,18 @@ def _read(mailbox: Mailbox, numbers: list[bytes]) -> Iterator[Fetched]:
             log.warning("message %r was listed but could not be fetched", number)
             continue
 
-        digest = sha256(raw).hexdigest()
-        # errors="replace" rather than a decode that could raise: this describes a message we may
-        # be about to refuse, and it must not be able to fail in its turn.
-        preview = raw[:PREVIEW_CHARS].decode("utf-8", errors="replace")
+        digest, preview = described(raw)
+        handle = number.decode()
 
         try:
             message = message_from_bytes(raw)
         except ValueError as exc:
-            yield Fetched(number=number, digest=digest, preview=preview, refusal=str(exc))
+            yield Fetched(handle=handle, digest=digest, preview=preview, refusal=str(exc))
         else:
-            yield Fetched(number=number, digest=digest, preview=preview, message=message)
+            yield Fetched(handle=handle, digest=digest, preview=preview, message=message)
 
 
-def mark_read(mailbox: Mailbox, number: bytes) -> bool:
+def mark_read(mailbox: Mailbox, handle: str) -> bool:
     """
     Mark one message read, reporting whether the flag stuck.
 
@@ -372,6 +328,7 @@ def mark_read(mailbox: Mailbox, number: bytes) -> bool:
     failure and a mailbox that never accepts a flag -- quietly spending every slot of every poll on
     the same message -- look identical from here, and only the second one needs a person.
     """
+    number = handle.encode()
     try:
         status, _ = mailbox.store(number, "+FLAGS", "\\Seen")
     except (OSError, imaplib.IMAP4.error) as exc:

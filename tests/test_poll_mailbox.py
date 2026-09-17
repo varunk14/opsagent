@@ -16,7 +16,8 @@ Two orderings are load-bearing, and both are tested by making the pass fail on p
 import psycopg
 import pytest
 
-from app.adapters.mailbox import MAX_FETCHED, PREVIEW_CHARS
+from app.adapters.inbox import PREVIEW_CHARS
+from app.adapters.mailbox import MAX_FETCHED
 from app.poll import poll_mailbox
 from tests.fakes import FakeMailbox, an_email
 

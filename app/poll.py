@@ -29,12 +29,14 @@ nothing downstream could tell that apart from a quiet inbox. The bound above is
 what keeps that honest rather than expensive.
 
 Run:  .venv/bin/python -m app.poll fixtures/inbox.jsonl   one pass over a file
+      .venv/bin/python -m app.poll --check                reach every channel, change nothing
       .venv/bin/python -m app.poll --mailbox              one pass over a real mailbox
+      .venv/bin/python -m app.poll --telegram             one pass over the bot
 """
 
 import os
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,16 +45,25 @@ from psycopg.pq import TransactionStatus
 from psycopg.types.json import Jsonb
 
 from app.adapters.fixture import read_messages
+from app.adapters.inbox import Fetched, Unread
 from app.adapters.mailbox import (
     MAX_FETCHED,
     PASSWORD_VAR,
-    Fetched,
     Mailbox,
     mark_read,
     open_mailbox,
     settings_from_env,
     unread_messages,
 )
+from app.adapters.telegram import (
+    MAX_UPDATES,
+    TOKEN_VAR,
+    Bot,
+    TelegramBot,
+    confirm_updates,
+    unread_updates,
+)
+from app.adapters.telegram import settings_from_env as telegram_settings_from_env
 from app.contracts import IncomingMessage
 from app.db import connect
 from app.intake import accept
@@ -77,10 +88,11 @@ class PollSummary:
     collisions: int
     more_waiting: bool
     refused: int = 0
+    ignored: int = 0
 
     @property
     def seen(self) -> int:
-        return self.accepted + self.duplicates + self.collisions + self.refused
+        return self.accepted + self.duplicates + self.collisions + self.refused + self.ignored
 
 
 def has_more(messages: Iterator[IncomingMessage]) -> bool:
@@ -159,20 +171,84 @@ def poll_mailbox(connection: psycopg.Connection, mailbox: Mailbox) -> PollSummar
 
     How many messages a pass takes is MAX_FETCHED, in the adapter. Commits.
     """
+    return poll_source(
+        connection,
+        unread_messages(mailbox),
+        confirm=lambda handled: [mark_read(mailbox, handle) for handle in handled],
+        cap=MAX_FETCHED,
+        name="poll_mailbox",
+    )
+
+
+def poll_telegram(connection: psycopg.Connection, bot: Bot) -> PollSummary:
+    """
+    Take one pass over a bot: record what it offers, then move its cursor past what was recorded.
+
+    Everything the mailbox pass does, with a coarser and less forgiving confirmation. Telegram keeps
+    one number rather than a flag per message, and asking for updates past it discards everything
+    below it for good -- there is no unread flag to put back. So the ordering that matters for a
+    mailbox matters more here: confirmed early, a pass that then rolled back would have destroyed
+    the only copy of those messages.
+
+    How many a pass takes is MAX_UPDATES, in the adapter. Commits.
+    """
+    return poll_source(
+        connection,
+        unread_updates(bot),
+        confirm=lambda handled: confirm_updates(bot, handled),
+        cap=MAX_UPDATES,
+        name="poll_telegram",
+    )
+
+
+def poll_source(
+    connection: psycopg.Connection,
+    unread: Unread,
+    *,
+    confirm: Callable[[list[str]], object],
+    cap: int,
+    name: str,
+) -> PollSummary:
+    """
+    Record what a channel offered, commit, and only then let the channel forget it.
+
+    This is the ordering, and it lives here once on purpose. Every channel needs it and every
+    channel confirms differently -- a mailbox sets a flag per message, a bot moves a cursor past
+    them all -- so what varies is `confirm` and what must not vary is when it is called. Written out
+    per adapter, this is the kind of rule that stays true in one copy and quietly stops being true
+    in the other.
+
+    Nothing is confirmed until the transaction has committed. A pass that dies in the middle
+    therefore sees the same items again, and the next pass recognises them and writes nothing --
+    where confirming first would leave an item the channel considers dealt with and no run behind
+    it, which is a customer dropped in silence and no record anywhere that it happened.
+
+    What it costs: delivery is at-least-once, so a crash between the commit and the confirmation
+    means a second look at work already done. Intake makes that cheap. It is the safe direction to
+    be wrong in, and the other direction has no safe version.
+
+    An item that cannot be read is written to dead_letters and then confirmed like any other. Left
+    unconfirmed it would be offered and re-parsed on every pass forever, spending one of the pass's
+    slots each time -- so one deliberately malformed message would degrade intake permanently.
+    Recorded, it is on the screen where someone will see it, which is the thing that mattered about
+    leaving it where it was in the first place.
+    """
     if connection.pgconn.transaction_status != TransactionStatus.IDLE:
         raise RuntimeError(
-            "poll_mailbox commits, so it needs its own transaction: call it on a "
+            f"{name} commits, so it needs its own transaction: call it on a "
             "connection with no work already open"
         )
 
-    accepted = duplicates = collisions = refused = 0
-    handled: list[bytes] = []
-
-    unread = unread_messages(mailbox)
+    accepted = duplicates = collisions = refused = ignored = 0
+    handled: list[str] = []
 
     with connection.transaction():
         for item in unread.messages:
-            if item.message is None:
+            if item.ignored is not None:
+                # Not a customer writing in. Confirmed so the channel moves past it, counted so a
+                # pass that saw nothing else does not look like a pass that saw nothing.
+                ignored += 1
+            elif item.message is None:
                 quarantine_refusal(connection, item)
                 refused += 1
             else:
@@ -184,22 +260,22 @@ def poll_mailbox(connection: psycopg.Connection, mailbox: Mailbox) -> PollSummar
                 else:
                     duplicates += 1
 
-            handled.append(item.number)
+            handled.append(item.handle)
 
     # Only now, and outside the transaction: a failure here costs a repeat, where a failure inside
-    # it would roll back work the mailbox had already been told to forget.
-    for number in handled:
-        mark_read(mailbox, number)
+    # it would roll back work the channel had already been told to forget.
+    confirm(handled)
 
     return PollSummary(
         accepted=accepted,
         duplicates=duplicates,
         collisions=collisions,
         refused=refused,
-        # What the server listed, not what came back. A message that was listed and then not
-        # delivered is still waiting, and counting only what we read would report a drained mailbox
+        ignored=ignored,
+        # What the channel listed, not what came back. An item that was offered and then not
+        # delivered is still waiting, and counting only what we read would report a drained channel
         # with a backlog sitting behind it.
-        more_waiting=unread.waiting > MAX_FETCHED,
+        more_waiting=unread.waiting > cap,
     )
 
 
@@ -225,8 +301,12 @@ def quarantine_refusal(connection: psycopg.Connection, item: Fetched) -> None:
 
 
 def main(argv: list[str]) -> int:  # pragma: no cover - the interactive driver
+    if len(argv) > 1 and argv[1] == "--check":
+        return check_channels()
     if len(argv) > 1 and argv[1] == "--mailbox":
         return poll_the_mailbox()
+    if len(argv) > 1 and argv[1] == "--telegram":
+        return poll_the_bot()
 
     inbox = Path(argv[1] if len(argv) > 1 else "fixtures/inbox.jsonl")
 
@@ -246,6 +326,80 @@ def main(argv: list[str]) -> int:  # pragma: no cover - the interactive driver
         print("\n  More waiting. Run it again.")
     elif summary.accepted == 0 and summary.seen:
         print("\n  Nothing new. Run it again as often as you like; that is the point.")
+    return 0
+
+
+def check_channels() -> int:  # pragma: no cover - needs the real services
+    """
+    Say whether each channel can be reached, and change nothing at all.
+
+    This exists because the first real test is the dangerous one. A pass over the mailbox marks mail
+    read; a pass over the bot moves a cursor that cannot be moved back. Neither is a thing to
+    discover a typo with. So this connects, counts, and stops.
+
+    It is safe by construction rather than by care: `unread_messages` does the SELECT and the SEARCH
+    when it is called and fetches nothing until its messages are iterated, and they are not iterated
+    here. The bot is asked for one update with no offset, and an offset is the only thing that
+    confirms anything.
+    """
+    ok = True
+
+    try:
+        settings = settings_from_env(os.environ)
+    except ValueError as exc:
+        print(f"  mail      {exc}")
+        ok = False
+    else:
+        try:
+            mailbox = open_mailbox(settings)
+            try:
+                waiting = unread_messages(mailbox).waiting
+            finally:
+                mailbox.logout()
+            print(f"  mail      OK, {waiting} unread in {settings.user}")
+        except ValueError as exc:
+            print(f"  mail      {exc}")
+            ok = False
+
+    try:
+        bot_settings = telegram_settings_from_env(os.environ)
+    except ValueError as exc:
+        print(f"  telegram  {exc}")
+        ok = False
+    else:
+        try:
+            waiting = len(TelegramBot(bot_settings).get_updates(offset=None, limit=1))
+            print(f"  telegram  OK, {'something' if waiting else 'nothing'} waiting for {bot_settings!r}")
+        except ValueError as exc:
+            print(f"  telegram  {exc}")
+            ok = False
+
+    print("\n  Nothing was read, marked, or confirmed." if ok else "\n  Fix the above, then run it again.")
+    return 0 if ok else 1
+
+
+def poll_the_bot() -> int:  # pragma: no cover - needs the real Bot API
+    """One pass over the bot the environment describes."""
+    try:
+        settings = telegram_settings_from_env(os.environ)
+    except ValueError as exc:
+        print(f"  {exc}")
+        print(f"  Set it in .env, which is not committed. {TOKEN_VAR} comes from @BotFather.")
+        return 1
+
+    with connect() as connection:
+        summary = poll_telegram(connection, TelegramBot(settings))
+
+    print(f"  read      {summary.seen} update(s) from {settings!r}")
+    print(f"  accepted  {summary.accepted}")
+    print(f"  duplicate {summary.duplicates}")
+    if summary.ignored:
+        print(f"  ignored   {summary.ignored}  (not messages: joins, edits, poll answers)")
+    if summary.refused:
+        print(f"\n  REFUSED   {summary.refused}")
+        print("  An update could not be read. `python -m app.dead_letters` lists it.")
+    if summary.more_waiting:
+        print("\n  More waiting. Run it again.")
     return 0
 
 
