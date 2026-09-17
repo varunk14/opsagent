@@ -303,6 +303,31 @@ def _check_argument(tool: str, name: str, value: object, spec: dict[str, Any]) -
             raise ValueError(f"{tool} argument {name} does not have the expected shape")
 
 
+def validate_tool_call(tool: str, args: Mapping[str, Any]) -> None:
+    """
+    Check a proposed call against its tool's schema, raising ValueError on anything wrong.
+
+    The single definition of "are these arguments valid for this tool", shared by a run's own
+    ProposedAction and by the MCP server (app/mcp_server.py), so a call is judged the same way
+    whether it came from the planner or over the protocol. Checks only; it moves nothing.
+    """
+    parameters = _TOOL_PARAMETERS.get(tool)
+    if parameters is None:
+        raise ValueError(f"unknown tool {tool!r}; known: {sorted(_TOOL_PARAMETERS)}")
+
+    properties = parameters["properties"]
+    missing = [name for name in parameters.get("required", []) if name not in args]
+    if missing:
+        raise ValueError(f"{tool} is missing required argument(s): {', '.join(missing)}")
+
+    unexpected = sorted(set(args) - set(properties))
+    if unexpected:
+        raise ValueError(f"{tool} got unexpected argument(s): {', '.join(unexpected)}")
+
+    for name, value in args.items():
+        _check_argument(tool, name, value, properties[name])
+
+
 class ProposedAction(BaseModel):
     """
     One tool call the agent would make, checked against that tool's schema.
@@ -322,22 +347,7 @@ class ProposedAction(BaseModel):
 
     @model_validator(mode="after")
     def args_match_the_tool(self) -> Self:
-        parameters = _TOOL_PARAMETERS.get(self.tool)
-        if parameters is None:
-            raise ValueError(f"unknown tool {self.tool!r}; known: {sorted(_TOOL_PARAMETERS)}")
-
-        properties = parameters["properties"]
-        missing = [name for name in parameters.get("required", []) if name not in self.args]
-        if missing:
-            raise ValueError(f"{self.tool} is missing required argument(s): {', '.join(missing)}")
-
-        unexpected = sorted(set(self.args) - set(properties))
-        if unexpected:
-            raise ValueError(f"{self.tool} got unexpected argument(s): {', '.join(unexpected)}")
-
-        for name, value in self.args.items():
-            _check_argument(self.tool, name, value, properties[name])
-
+        validate_tool_call(self.tool, self.args)
         object.__setattr__(self, "args", MappingProxyType(dict(self.args)))
         return self
 
