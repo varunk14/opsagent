@@ -74,7 +74,7 @@ from app.baseline import RATES, REFERENCE_RATE, cost_of
 from app.contracts import Classification, ExtractedRefund, ProposedAction, StepRecord
 from app.db import apply_migrations, connect
 from app.embeddings import OllamaEmbedder
-from app.executor import OWNED_ORDER, ToolOutcome, execute
+from app.executor import OWNED_ORDER, ToolOutcome, execute, mentioned, unmentioned
 from app.failures import record_category
 from app.graph.build import (
     MAX_MODEL_NAME_CHARS,
@@ -720,6 +720,29 @@ def evidence_in(state: AgentState, steps: list[dict[str, Any]], proposal: Propos
     return evidence_of(classification.intent if classification else None, steps, str(proposal.args["order_id"]))
 
 
+def judged_on_the_ledger(
+    connection: psycopg.Connection,
+    run_id: UUID,
+    proposal: ProposedAction,
+    evidence: Evidence,
+    limits: Any,
+) -> Verdict:
+    """The limit, the confidence and the ledger's conditions, for an order the customer did name."""
+    verdict = judge(proposal, limits, refunded_so_far(connection, run_id, proposal))
+    # The limit and the confidence decide whether a person is asked; the conditions decide
+    # whether there is anything to ask about.
+    if verdict.runs:
+        return justified(proposal, evidence)
+    # One of those conditions is worth asking about a refund already bound for a person:
+    # whether this was read as a duplicate charge at all. The ledger conditions decide
+    # whether a payment may run on its own, and one going to a person is a person's to
+    # judge -- but a refund on a message nobody read as a duplicate is not a better
+    # question for having a person attached to it. Queueing it hands them a filled-in
+    # refund and one button; handing over gives them the case. Refusal only: satisfying
+    # this can never put back a payment the judge stopped.
+    return not_a_duplicate(evidence) or verdict
+
+
 def judged(
     connection: psycopg.Connection,
     run_id: UUID,
@@ -730,20 +753,16 @@ def judged(
     with failure_recorded("guardrail", "guardrail") as span:
         # Read now, inside this transaction: a limit changed a second ago applies.
         limits = load_guardrails(connection)
-        verdict = judge(proposal, limits, refunded_so_far(connection, run_id, proposal))
-        # The limit and the confidence decide whether a person is asked; the conditions decide
-        # whether there is anything to ask about.
-        if verdict.runs:
-            verdict = justified(proposal, evidence)
+        order_id = str(proposal.args["order_id"])
+        if not mentioned(connection, run_id, order_id):
+            # Before anything reads or locks the ledger, and before the limit is consulted. The
+            # executor refuses to pay an order the customer never wrote, but this runs first: left to
+            # the executor, a refund over the limit on such an order became an approval -- a
+            # filled-in refund on an order nobody named, and one button -- and only after someone
+            # pressed it did the ledger refuse. A refusal hands over the case with nothing to approve.
+            verdict = Verdict(runs=False, reason=unmentioned(order_id), refused=True)
         else:
-            # One of those conditions is worth asking about a refund already bound for a person:
-            # whether this was read as a duplicate charge at all. The ledger conditions decide
-            # whether a payment may run on its own, and one going to a person is a person's to
-            # judge -- but a refund on a message nobody read as a duplicate is not a better
-            # question for having a person attached to it. Queueing it hands them a filled-in
-            # refund and one button; handing over gives them the case. Refusal only: satisfying
-            # this can never put back a payment the judge stopped.
-            verdict = not_a_duplicate(evidence) or verdict
+            verdict = judged_on_the_ledger(connection, run_id, proposal, evidence, limits)
         span.set_attributes(
             {
                 Attr.VERDICT: "runs" if verdict.runs else "needs a person",
