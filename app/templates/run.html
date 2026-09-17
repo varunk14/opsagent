@@ -21,6 +21,25 @@
 <p><a href="{{ langfuse_url }}">The same trace in Langfuse</a></p>
 {% endif %}
 
+{% if lineage and lineage.original %}
+<p class="note">A replay of <a href="/runs/{{ lineage.original }}">run {{ lineage.original }}</a>. Compare the outcomes.</p>
+{% endif %}
+
+<form method="post" action="/runs/{{ run.id }}/replay">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit">Replay this run</button>
+</form>
+<p class="note">A replay is a fresh run carrying this message, worked under what is true now. This run is left as it is.</p>
+
+{% if lineage and lineage.replays %}
+<h2>Replays</h2>
+<ul class="replays">
+  {% for rid, status in lineage.replays %}
+  <li><a href="/runs/{{ rid }}">{{ rid }}</a> — {{ status }}</li>
+  {% endfor %}
+</ul>
+{% endif %}
+
 <h2>Trace</h2>
 {% if rows %}
 <p class="note">Costs are reference costs: tokens priced at one fixed, arbitrary rate so that runs can be compared. The models run on this machine and cost nothing.</p>

@@ -48,6 +48,7 @@ from app.costs import spend_by_day, spend_chart, tokens_by_model
 from app.db import connect
 from app.failures import FIXES, GOLDEN_HISTORY, failure_chart, golden_trend, mix_by_week
 from app.guardrails import Budgets, load, rupees
+from app.replay import lineage, replay
 from app.traces import TraceSpan, list_runs, trace_of
 from app.tracing import LOOPBACK_HOSTS, Attr
 
@@ -345,6 +346,7 @@ def create_app(
             return message(request, "No such run.", 404)
         with connect(dsn) as connection:
             trace = trace_of(connection, parsed)
+            thread = lineage(connection, parsed) if trace is not None else None
         if trace is None:
             return message(request, "No such run.", 404)
         return page(
@@ -353,9 +355,31 @@ def create_app(
             {
                 "trace": trace,
                 "rows": trace_rows(trace.roots),
+                "lineage": thread,
                 "langfuse_url": f"{langfuse}/traces/{parsed.hex}" if langfuse else None,
             },
         )
+
+    @app.post("/runs/{run_id}/replay")
+    def replay_run(request: Request, run_id: str, csrf: Annotated[str, Form()] = "") -> Response:
+        # Guarded like every decision here: the origin and this screen's own token, checked before
+        # anything is written, so a page on another site cannot queue a replay on someone's behalf.
+        origin = request.headers.get("origin")
+        if origin is not None and origin != str(request.base_url).rstrip("/"):
+            return message(request, "This form was sent from another site. Nothing was replayed.", 403)
+        cookie = request.cookies.get(CSRF_COOKIE, "")
+        if not (hmac.compare_digest(csrf.encode(), token.encode()) and hmac.compare_digest(cookie.encode(), token.encode())):
+            return message(request, "This form did not come from this screen, or the screen has restarted. Reload the page.", 403)
+        try:
+            parsed = UUID(run_id)
+        except ValueError:
+            return message(request, "No such run.", 404)
+        try:
+            with connect(dsn) as connection:
+                new_id = replay(connection, parsed)
+        except ValueError:
+            return message(request, "No such run.", 404)
+        return RedirectResponse(f"/runs/{new_id}", status_code=303)
 
     return app
 

@@ -138,6 +138,21 @@ marking first would let a crash in the gap drop a reply. Delivery is at-least-on
 fails keeps its row pending with the error written down and is retried a few times before it rests
 as failed for a person, and one channel being down never holds up a reply waiting on another.
 
+### Replay
+
+When a prompt, a policy, or a line of code changes, the question is whether the case that went wrong
+before goes right now. Replay answers it by re-running an old case as a **new** run carrying the same
+message, worked under whatever is true now -- the original is never touched, because the whole point
+is to compare the two. A replay copies only what the customer wrote, gets its own id and key, and is
+threaded back to its origin.
+
+    .venv/bin/python -m app.replay <run_id>   # queue a fresh run from an old one; run_agent works it
+
+Every run's page on the screen has a **Replay this run** button that does the same, then links the
+original and its replays together so their outcomes sit side by side. A replay meets every guardrail
+the original did: replaying a run whose order was already refunded proposes the refund again and is
+held for a person, not paid twice.
+
 ### Tracing
 
 Every run is one OpenTelemetry trace, and its trace id is the run's own id. However many ticks a run
