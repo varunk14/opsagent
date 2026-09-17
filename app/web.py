@@ -29,7 +29,7 @@ import hmac
 import os
 import secrets
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any
@@ -55,6 +55,28 @@ from app.tracing import LOOPBACK_HOSTS, Attr
 HOST = "127.0.0.1"
 PORT = 8055
 ALLOWED_HOSTS = [HOST, "localhost"]
+
+
+def allowed_hosts_from_env(environ: Mapping[str, str] = os.environ) -> list[str]:
+    """
+    The hosts the screen answers to. Loopback by default; behind a proxy, the domain it forwards.
+
+    TrustedHostMiddleware refuses any other Host header before it reaches a handler, so a request
+    forged or misrouted to this screen is turned away. OPSAGENT_ALLOWED_HOSTS carries the
+    deployment's domain, comma-separated for more than one.
+    """
+    configured = environ.get("OPSAGENT_ALLOWED_HOSTS", "")
+    hosts = [host.strip() for host in configured.split(",") if host.strip()]
+    return hosts or ALLOWED_HOSTS
+
+
+def bind_host(environ: Mapping[str, str] = os.environ) -> str:
+    """
+    Where uvicorn binds. Loopback on this machine; inside a container, every interface -- which is
+    reachable only over the compose network and the reverse proxy in front of it, never published to
+    the host. OPSAGENT_WEB_HOST carries the change; unset, nothing binds beyond loopback.
+    """
+    return environ.get("OPSAGENT_WEB_HOST", HOST).strip() or HOST
 CSRF_COOKIE = "opsagent_csrf"
 LANGFUSE_VAR = "OPSAGENT_LANGFUSE_PROJECT_URL"
 
@@ -221,6 +243,7 @@ def create_app(
     operator: str | None = None,
     langfuse_project_url: str | None = None,
     history_path: Path | None = None,
+    allowed_hosts: list[str] | None = None,
 ) -> FastAPI:
     """The screen, with a token of its own. `dsn` defaults to OPSAGENT_DATABASE_URL."""
     history = history_path or GOLDEN_HISTORY
@@ -228,7 +251,7 @@ def create_app(
     token = secrets.token_urlsafe(32)
     name = (operator or "").strip() or None
     app = FastAPI(title="OpsAgent", docs_url=None, redoc_url=None, openapi_url=None)
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=ALLOWED_HOSTS)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts or allowed_hosts_from_env())
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
@@ -388,9 +411,10 @@ def main() -> int:  # pragma: no cover - serves until stopped
     operator = os.environ.get("OPSAGENT_OPERATOR", "").strip() or None
     if operator is None:
         print("  OPSAGENT_OPERATOR is not set: the screen shows what is waiting but will not record decisions")
-    print(f"  approvals on http://{HOST}:{PORT}/approvals, runs on http://{HOST}:{PORT}/runs")
+    host = bind_host()
+    print(f"  approvals on http://{host}:{PORT}/approvals, runs on http://{host}:{PORT}/runs")
     app = create_app(operator=operator, langfuse_project_url=os.environ.get(LANGFUSE_VAR))
-    uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
+    uvicorn.run(app, host=host, port=PORT, log_level="warning")
     return 0
 
 
