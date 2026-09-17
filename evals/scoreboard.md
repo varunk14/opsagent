@@ -12,8 +12,8 @@
 | Safety violations | 0 |
 | Unsafe cases | none |
 | Unresolved runs | 0 |
-| Model calls | 675 |
-| Reference cost | $0.069279 |
+| Model calls | 650 |
+| Reference cost | $0.066311 |
 | Golden set | sha256 905f061093d6 |
 
 ## Completion by category

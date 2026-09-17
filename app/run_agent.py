@@ -21,9 +21,11 @@ executor and the run is done; not allowed, an approval is opened and the run
 waits for a person. Once a person approves, the next worker to claim the run
 pays exactly what was approved, asking no model and judging nothing again. A
 refund the ledger refuses, however it was allowed, goes to a person. A run past
-its step budget, or one proposing a tool this worker does not run, is handed to a
-person instead of executed. A proposal repeating an earlier step is not, yet: the
-planner is asked once more with the result it repeated pointed at, and only a
+its step budget, one proposing a tool this worker does not run, or one asking an
+order tool for an order the customer never wrote, is handed to a person instead of
+executed -- the last before it runs, so a lookup of an invented order cannot
+loop. A proposal repeating an earlier step is not, yet: the planner is asked once
+more with the result it repeated pointed at, and only a
 second repeat is handed over. A sender who has caused
 RATE_LIMIT lookups within RATE_WINDOW has further lookups deferred: the run goes
 back to the queue until the window frees, executing nothing and spending no
@@ -74,7 +76,14 @@ from app.baseline import RATES, REFERENCE_RATE, cost_of
 from app.contracts import Classification, ExtractedRefund, ProposedAction, StepRecord
 from app.db import apply_migrations, connect
 from app.embeddings import OllamaEmbedder
-from app.executor import OWNED_ORDER, ToolOutcome, execute, mentioned, unmentioned
+from app.executor import (
+    OWNED_ORDER,
+    ToolOutcome,
+    execute,
+    mentioned,
+    names_order,
+    unmentioned,
+)
 from app.failures import record_category
 from app.graph.build import (
     MAX_MODEL_NAME_CHARS,
@@ -142,6 +151,10 @@ RUNS_NOW = frozenset({"get_order", "escalate_to_human"})
 GUARDED = frozenset({"issue_refund"})
 # Retrieval already ran in the graph; a planner asking to search again is handed over.
 NOT_RUN_HERE = frozenset({"search_policy"})
+# The two tools that act on an order. Proposed for an order the customer never wrote, there is
+# nothing for them to act on, so the driver hands the case over rather than running one, having it
+# refused by the executor's mention check, and being asked for it again -- the loop.
+ORDER_TOOLS = frozenset({"get_order", "issue_refund"})
 
 # How long a lock may go without a committed step before the run is taken back.
 # Every committed step refreshes it, so only a worker that has gone quiet loses it.
@@ -429,6 +442,14 @@ def marked_observations(steps: Sequence[Mapping[str, Any]], proposal: ProposedAc
     return [{**step, "note": ALREADY_SHOWN} if repeats(proposal, step) else dict(step) for step in steps]
 
 
+def unnamed_order(state: AgentState, proposal: ProposedAction) -> bool:
+    """Whether an order-tool proposal is for an order the customer never wrote in the message."""
+    order_id = proposal.args.get("order_id")
+    if not order_id:
+        return True
+    return not names_order(f"{state.get('subject') or ''}\n{state.get('body', '')}", str(order_id))
+
+
 def decide(state: AgentState, steps: list[dict[str, Any]], max_steps: int) -> tuple[ProposedAction, str | None]:
     """The action this tick takes: the proposal, or a hand-over to a person in its place."""
     proposal = state["proposal"]
@@ -440,6 +461,16 @@ def decide(state: AgentState, steps: list[dict[str, Any]], max_steps: int) -> tu
         return hand_over(
             f"{proposal.tool} is not a tool this worker runs",
             f"The planner asked for {proposal.tool}, which does not run here.",
+        )
+    if proposal.tool in ORDER_TOOLS and unnamed_order(state, proposal):
+        # The prompt withholds the order tools when no order was found, but a model can still ask
+        # for one, naming an order the customer never wrote. Running it earns only the executor's
+        # refusal and a repeat, so the case is handed over here, before that loop can start -- with
+        # the executor's own words, so a person reads the same reason wherever the check caught it.
+        order_id = proposal.args.get("order_id")
+        return hand_over(
+            "an order the customer did not name",
+            unmentioned(str(order_id)) if order_id else f"The planner asked for {proposal.tool} with no order.",
         )
     if any(repeats(proposal, step) for step in steps):
         return hand_over(REPEATED_STEP, f"The planner asked for {proposal.tool} again with the same arguments.")
