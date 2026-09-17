@@ -178,12 +178,13 @@ def plan_prompt(
     # With no order identified there is nothing to look up or pay back, so the order
     # tools are withheld. Offered anyway, the real model copied the example id and
     # asked get_order on every message that named no order, looping until handed over.
-    order_in_play = extraction is not None and extraction.order_id is not None
-    if not order_in_play:
+    if extraction is not None and extraction.order_id is not None:
+        tools = describe_tools(exclude=excluded)
+    else:
         excluded.update({"get_order", "issue_refund"})
-    tools = describe_tools(exclude=excluded)
-    if not order_in_play:
-        tools = "No order was identified for this message, so no order lookup or refund is offered.\n\n" + tools
+        tools = "No order was identified for this message, so no order lookup or refund is offered.\n\n" + describe_tools(
+            exclude=excluded
+        )
     passages = "\n".join(f"- {passage}" for passage in policy)
 
     return render(
