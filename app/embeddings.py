@@ -16,13 +16,13 @@ import math
 import urllib.request
 from typing import Protocol
 
-from app.llm import ModelUnavailable, read_capped
+from app.llm import ModelUnavailable, ollama_endpoint, read_capped
 
 EMBEDDING_MODEL = "nomic-embed-text"
 EMBEDDING_DIMENSIONS = 768  # must match policy_chunks.embedding vector(768)
 DOCUMENT_PREFIX = "search_document: "
 QUERY_PREFIX = "search_query: "
-OLLAMA_EMBED = "http://localhost:11434/api/embed"
+OLLAMA_EMBED = ollama_endpoint("api/embed")
 # A 768-number vector is roughly 15 KB of JSON; this allows large batches, not runaway replies.
 MAX_EMBED_RESPONSE_BYTES = 20_000_000
 
