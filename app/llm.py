@@ -19,14 +19,30 @@ attached to the exception when there is no answer.
 """
 
 import json
+import os
 import time
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import BinaryIO, Protocol
 
 from pydantic import BaseModel, ValidationError
 
-OLLAMA = "http://localhost:11434/api/generate"
+
+def ollama_endpoint(path: str, environ: Mapping[str, str] = os.environ) -> str:
+    """
+    A full Ollama URL, with the base taken from the environment.
+
+    Localhost on this machine, and a service name in a container, where the model server is a
+    process of its own. Only where the server is moves; which model and which path do not.
+    """
+    # `or`, not a get-default: a var set to empty (a common compose/.env accident) must fall back
+    # to localhost too, not become an empty base and a scheme-relative URL urllib cannot open.
+    base = (environ.get("OPSAGENT_OLLAMA_URL") or "http://localhost:11434").rstrip("/")
+    return f"{base}/{path.lstrip('/')}"
+
+
+OLLAMA = ollama_endpoint("api/generate")
 DEFAULT_MODEL = "llama3.1:8b"
 
 # The cheap tier: big enough to read a message into a fixed shape, not to decide money. What it is

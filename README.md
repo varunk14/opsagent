@@ -328,9 +328,24 @@ failure modes are the interesting part, and each one is pinned by a test.
 * An approval is paid once: a stale copy of it, a run requeued by hand, or a worker that lost its
   claim pays nothing more.
 
-## Planned
+## Deploy
 
-A live deployment.
+The whole system runs from one compose file behind Caddy, which gets a TLS certificate on its own
+and puts a password in front of the screen. Only Caddy faces the internet; the database, cache,
+model server, screen and worker all talk over an internal network and are never published. The
+screen answers only to its domain and only after the password, over TLS.
+
+It is a **manual** deploy on purpose: one script, run on the box over SSH. There is no key in GitHub
+and no pipeline that can reach production -- the thing that deploys is a person already on the
+machine.
+
+```bash
+cp deploy/.env.deploy.example .env     # fill it in; never committed
+./deploy/deploy.sh                     # build, start, pull the models, migrate, seed
+```
+
+A free host (Oracle Cloud Always Free) and a free domain (DuckDNS) are enough. Full steps, including
+generating the screen password, are in [deploy/README.md](deploy/README.md).
 
 ## Running the experiments
 

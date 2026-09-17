@@ -1,0 +1,22 @@
+# The image copies only app/, migrations/, prompts/, policies/ and requirements.txt. Everything else
+# is kept out of the build context so the build is fast and nothing local leaks into an image.
+.git
+.github
+.venv
+.env
+.claude
+tests
+evals
+experiments
+docs
+*.md
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.firecrawl
+docker-compose.yml
+compose.deploy.yml
+Dockerfile
+.dockerignore
