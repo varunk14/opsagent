@@ -4,18 +4,18 @@ Every number here is measured, not estimated, and every one of them can be repro
 this repository. Where a number is bad it is printed as it is: the point of measuring is to
 know where the work goes next, and an evaluation that only ever says "fine" measures nothing.
 
-**Measured:** 2026-09-16 · `llama3.1:8b`, run locally through Ollama, temperature 0, seed 0
-· golden set `sha256 af4048c0885c`, 150 cases.
+**Measured:** 2026-09-17 · `llama3.1:8b`, run locally through Ollama, temperature 0, seed 0
+· golden set `sha256 0e613c35603b`, 154 cases.
 
 ## How it is measured
 
-150 golden cases, each a customer message with a label saying what should happen to it: the
+154 golden cases, each a customer message with a label saying what should happen to it: the
 intent, the order, the amount owed, and whether a person should decide. A case is **complete**
 when the run comes to rest in the right place with the right money — refunded, waiting for
 approval, or handed to a person — and incomplete otherwise. A right outcome reached for the
 wrong reason is still a wrong reason: intent and extraction are scored separately.
 
-Running 150 cases against a local model takes about an hour, and CI has no GPU. So the model's
+Running 154 cases against a local model takes about an hour, and CI has no GPU. So the model's
 replies are **recorded on the machine that has one and replayed in CI**, keyed by the hash of
 the model name and the exact prompt. A replay cannot invent a reply: a prompt with no recording
 fails rather than guesses. Because a recording can go stale, `python -m evals verify` re-runs
@@ -40,17 +40,17 @@ python -m evals verify     # live re-run, reports drift against the recordings
 
 | Measure | Value |
 |---|---|
-| Cases | 150 |
-| Task completion | 0.9733 (146 of 150) |
-| Intent accuracy | 0.8600 |
-| Extraction accuracy | 0.7800 |
-| Escalation precision | 0.9688 |
+| Cases | 154 |
+| Task completion | 0.9740 (150 of 154) |
+| Intent accuracy | 0.8636 |
+| Extraction accuracy | 0.7792 |
+| Escalation precision | 0.9695 |
 | Escalation recall | 1.0000 |
-| False-positive rate | 0.1538 |
+| False-positive rate | 0.1481 |
 | Safety violations | 0 |
 | Unresolved runs | 0 |
-| Model calls | 639 |
-| Reference cost | $0.066294 |
+| Model calls | 675 |
+| Reference cost | $0.069279 |
 
 Completion is 97 %, and nothing unsafe is paid.
 
@@ -143,6 +143,31 @@ thrown away: it broke twenty-four tests across eight files, including the accept
 refund over the limit pauses for approval. It was quietly redefining the over-limit approval path,
 which is a different decision from the one being made here.
 
+### Offering only the tools that apply, and what it did not move
+
+The planner used to be shown every tool on every run. Given `get_order` with no order named, the
+real model reached for it anyway — copying the example id out of the description — and a message that
+mentioned no order looped on looking one up until it was handed over. The plan prompt now withholds
+`get_order` and `issue_refund` when no order is in play, the same way it already withholds
+`search_policy` once the policy is in the prompt.
+
+Measured on the golden set, this moved the completion number **barely** — 0.9733 → 0.9740 — and it is
+worth being exact about why, because the honest answer is that the golden set could not show the
+problem this fixes. Its orderless cases already reached a person, and `loop` was already 0; there was
+no golden run stuck on a phantom lookup for this to rescue. The looping was seen on *real* messages,
+which named no order and are not in the hand-written set. So the fix ships with the evidence for it:
+the four demo messages that exercised the loop are now measured cases (`n-151`–`n-154`), and the set
+grew from 150 to 154. All four land where their labels say — a duplicate charge refunded, a
+change-of-mind and an order-status question and a channel enquiry each handed to a person — which is
+the whole of the completion change.
+
+Cost did not fall; it rose, from 638 model calls to 675 and $0.066 to $0.069. That is the four added
+cases running their full multi-step flows, not the change, which is close to call-neutral on the
+existing set. What the change buys is not on this scoreboard: a message that names no order now goes
+to a person in one step instead of after a loop, and a tool that moves money is no longer offered
+when there is no order to move it against — a narrowing of what the model can even propose, on top of
+the code guards that would refuse it regardless.
+
 ## The failure taxonomy
 
 Every failed run is classified into exactly one of six fixed categories, by deterministic rules
@@ -184,6 +209,7 @@ that a change made worse is visible before anything is deployed.
 | 2026-09-16 | `34ac5fe` | 112 / 150 | 0 | 3 | 13 | 0 | 22 | 0 |
 | 2026-09-16 | `4551a40` | 112 / 150 | 0 | 0 | 13 | 0 | 25 | 0 |
 | 2026-09-16 | `3ed692f` | 146 / 150 | 0 | 0 | 0 | 0 | 4 | 0 |
+| 2026-09-17 | `059022e` | 150 / 154 | 0 | 0 | 0 | 0 | 4 | 0 |
 
 ## The judge
 
@@ -217,7 +243,7 @@ the `/runs` page rather than rounded away.
 ## What this does not measure
 
 - **Real customers.** The agent now reads real channels — an IMAP mailbox and a Telegram bot — but
-  the 150 cases are still written by hand, not sampled from production traffic, of which there is
+  the 154 cases are still written by hand, not sampled from production traffic, of which there is
   none yet. The distribution of real messages will differ, and the numbers will move when it does.
 - **One machine.** Every latency here is this laptop's. They are comparable to each other and to
   nothing else.
