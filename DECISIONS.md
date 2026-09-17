@@ -79,6 +79,26 @@ and no duplicate.
 Confidence still has a job. It decides whether a person is asked. It no longer decides whether
 something is true.
 
+## The planner is offered only the tools that apply
+
+A tool offered is a tool the small model will reach for. With policy already retrieved and
+`search_policy` still in the list, every run proposed searching for the policy it had just been
+handed; with no order named and `get_order` still in the list, every real message looped on looking
+up an order that was never mentioned — copying the example id out of the description — until the step
+budget ran out and it was handed over. Both are the same mistake: a redundant tool reads as an
+instruction to use it.
+
+So the plan prompt withholds what cannot apply. Once policy is in the prompt, `search_policy` is
+dropped. When no order is in play — extraction found none, or the case is not about a refund at all —
+`get_order` and `issue_refund` are dropped and the prompt says plainly that no order was identified.
+Nothing about execution changes: the money guardrails live in code and judge a proposal whether or
+not the prompt offered the tool. Withholding a tool only makes the model less likely to propose one
+that had nowhere to go, which is why a message naming no order now goes to a person in one step
+instead of after a loop.
+
+The list the versions are computed over is still the whole list, so a prompt hash does not shift with
+what one message happens to hide; only the rendered prompt for that message is shorter.
+
 ## Handing over and queueing an approval are different things
 
 Both end with a person, which made them look interchangeable for a long time. They are not.
