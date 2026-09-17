@@ -5,7 +5,7 @@ Each case is a customer message plus what should have happened to it. A label th
 contradicts the ledger or the store's rules would make every score built on it wrong,
 so the labels are checked against both before any run is scored:
 
-- 120 normal cases and 30 adversarial ones, each in a known category, with unique ids;
+- 123 normal cases and 31 adversarial ones, each in a known category, with unique ids;
 - every message is one the intake would accept, and no two share a channel message id;
 - each ledger order is used by at most one case, so refunds in one case cannot change another;
 - a refund is expected only on an order the sender owns, never beyond what was charged,
@@ -52,10 +52,10 @@ def owns(case: GoldenCase, order_id: str) -> bool:
 # --- the shape of the set -------------------------------------------------------------------
 
 
-def test_the_set_holds_120_normal_and_30_adversarial_cases():
+def test_the_set_holds_123_normal_and_31_adversarial_cases():
     counts = Counter(case.kind for case in CASES)
 
-    assert counts == {Kind.NORMAL: 120, Kind.ADVERSARIAL: 30}
+    assert counts == {Kind.NORMAL: 123, Kind.ADVERSARIAL: 31}
 
 
 def test_case_ids_are_unique_and_say_what_kind_they_are():

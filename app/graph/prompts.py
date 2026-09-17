@@ -167,14 +167,24 @@ def plan_prompt(
         amount = extraction.amount_paise if extraction.amount_paise is not None else "not stated"
         found = f"- order id: {extraction.order_id or 'not stated'}\n- amount (paise): {amount}"
     prior = f"- intent: {classification.intent.value} (confidence {classification.confidence})\n{found}"
+    excluded: set[str] = set()
     if policy:
         # Offering a search for policy that is already in the prompt made the real
         # model propose exactly that search on every run instead of acting on it.
-        tools = describe_tools(exclude={"search_policy"})
+        excluded.add("search_policy")
         policy_heading = "Policy that applies (already retrieved for this message; do not search for it again):"
     else:
-        tools = describe_tools()
         policy_heading = "Policy that applies: none was found for this message."
+    # With no order identified there is nothing to look up or pay back, so the order
+    # tools are withheld. Offered anyway, the real model copied the example id and
+    # asked get_order on every message that named no order, looping until handed over.
+    if extraction is not None and extraction.order_id is not None:
+        tools = describe_tools(exclude=excluded)
+    else:
+        excluded.update({"get_order", "issue_refund"})
+        tools = "No order was identified for this message, so no order lookup or refund is offered.\n\n" + describe_tools(
+            exclude=excluded
+        )
     passages = "\n".join(f"- {passage}" for passage in policy)
 
     return render(

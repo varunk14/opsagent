@@ -78,13 +78,14 @@ def plan() -> str:
 
 
 def test_planning_shows_every_tool_when_no_policy_was_found():
+    """An order is in play, so every tool is offered; only the missing policy is the variable here."""
     prompt = plan_prompt(
         subject=SUBJECT,
         body=BODY,
         classification=Classification(
             intent=Intent.DUPLICATE_CHARGE, confidence=Decimal("0.9"), reasoning="x"
         ),
-        extraction=None,
+        extraction=ExtractedRefund(order_id="4821", amount_paise=None, reason="charged twice"),
         policy=[],
     )
 
@@ -198,3 +199,52 @@ def test_a_tool_result_cannot_close_its_fence_early():
 
 def test_no_tool_results_yet_is_said_plainly():
     assert "none yet" in observed(planned([]))
+
+
+# --- the order tools are offered only when there is an order to act on ---------
+
+
+def plan_with(extraction, *, intent=Intent.OTHER, policy=()):
+    return plan_prompt(
+        subject=SUBJECT,
+        body=BODY,
+        classification=Classification(intent=intent, confidence=Decimal("0.9"), reasoning="x"),
+        extraction=extraction,
+        policy=list(policy),
+    )
+
+
+def test_no_order_identified_omits_the_order_tools():
+    """
+    Seen on every real message that named no order: the planner reached for
+    get_order anyway (the example id copied out of the description), looped, and
+    was handed over. With no order to look up or refund, neither order tool is offered.
+    """
+    prompt = plan_with(extraction=None)
+
+    assert "- get_order:" not in prompt
+    assert "- issue_refund:" not in prompt
+    assert "- escalate_to_human:" in prompt
+    assert "no order was identified" in prompt.lower()
+
+
+def test_a_refund_intent_with_no_order_id_omits_the_order_tools():
+    """A refund was asked for, but the customer named no order: nothing to look up or pay back."""
+    prompt = plan_with(
+        extraction=ExtractedRefund(order_id=None, amount_paise=250000, reason="want it back"),
+        intent=Intent.REFUND_REQUEST,
+    )
+
+    assert "- get_order:" not in prompt
+    assert "- issue_refund:" not in prompt
+    assert "- escalate_to_human:" in prompt
+
+
+def test_an_order_in_play_still_offers_the_order_tools():
+    prompt = plan_with(
+        extraction=ExtractedRefund(order_id="4821", amount_paise=None, reason="charged twice"),
+        intent=Intent.DUPLICATE_CHARGE,
+    )
+
+    assert "- get_order:" in prompt
+    assert "- issue_refund:" in prompt
