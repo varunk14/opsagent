@@ -114,6 +114,30 @@ transaction holding its run has committed, so a pass that dies half way offers t
 again and intake recognises them. Confirming first would be tidier and would lose a customer in
 silence the first time a pass rolled back.
 
+### Replies
+
+A run that rests owes the customer a word about how it went, and that word is written as a row in
+an `outbox` in the *same transaction* as the outcome. A refund cannot commit without the reply that
+says so committing with it, and an outcome that rolled back takes its reply down too -- so a
+customer's money never moves in silence. The message is fixed by outcome (refund issued, handed to
+a person, order not found, an enquiry answered), rendered and frozen at that moment; no model writes
+it, and the only customer detail it carries is the order number the agent acted on and the amount it
+paid. Nothing a customer typed can reach a reply.
+
+A separate pass sends them, replying by SMTP to the address a mail came from and by `sendMessage` to
+the chat a Telegram message came from:
+
+    OPSAGENT_SMTP_HOST="smtp.gmail.com"       # replies reuse the IMAP user and app password above
+    OPSAGENT_SMTP_PORT="587"
+
+    .venv/bin/python -m app.replies           # send every reply a rested run has left
+
+This is the poll ordering seen from the other side. A poll records first and confirms the channel
+afterwards; a drain sends first and marks the row sent afterwards -- for the same reason, since
+marking first would let a crash in the gap drop a reply. Delivery is at-least-once: a send that
+fails keeps its row pending with the error written down and is retried a few times before it rests
+as failed for a person, and one channel being down never holds up a reply waiting on another.
+
 ### Tracing
 
 Every run is one OpenTelemetry trace, and its trace id is the run's own id. However many ticks a run

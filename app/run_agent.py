@@ -96,6 +96,7 @@ from app.guardrails import (
 )
 from app.guardrails import load as load_guardrails
 from app.llm import DEFAULT_MODEL, Ollama, Reply, ServiceUnavailable
+from app.replies.outbox import enqueue_reply
 from app.retrieval import PolicyRetriever
 from app.tracing import (
     Attr,
@@ -847,7 +848,9 @@ def act(
             connection.execute(PARK, (node, *stored))
         span.set_attribute(Attr.RESULT, result)
         if status != "running":
-            # The run has rested: name how it failed, if it did, in this same transaction.
+            # The run has rested: the word the customer is owed, and how it failed if it did, both in
+            # this same transaction. A refund cannot commit without its reply; a run mid-flight owes none.
+            enqueue_reply(connection, claimed.run_id, status=status, result=result, proposal=proposal)
             category = record_category(connection, claimed.run_id)
             if category is not None:
                 span.set_attribute(Attr.FAILURE_CATEGORY, category.value)
@@ -1016,6 +1019,15 @@ def act_on_approval(connection: psycopg.Connection, claimed: ClaimedRun, approve
                 else:
                     status = "waiting_approval"
                     connection.execute(PARK, ("act", *stored))
+                result = "refunded" if failure is None else "refused by the ledger"
+                # The reply the paid (or refused) approval owes, in the transaction that settles it.
+                enqueue_reply(
+                    connection,
+                    claimed.run_id,
+                    status=status,
+                    result=result,
+                    proposal=action if failure is None else None,
+                )
                 category = record_category(connection, claimed.run_id)
                 if category is not None:
                     act.set_attribute(Attr.FAILURE_CATEGORY, category.value)
