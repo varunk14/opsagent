@@ -216,7 +216,8 @@ the `/runs` page rather than rounded away.
 
 ## What this does not measure
 
-- **Real customers.** The 150 cases are written, not sampled from production traffic; there is
+- **Real customers.** The agent now reads real channels — an IMAP mailbox and a Telegram bot — but
+  the 150 cases are still written by hand, not sampled from production traffic, of which there is
   none yet. The distribution of real messages will differ, and the numbers will move when it does.
 - **One machine.** Every latency here is this laptop's. They are comparable to each other and to
   nothing else.
