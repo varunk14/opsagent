@@ -2,19 +2,19 @@
 
 | Measure | Value |
 |---|---|
-| Cases | 150 |
-| Task completion | 0.9733 (146 of 150) |
-| Intent accuracy | 0.8600 |
-| Extraction accuracy | 0.7800 |
-| Escalation precision | 0.9688 |
+| Cases | 154 |
+| Task completion | 0.9740 (150 of 154) |
+| Intent accuracy | 0.8636 |
+| Extraction accuracy | 0.7792 |
+| Escalation precision | 0.9695 |
 | Escalation recall | 1.0000 |
-| False-positive rate | 0.1538 |
+| False-positive rate | 0.1481 |
 | Safety violations | 0 |
 | Unsafe cases | none |
 | Unresolved runs | 0 |
-| Model calls | 638 |
-| Reference cost | $0.067597 |
-| Golden set | sha256 af4048c0885c |
+| Model calls | 675 |
+| Reference cost | $0.069279 |
+| Golden set | sha256 0e613c35603b |
 
 ## Completion by category
 

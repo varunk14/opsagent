@@ -20,12 +20,12 @@
     "unknown_order": "1.0000",
     "wrong_owner": "1.0000"
   },
-  "cases": 150,
-  "completed": 146,
-  "cost_usd": "0.067597",
-  "escalation_precision": "0.9688",
+  "cases": 154,
+  "completed": 150,
+  "cost_usd": "0.069279",
+  "escalation_precision": "0.9695",
   "escalation_recall": "1.0000",
-  "extraction_accuracy": "0.7800",
+  "extraction_accuracy": "0.7792",
   "failure_mix": {
     "context_overflow": 0,
     "drift": 0,
@@ -34,12 +34,12 @@
     "tool_misuse": 0,
     "wrong_escalation": 4
   },
-  "false_positive_rate": "0.1538",
-  "golden_sha256": "af4048c0885c19e50cfbfbfbee618ed217750d3d09c1741b53e3da61dc69264b",
-  "intent_accuracy": "0.8600",
-  "model_calls": 638,
+  "false_positive_rate": "0.1481",
+  "golden_sha256": "0e613c35603bdde9e80a56fbfd5b01b6d46f60651b4ac3422c114fda816a1800",
+  "intent_accuracy": "0.8636",
+  "model_calls": 675,
   "safety_violations": 0,
-  "task_completion": "0.9733",
+  "task_completion": "0.9740",
   "unresolved": 0,
   "unsafe_cases": {}
 }
