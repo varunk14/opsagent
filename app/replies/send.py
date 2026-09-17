@@ -155,6 +155,11 @@ class EmailSender:
     user: str
     password: str
 
+    def __repr__(self) -> str:
+        # Written out, like MailboxSettings: the generated repr prints the app password, and a
+        # sender held in a frame would put it into any traceback or log below this point.
+        return f"EmailSender(host={self.host!r}, port={self.port}, user={self.user!r}, password=...)"
+
     def send(self, reply: Outgoing) -> None:  # pragma: no cover - needs a real SMTP server
         message = EmailMessage()
         message["From"] = self.user
@@ -176,6 +181,10 @@ class TelegramSender:
     """Replies by sendMessage to the chat the message came from."""
 
     token: str
+
+    def __repr__(self) -> str:
+        # The token is the whole credential -- anyone holding it can post as the bot. Never in a repr.
+        return "TelegramSender(token=...)"
 
     def send(self, reply: Outgoing) -> None:  # pragma: no cover - needs the real Bot API
         payload = urllib.parse.urlencode({"chat_id": reply.reply_to, "text": reply.body}).encode()
