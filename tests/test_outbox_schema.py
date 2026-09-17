@@ -94,9 +94,8 @@ def test_a_channel_the_run_never_came_from_is_refused(fresh_database):
 
 
 def test_a_reply_to_no_run_is_refused(fresh_database):
-    with psycopg.connect(fresh_database) as db:
-        with pytest.raises(psycopg.errors.ForeignKeyViolation):
-            enqueue(db, uuid.uuid4())
+    with psycopg.connect(fresh_database) as db, pytest.raises(psycopg.errors.ForeignKeyViolation):
+        enqueue(db, uuid.uuid4())
 
 
 def test_two_replies_for_one_run_are_allowed(fresh_database):
