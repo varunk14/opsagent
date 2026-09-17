@@ -23,8 +23,9 @@ pays exactly what was approved, asking no model and judging nothing again. A
 refund the ledger refuses, however it was allowed, goes to a person. A run past
 its step budget, one proposing a tool this worker does not run, or one asking an
 order tool for an order the customer never wrote, is handed to a person instead of
-executed -- the last before it runs, so a lookup of an invented order cannot loop. A proposal repeating an earlier step is not, yet: the
-planner is asked once more with the result it repeated pointed at, and only a
+executed -- the last before it runs, so a lookup of an invented order cannot
+loop. A proposal repeating an earlier step is not, yet: the planner is asked once
+more with the result it repeated pointed at, and only a
 second repeat is handed over. A sender who has caused
 RATE_LIMIT lookups within RATE_WINDOW has further lookups deferred: the run goes
 back to the queue until the window frees, executing nothing and spending no

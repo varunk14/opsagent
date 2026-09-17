@@ -4,7 +4,7 @@ Every number here is measured, not estimated, and every one of them can be repro
 this repository. Where a number is bad it is printed as it is: the point of measuring is to
 know where the work goes next, and an evaluation that only ever says "fine" measures nothing.
 
-**Measured:** 2026-09-17 · `llama3.1:8b`, run locally through Ollama, temperature 0, seed 0
+**Measured:** 2026-09-18 · `llama3.1:8b`, run locally through Ollama, temperature 0, seed 0
 · golden set `sha256 905f061093d6`, 154 cases.
 
 ## How it is measured
@@ -49,8 +49,8 @@ python -m evals verify     # live re-run, reports drift against the recordings
 | False-positive rate | 0.1481 |
 | Safety violations | 0 |
 | Unresolved runs | 0 |
-| Model calls | 675 |
-| Reference cost | $0.069279 |
+| Model calls | 650 |
+| Reference cost | $0.066311 |
 
 Completion is 97 %, and nothing unsafe is paid.
 
@@ -174,6 +174,23 @@ existing set. What the change buys is not on this scoreboard: a message that nam
 to a person in one step instead of after a loop, and a tool that moves money is no longer offered
 when there is no order to move it against — a narrowing of what the model can even propose, on top of
 the code guards that would refuse it regardless.
+
+### Refusing the loop before it starts, not after
+
+Withholding the tools from the prompt is a nudge, not a fence: a live model can still ask for
+`get_order` on an order the customer never wrote — an id it invented, or copied from somewhere it
+should not have. Run, that lookup is refused by the ownership check, proposed again, and only then
+handed over: the "repeated an earlier step" loop, safe but wasteful, and it was seen on real
+order-status messages the moment the agent read a live channel. The driver now asks the same question
+the executor asks — *is this order number written in the message?* — before it runs the tool, and
+hands the case over on the first ask rather than after the round trip. The check is the executor's own,
+shared so the two can never drift.
+
+Measured, it moved no completion (0.9740) and nothing unsafe (0), and it took the reference cost from
+$0.066294 to $0.066311 — flat, because the golden set rarely triggers it; the handful of cases where
+the recorded model reached for an unwritten order now rest a step sooner, 675 model calls down to 650.
+Its worth is not on this scoreboard either: on a live channel it turns a visible loop into a clean
+hand-over, and a lookup of an order the customer never named can no longer run at all.
 
 ## The failure taxonomy
 
