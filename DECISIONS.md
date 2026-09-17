@@ -174,22 +174,100 @@ Twelve runs on a thermally limited laptop cannot separate the code from the hard
 timings are published so a reader can see that for themselves. A number claiming a latency
 improvement from that sample would be a number about a laptop.
 
-## The screen is loopback-only and has no login
+## MCP is a second description of the tools, not a second way to run them
 
-It binds to `127.0.0.1`, refuses any request naming another host, sets `default-src 'none'`, and
-takes the operator's name from an environment variable. There is no authentication because there is
-no network path to it.
+`app/mcp_server.py` offers the tool catalogue over the Model Context Protocol, so the project can
+honestly say the tools are MCP-compatible. It is deliberately a description, not an execution path.
+`tools/list` returns each tool's schema exactly as `app/tools.py` holds it; `tools/call` checks the
+arguments with the same `validate_tool_call` a run's own proposal is checked with and returns the
+validated proposal -- it opens no database, moves no money, and writes no run state. Nothing in the
+module imports the execution code, so there is no path from a call to an effect.
 
-That is a decision with an expiry date. The moment this is exposed, authentication has to come
-first: the pages carry customer emails and a button that approves real refunds.
+That restraint is the point. The single most important line in this system is that the model
+proposes and code decides; an MCP `tools/call` wired to real execution would be a second decider,
+one that could move money over an unauthenticated channel. Execution stays in run_agent/executor,
+behind idempotency keys, guardrails and approvals, reached only by the durable pipeline.
+
+The transport is stdio only, matching the screen's loopback-only stance: no port, no network, no
+SSE (which the spec has superseded). A host launches the server as a subprocess and speaks over its
+stdin and stdout -- and because stdout is the wire there, logs go to stderr.
+
+## A reply is a row before it is a message
+
+A run that rests owes the customer a word, and that word is written to an `outbox` in the **same
+transaction as the outcome** (`app/replies/outbox.py`, called from `app/run_agent.py`). A refund
+that committed cannot leave without the reply that says so committing with it, and an outcome that
+rolled back takes its reply down too, so a customer's money never moves in silence.
+
+The message is chosen by outcome from a fixed set -- refund issued, handed to a person, order not
+found, an enquiry answered -- rendered and frozen into the row. No model writes it, and the only
+customer detail it can carry is the order number the agent acted on and the amount it paid: the
+render function has no parameter a customer's own words could arrive through, so echoing their text
+back to them is impossible by construction rather than by care.
+
+A separate drain (`app/replies/send.py`) sends them, and its ordering is the poll ordering seen from
+the other side. A poll records first and confirms the channel afterwards; a drain sends first and
+marks the row sent afterwards -- for the same reason, since marking first would let a crash in the
+gap drop a reply. Delivery is at-least-once: a failed send keeps its row pending with the error
+written down and is retried a few times before it rests as failed for a person.
+
+## Replay is a new run, never an edit
+
+When a prompt, a policy, or a line of code changes, the question is whether the case that went wrong
+before goes right now. Replay (`app/replay.py`) answers it by making a **new** run that carries the
+old one's message, worked under whatever is true now; the original row is never modified. The whole
+value is the comparison, and a comparison against something that was itself edited proves nothing.
+
+The fresh run copies only what the customer wrote, gets its own id and its own idempotency key
+(`replay:<id>`, never the original's, which is unique and would read as a re-delivery), and is
+threaded back by a `replay_of` column. It re-enters the pipeline exactly where a new message would,
+so it meets every guardrail the original did: replaying a run whose order was already refunded
+proposes the refund again and is held for a person, not paid twice.
+
+## The deployment is one file, and only the proxy faces the internet
+
+The whole system runs from `compose.deploy.yml`: Postgres, Redis, Ollama, the screen, the worker,
+and Caddy in front. **Only Caddy publishes ports** (80/443). The database, cache, model server,
+screen and worker talk over an internal network and are never reachable from outside -- an exposed
+Postgres or an open Ollama would each be their own incident. Caddy gets a TLS certificate on its
+own, puts the screen behind a password, and proxies the rest through.
+
+It is a manual deploy on purpose: one script run on the box over SSH, no key in GitHub and no
+pipeline that can reach production. The thing that deploys is a person already on the machine. Two
+small things had to become configurable for the app to run in a container -- where the model server
+is (`OPSAGENT_OLLAMA_URL`) and where the screen binds and which host it answers to
+(`OPSAGENT_WEB_HOST`, `OPSAGENT_ALLOWED_HOSTS`) -- and both default to the safe local values, so
+nothing changed for local use.
+
+## The screen is loopback-only, and public only behind a proxy that authenticates
+
+Locally it binds `127.0.0.1`, refuses any request naming another host, sets `default-src 'none'`,
+and takes the operator's name from an environment variable. There is no login because there is no
+network path to it.
+
+That was a decision with an expiry date, and the deployment is the expiry. There the screen binds
+its container's interface -- reachable only over the internal network, never published -- and Caddy
+sits in front, terminating TLS and putting the whole screen behind a password before a single page
+is served. Authentication is added at the proxy, exactly where the network path first appears,
+rather than grafted as a login into an app that never had users. The pages carry customer emails and
+a button that approves real refunds, so nothing there is served before the password.
 
 ## What is still simulated
 
-Stated plainly, because a demo can make this ambiguous:
+Stated plainly, because a demo can make this ambiguous.
 
-- **Intake reads a JSONL file.** There is no mailbox and no chat channel.
+What was simulated and now is not:
+
+- **Intake reads real channels.** A real IMAP mailbox and a real Telegram bot, each adapter
+  refusing far more than it parses; the JSONL file remains for offline demos.
+- **Replies go back out.** A rested run writes a fixed-template reply and a drain sends it by SMTP
+  or Telegram.
+
+What is still simulated:
+
 - **The ledger is a local table** seeded from a fixture. The customers and orders are invented.
 - **A paid refund is a row** in a local table. No money moves anywhere.
 
-The agent, the retrieval, the durability, the guardrails and the evaluation are real. The edges are
-not, and the numbers in this repository describe the agent, not a deployment.
+The agent, the channels, the replies, the retrieval, the durability, the guardrails and the
+evaluation are real. The money is not, and the numbers in this repository describe the agent, not a
+business.

@@ -35,6 +35,7 @@ to fail first, because the failure is the part worth seeing.
 | `app/adapters/fixture.py` | The first intake adapter. Reads JSONL; Gmail will be the second. |
 | `app/llm.py` | Asks a local model for JSON that fits a schema, retries with the error fenced as data, counts every attempt's tokens. |
 | `app/tools.py` | What the agent may propose, as the model sees it: names, descriptions and argument limits, and nothing executable. |
+| `app/mcp_server.py` | The same tools offered over MCP (stdio): lists their schemas, and validates a proposed call with the run's own check but executes nothing. A second description of the tools, not a second way to run them. |
 | `app/graph/` | The LangGraph agent: classify → extract → retrieve → plan. Proposes one checked action; never touches the database. A run picked back up starts at planning with what its earlier steps found. |
 | `app/embeddings.py`, `app/policies.py` | Policy documents chunked, embedded locally with `nomic-embed-text`, stored in pgvector. Reloading unchanged documents embeds nothing. |
 | `app/retrieval.py` | Search by meaning: nearest passages within a distance cutoff, same embedding model only. |
