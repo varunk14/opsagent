@@ -24,10 +24,17 @@ PRIYA = "priya@example.com"
 
 
 def insert_run(
-    connection: psycopg.Connection, key: str | None = None, sender: str | None = PRIYA
+    connection: psycopg.Connection,
+    key: str | None = None,
+    sender: str | None = PRIYA,
+    body: str = "I was charged twice for order #4821.",
+    subject: str | None = None,
 ) -> UUID:
     run_id = uuid4()
-    state = {"untrusted": {"sender": sender}} if sender is not None else {}
+    untrusted: dict = {"body": body, "subject": subject}
+    if sender is not None:
+        untrusted["sender"] = sender
+    state = {"untrusted": untrusted}
     connection.execute(
         """
         INSERT INTO runs (id, channel, status, current_node, state, idempotency_key)
@@ -250,7 +257,7 @@ def test_refunds_add_up_against_the_cap(db):
 
 
 def test_a_refund_for_an_unknown_order_is_refused_as_data(db):
-    run_id = insert_run(db)
+    run_id = insert_run(db, body="I was charged twice for order 9999.")
 
     outcome = execute(db, run_id, 5, refund(order_id="9999"))
 
@@ -365,7 +372,7 @@ def test_get_order_returns_the_order_its_charges_and_what_was_refunded(db):
 
 
 def test_get_order_reports_an_unknown_order_as_data(db):
-    run_id = insert_run(db)
+    run_id = insert_run(db, body="Where is order 9999?")
 
     order = execute(db, run_id, 1, lookup("9999")).result
 
@@ -452,3 +459,96 @@ def test_only_the_refund_cap_is_reported_as_a_refusal(db):
 
     with pytest.raises(psycopg.errors.CheckViolation):
         execute(db, run_id, 5, unchecked)
+
+
+# --- an order the customer never wrote -------------------------------------------------------
+
+
+def test_an_order_the_customer_never_mentioned_is_not_looked_up(db):
+    """
+    The planner found no order in a message that had none, then looked up 4821 anyway -- copied
+    from the example in its own tool description. For a Telegram sender that happened to reach no
+    order. For Priya writing about something else, it would have reached her real one.
+
+    So this is refused on the evidence of the message, not the model's good behaviour: an order
+    number the customer never wrote is not one the agent gets to act on.
+    """
+    insert_order(db)
+    run_id = insert_run(db, body="Hi, I would like to change my delivery address please.")
+
+    result = execute(db, run_id, 1, lookup()).result
+
+    assert "order_id" not in result
+    assert "did not mention order 4821" in result["error"]
+
+
+def test_a_refund_on_an_order_the_customer_never_mentioned_is_refused(db):
+    insert_order(db)
+    run_id = insert_run(db, body="Please refund me.")
+
+    outcome = execute(db, run_id, 1, refund())
+
+    assert outcome.result["refunded"] is False
+    assert "did not mention order 4821" in outcome.result["error"]
+    assert db.execute("SELECT count(*) FROM refunds").fetchone()[0] == 0
+
+
+def test_a_longer_number_is_not_a_mention_of_a_shorter_one(db):
+    """48210 contains 4821. Counting it would let a typo reach somebody else's order."""
+    insert_order(db)
+    run_id = insert_run(db, body="I was charged twice for order 48210.")
+
+    assert "did not mention" in execute(db, run_id, 1, lookup()).result["error"]
+
+
+def test_the_ways_people_write_an_order_number_all_count(db):
+    insert_order(db)
+    for n, body in enumerate(["order #4821", "order 4821.", "(4821)", "4821"], start=1):
+        run_id = insert_run(db, body=body)
+
+        assert execute(db, run_id, n, lookup()).result.get("order_id") == "4821", body
+
+
+def test_the_subject_line_is_something_the_customer_wrote(db):
+    insert_order(db)
+    run_id = insert_run(db, subject="Charged twice for order #4821", body="See subject.")
+
+    assert execute(db, run_id, 1, lookup()).result["order_id"] == "4821"
+
+
+def test_the_mention_check_says_nothing_about_whose_order_it_is(db):
+    """
+    Checked before ownership, and blind to the ledger.
+
+    Otherwise the difference between "you never mentioned it" and "no order" would tell anyone
+    who can send a message whether an order number exists and belongs to somebody.
+    """
+    insert_order(db)
+    owner = insert_run(db, body="hello")
+    stranger = insert_run(db, sender="dev@example.com", body="hello")
+
+    assert execute(db, owner, 1, lookup()).result == execute(db, stranger, 1, lookup()).result
+
+
+def test_a_hyphen_beside_the_number_is_punctuation(db):
+    """
+    'order-4821' is how some people write order 4821, and refusing it would be a false refusal.
+
+    The first version counted a hyphen as part of the number, which kept 4821 from matching inside a
+    different id like A-4821 -- a real concern for a ledger with ids like that. This ledger has none:
+    every order id in both ledgers is plain digits. So a hyphen is read as the separator it is here,
+    and the ownership check still stands between a mention and anybody else's order.
+    """
+    insert_order(db)
+    for n, body in enumerate(["order-4821", "ref-4821 please refund", "4821-"], start=1):
+        run_id = insert_run(db, body=body)
+
+        assert execute(db, run_id, n, lookup()).result.get("order_id") == "4821", body
+
+
+def test_digits_typed_in_another_width_are_the_same_number(db):
+    """Full-width digits come from CJK input methods. The model reads them as 4821, and so must this."""
+    insert_order(db)
+    run_id = insert_run(db, body="注文 ４８２１ が二重請求されました")
+
+    assert execute(db, run_id, 1, lookup()).result.get("order_id") == "4821"

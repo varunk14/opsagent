@@ -31,6 +31,8 @@ operation gets the same answer every time it is asked.
 Only the ledger tools run here. search_policy is the graph's retrieve step.
 """
 
+import re
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -49,6 +51,13 @@ CLAIM_KEY = """
     VALUES (%s, %s, %s, %s)
     ON CONFLICT (idempotency_key) DO NOTHING
     RETURNING idempotency_key
+"""
+
+# What the customer actually wrote, which is the only place an order number is allowed to come from.
+WRITTEN = """
+    SELECT coalesce(state -> 'untrusted' ->> 'subject', ''), coalesce(state -> 'untrusted' ->> 'body', '')
+      FROM runs
+     WHERE id = %s
 """
 
 # Mail addresses are compared without regard to case; a run with no sender matches nothing.
@@ -87,9 +96,40 @@ def operation_key(run_id: UUID, step: int, tool: str) -> str:
     return f"{run_id}:step_{step}:{tool}"
 
 
+def mentioned(connection: psycopg.Connection, run_id: UUID, order_id: str) -> bool:
+    """
+    Whether the customer wrote this order number, as a whole number, in the subject or the body.
+
+    The model is not trusted to have got the number from the message. It was once seen looking up
+    4821 for a message that named no order at all -- copied from an example in its own tool
+    description -- and for a sender who owned a 4821 that lookup would have succeeded. Asking the
+    model to behave better is a request; this is a check.
+
+    Whole numbers only: 48210 contains 4821, and counting it would let a typo reach an order that
+    belongs to someone else. A hyphen is not part of the number -- 'order-4821' is a way of writing
+    4821, and every order id in both ledgers is plain digits -- so only letters and digits bound it.
+    The text is NFKC-normalised first, so digits typed full-width by a CJK input method are the same
+    digits the model read. Checked before ownership, and blind to the ledger, so the answer says
+    nothing about whether the order exists or whose it is.
+    """
+    row = connection.execute(WRITTEN, (run_id,)).fetchone()
+    if row is None:
+        return False
+    written = unicodedata.normalize("NFKC", f"{row[0]}\n{row[1]}")
+    pattern = rf"(?<![A-Za-z0-9]){re.escape(order_id)}(?![A-Za-z0-9])"
+    return re.search(pattern, written, re.IGNORECASE) is not None
+
+
+def unmentioned(order_id: str) -> str:
+    """Said plainly, because a person reads it on the screen when the run is handed over."""
+    return f"the customer did not mention order {order_id}; it cannot come from anywhere else"
+
+
 def get_order(connection: psycopg.Connection, run_id: UUID, key: str, args: JsonObject) -> JsonObject:
     """The sender's order, every charge taken for it, and what has already been paid back."""
     order_id = args["order_id"]
+    if not mentioned(connection, run_id, order_id):
+        return {"error": unmentioned(order_id)}
     order = connection.execute(OWNED_ORDER, (run_id, order_id)).fetchone()
     if order is None:
         return {"error": f"no order {order_id}"}
@@ -119,6 +159,8 @@ def get_order(connection: psycopg.Connection, run_id: UUID, key: str, args: Json
 def issue_refund(connection: psycopg.Connection, run_id: UUID, key: str, args: JsonObject) -> JsonObject:
     """Pay money back. The cap is enforced by the database, under a lock on the order."""
     order_id, amount_paise = args["order_id"], args["amount_paise"]
+    if not mentioned(connection, run_id, order_id):
+        return {"refunded": False, "error": unmentioned(order_id)}
     if connection.execute(OWNED_ORDER, (run_id, order_id)).fetchone() is None:
         return {"refunded": False, "error": f"no order {order_id}"}
 
