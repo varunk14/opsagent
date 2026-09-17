@@ -31,6 +31,10 @@ from uuid import UUID
 import psycopg
 from psycopg.pq import TransactionStatus
 
+from app.adapters.mailbox import PASSWORD_VAR as MAIL_PASSWORD_VAR
+from app.adapters.mailbox import USER_VAR as MAIL_USER_VAR
+from app.adapters.telegram import TOKEN_VAR as TELEGRAM_TOKEN_VAR
+
 # Large enough to clear an ordinary backlog in one drain, small enough that a drain stays short.
 DEFAULT_LIMIT = 500
 
@@ -136,11 +140,10 @@ def drain(
 # Network senders, exercised against the real services and not in the suite: the drain's ordering is
 # what the tests pin, with fakes, and that is the part a bug would hide in.
 
+# The mailbox is read over IMAP and replied to over SMTP with the same account, so the user and
+# password are the ones the mailbox adapter already reads; only the SMTP host and port are new.
 SMTP_HOST_VAR = "OPSAGENT_SMTP_HOST"
 SMTP_PORT_VAR = "OPSAGENT_SMTP_PORT"
-MAIL_USER_VAR = "OPSAGENT_MAILBOX_USER"
-MAIL_PASSWORD_VAR = "OPSAGENT_MAILBOX_PASSWORD"
-TELEGRAM_TOKEN_VAR = "OPSAGENT_TELEGRAM_TOKEN"
 
 
 @dataclass(frozen=True)
