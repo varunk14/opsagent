@@ -46,6 +46,9 @@ CREATE INDEX IF NOT EXISTS outbox_pending_created_at_idx
     ON outbox (created_at)
     WHERE state = 'pending';
 
+-- The run's own page reads the replies it owed; Postgres does not index a foreign key on its own.
+CREATE INDEX IF NOT EXISTS outbox_run_id_idx ON outbox (run_id);
+
 COMMENT ON COLUMN outbox.reply_to IS
     'Where the reply goes, resolved at write time: an email address, or a Telegram chat id.';
 COMMENT ON COLUMN outbox.thread_ref IS

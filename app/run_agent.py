@@ -847,13 +847,10 @@ def act(
             node = failure.split(":", 1)[0] if failure else "plan"
             connection.execute(PARK, (node, *stored))
         span.set_attribute(Attr.RESULT, result)
-        # In this same transaction: the word the customer is owed, chosen by how the run rested.
-        # Bound to the outcome so a refund cannot commit without it, and nothing for a run mid-flight.
-        enqueue_reply(
-            connection, claimed.run_id, status=status, result=result, proposal=proposal, failure=failure
-        )
         if status != "running":
-            # The run has rested: name how it failed, if it did, in this same transaction.
+            # The run has rested: the word the customer is owed, and how it failed if it did, both in
+            # this same transaction. A refund cannot commit without its reply; a run mid-flight owes none.
+            enqueue_reply(connection, claimed.run_id, status=status, result=result, proposal=proposal)
             category = record_category(connection, claimed.run_id)
             if category is not None:
                 span.set_attribute(Attr.FAILURE_CATEGORY, category.value)
@@ -1030,7 +1027,6 @@ def act_on_approval(connection: psycopg.Connection, claimed: ClaimedRun, approve
                     status=status,
                     result=result,
                     proposal=action if failure is None else None,
-                    failure=failure,
                 )
                 category = record_category(connection, claimed.run_id)
                 if category is not None:

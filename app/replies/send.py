@@ -30,6 +30,7 @@ from uuid import UUID
 
 import psycopg
 from psycopg.pq import TransactionStatus
+from psycopg.rows import class_row
 
 from app.adapters.mailbox import PASSWORD_VAR as MAIL_PASSWORD_VAR
 from app.adapters.mailbox import USER_VAR as MAIL_USER_VAR
@@ -119,10 +120,15 @@ def drain(
     sent = failed = 0
     for _ in range(limit):
         with connection.transaction():
-            row = connection.execute(CLAIM_ONE, (channels, attempted)).fetchone()
-            if row is None:
+            # Mapped by column name, not position, so reordering CLAIM_ONE's SELECT can never
+            # silently swap two same-typed fields -- channel for template, say -- and misroute a reply.
+            reply = (
+                connection.cursor(row_factory=class_row(Outgoing))
+                .execute(CLAIM_ONE, (channels, attempted))
+                .fetchone()
+            )
+            if reply is None:
                 break
-            reply = Outgoing(*row)
             attempted.append(reply.id)
             try:
                 senders[reply.channel].send(reply)

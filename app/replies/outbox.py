@@ -23,6 +23,7 @@ from uuid import UUID
 
 import psycopg
 
+from app.contracts import ProposedAction
 from app.replies import templates
 
 # Read in the act transaction: the channel decided at intake, the key we can reply through,
@@ -36,6 +37,12 @@ RUN_FOR_REPLY = """
 # What the lookups on this run established about the order: did any find one, did any come
 # back empty. "Not found" is the second without the first -- a run that found an order and
 # then stopped for some other reason is not a run that could not find the order.
+#
+# Deliberately only the genuine "no order X" shape counts as missing. get_order also refuses an
+# order the customer never wrote (executor.mentioned -> "the customer did not mention order ..."),
+# and that is a hallucinated lookup, not a customer asking about an order we cannot find. It falls
+# through to handed_to_person, where a person can see what the model was reaching for, rather than
+# telling the customer we could not find an order they never named.
 LOOKUP_OUTCOME = """
     SELECT coalesce(bool_or(result ? 'charges_paise'), false)          AS any_found,
            coalesce(bool_or(result ->> 'error' LIKE 'no order%%'), false) AS any_missing
@@ -55,10 +62,14 @@ def enqueue_reply(
     *,
     status: str,
     result: str,
-    proposal: Any,
-    failure: str | None,
+    proposal: ProposedAction | None,
 ) -> None:
-    """Write the reply this outcome owes, or nothing when it owes none. Does not commit."""
+    """
+    Write the reply this outcome owes, or nothing when it owes none. Does not commit.
+
+    `proposal` is the refunded action for a paid refund and None for every other outcome; that is
+    the invariant the callers uphold and the type states, so the refund branch can read its args.
+    """
     row = connection.execute(RUN_FOR_REPLY, (run_id,)).fetchone()
     if row is None:  # pragma: no cover - the run was just acted on, so it exists
         return
@@ -82,11 +93,11 @@ def _template_for(
     run_id: UUID,
     status: str,
     result: str,
-    proposal: Any,
+    proposal: ProposedAction | None,
     channel: str,
 ) -> tuple[str, str | None, int | None] | None:
     """The template and its safe fields, or None when this outcome says nothing to the customer."""
-    if status == "done" and result == "refunded":
+    if status == "done" and result == "refunded" and proposal is not None:
         args: Mapping[str, Any] = proposal.args
         return templates.REFUND_ISSUED, args.get("order_id"), args.get("amount_paise")
     if status == "waiting_approval":
