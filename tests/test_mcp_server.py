@@ -72,6 +72,17 @@ def test_the_server_has_no_path_to_execution():
         assert forbidden not in source, f"mcp_server reaches execution via {forbidden}"
 
 
+def test_the_server_speaks_no_network_transport():
+    """
+    stdio only, by construction. The SDK ships SSE and HTTP transports too; wiring one here would
+    put the tools on a network, against the whole project's loopback-only stance. Locked structurally
+    so a future edit that reaches for a port has to delete this test and say so.
+    """
+    source = Path(__file__).resolve().parent.parent.joinpath("app", "mcp_server.py").read_text()
+    for forbidden in ("sse", "streamable_http", "streamable-http", "uvicorn", "starlette"):
+        assert forbidden not in source, f"mcp_server reaches a network transport via {forbidden}"
+
+
 # --- a call cannot execute ----------------------------------------------------
 
 

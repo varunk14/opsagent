@@ -55,14 +55,14 @@ def mcp_tools() -> list[mt.Tool]:
 
 
 async def list_tools(
-    ctx: ServerRequestContext[Any], params: mt.PaginatedRequestParams | None
+    ctx: ServerRequestContext[None], params: mt.PaginatedRequestParams | None
 ) -> mt.ListToolsResult:
     """Advertise the catalogue. Reads nothing, changes nothing."""
     return mt.ListToolsResult(tools=mcp_tools())
 
 
 async def call_tool(
-    ctx: ServerRequestContext[Any], params: mt.CallToolRequestParams
+    ctx: ServerRequestContext[None], params: mt.CallToolRequestParams
 ) -> mt.CallToolResult:
     """Validate a proposed call the same way a run's proposal is validated, and return it unrun."""
     arguments = dict(params.arguments or {})
