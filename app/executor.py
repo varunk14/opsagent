@@ -115,7 +115,19 @@ def mentioned(connection: psycopg.Connection, run_id: UUID, order_id: str) -> bo
     row = connection.execute(WRITTEN, (run_id,)).fetchone()
     if row is None:
         return False
-    written = unicodedata.normalize("NFKC", f"{row[0]}\n{row[1]}")
+    return names_order(f"{row[0]}\n{row[1]}", order_id)
+
+
+def names_order(text: str, order_id: str) -> bool:
+    """
+    Whether `text` writes this order number as a whole number, the pure check behind `mentioned`.
+
+    Kept apart so the driver can ask the same question of a proposal before running it -- a
+    get_order or issue_refund for an order the customer never wrote is refused here and would only
+    loop -- without a database round-trip, and with the identical normalisation, so the two can
+    never disagree. NFKC first, so full-width digits match; whole numbers only, hyphen not a bound.
+    """
+    written = unicodedata.normalize("NFKC", text)
     pattern = rf"(?<![A-Za-z0-9]){re.escape(order_id)}(?![A-Za-z0-9])"
     return re.search(pattern, written, re.IGNORECASE) is not None
 

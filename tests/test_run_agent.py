@@ -54,6 +54,10 @@ LOOKUP_3310 = (
     '{"tool": "get_order", "args": {"order_id": "3310"}, "confidence": 0.6,'
     ' "reasoning": "maybe the other order"}'
 )
+# A message that names both orders, so a lookup of 3310 is one the customer wrote and the driver's
+# "an order the customer never named" guard leaves alone -- these tests exercise the step budget and
+# the repeated-lookup mark, not that guard.
+BOTH_ORDERS = "Hi, I was charged twice for order #4821, and I think also for order #3310. Thanks, Priya"
 PROPOSED_SEARCH = (
     '{"tool": "search_policy", "args": {"question": "charged twice"}, "confidence": 0.5,'
     ' "reasoning": "no policy was found"}'
@@ -76,13 +80,19 @@ def happy_graph():
     return graph_of(happy_model())
 
 
-def queue(dsn: str, external_id: str = "9f2a", minute: int = 0) -> str:
+def queue(
+    dsn: str,
+    external_id: str = "9f2a",
+    minute: int = 0,
+    subject: str = "Charged twice for order #4821",
+    body: str = "Hi, I think I was charged twice for order #4821 last Tuesday.",
+) -> str:
     message = IncomingMessage(
         channel=Channel.EMAIL,
         external_id=external_id,
         sender="priya@example.com",
-        subject="Charged twice for order #4821",
-        body="Hi, I think I was charged twice for order #4821 last Tuesday.",
+        subject=subject,
+        body=body,
         received_at=datetime(2026, 9, 13, 9, minute, tzinfo=UTC),
     )
     with psycopg.connect(dsn) as connection:
@@ -406,7 +416,7 @@ def test_a_repeated_proposal_is_escalated_not_run_again(fresh_database):
 
 def test_the_step_budget_hands_the_case_to_a_person(fresh_database):
     ledger(fresh_database)
-    run_id = queue(fresh_database)
+    run_id = queue(fresh_database, body=BOTH_ORDERS)
     model = ScriptedModel(
         classify=CLASSIFIED_DUPLICATE, extract=EXTRACTED_4821, plan=[PROPOSED_LOOKUP, LOOKUP_3310]
     )
@@ -872,7 +882,7 @@ def test_a_hand_over_for_any_other_reason_is_not_asked_again(fresh_database):
 def test_only_the_result_that_was_repeated_is_pointed_at(fresh_database):
     """The mark says which answer the planner already has. Marking them all would say nothing."""
     ledger(fresh_database)
-    queue(fresh_database)
+    queue(fresh_database, body=BOTH_ORDERS)
     model = ScriptedModel(
         classify=CLASSIFIED_DUPLICATE,
         extract=EXTRACTED_4821,
