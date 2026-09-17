@@ -1,0 +1,121 @@
+# The whole deployment in one file. On a fresh host with Docker installed:
+#
+#   cp deploy/.env.deploy.example .env      # then fill it in; it is never committed
+#   ./deploy/deploy.sh                       # build, start, pull models, migrate, seed
+#
+# Only Caddy is published to the host (80/443). Everything else -- the database, the cache, the
+# model server, the screen, the worker -- talks over the internal compose network and is never
+# reachable from outside. Caddy terminates TLS, gates the screen behind a password, and proxies
+# the rest through to it.
+name: opsagent
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: opsagent
+      POSTGRES_PASSWORD: ${OPSAGENT_DB_PASSWORD:?set OPSAGENT_DB_PASSWORD in .env}
+      POSTGRES_DB: opsagent
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations/000_bootstrap.sql:/docker-entrypoint-initdb.d/000_bootstrap.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opsagent -d opsagent"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  cache:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  web:
+    build: .
+    command: ["python", "-m", "app.web"]
+    environment:
+      OPSAGENT_DATABASE_URL: postgresql://opsagent:${OPSAGENT_DB_PASSWORD}@db:5432/opsagent
+      OPSAGENT_OLLAMA_URL: http://ollama:11434
+      # Binds every interface INSIDE the container only; the port is never published to the host,
+      # so the screen is reachable solely through Caddy. The domain is what TrustedHost will answer.
+      OPSAGENT_WEB_HOST: 0.0.0.0
+      OPSAGENT_ALLOWED_HOSTS: ${OPSAGENT_DOMAIN:?set OPSAGENT_DOMAIN in .env}
+      OPSAGENT_OPERATOR: ${OPSAGENT_OPERATOR:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build: .
+    # The worker's whole life: read what came in, work what is queued, send what is owed, wait,
+    # repeat. Every pass is bounded and safe to interrupt, so a failing one is retried next time
+    # rather than stopping the loop; a pass for a channel that is not configured just prints and
+    # moves on.
+    command:
+      - sh
+      - -c
+      - |
+        while true; do
+          python -m app.poll --mailbox || true
+          python -m app.poll --telegram || true
+          python -m app.run_agent 50 || true
+          python -m app.replies || true
+          sleep "$${OPSAGENT_LOOP_SECONDS:-20}"
+        done
+    environment:
+      OPSAGENT_DATABASE_URL: postgresql://opsagent:${OPSAGENT_DB_PASSWORD}@db:5432/opsagent
+      OPSAGENT_OLLAMA_URL: http://ollama:11434
+      OPSAGENT_LOOP_SECONDS: ${OPSAGENT_LOOP_SECONDS:-20}
+      # Channels and replies, all optional. A pass with nothing configured prints and moves on.
+      OPSAGENT_IMAP_HOST: ${OPSAGENT_IMAP_HOST:-}
+      OPSAGENT_IMAP_USER: ${OPSAGENT_IMAP_USER:-}
+      OPSAGENT_IMAP_PASSWORD: ${OPSAGENT_IMAP_PASSWORD:-}
+      OPSAGENT_SMTP_HOST: ${OPSAGENT_SMTP_HOST:-}
+      OPSAGENT_SMTP_PORT: ${OPSAGENT_SMTP_PORT:-587}
+      OPSAGENT_TELEGRAM_TOKEN: ${OPSAGENT_TELEGRAM_TOKEN:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      OPSAGENT_DOMAIN: ${OPSAGENT_DOMAIN:?set OPSAGENT_DOMAIN in .env}
+      # "username hashed-password" from `docker run --rm caddy caddy hash-password --plaintext '...'`.
+      OPSAGENT_BASICAUTH: ${OPSAGENT_BASICAUTH:?set OPSAGENT_BASICAUTH in .env}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  ollama:
+  caddy_data:
+  caddy_config:

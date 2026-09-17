@@ -1,0 +1,29 @@
+# The front door. Caddy gets a real TLS certificate for the domain automatically (HTTP-01 over
+# ports 80/443, renewed on its own), gates the screen behind a password, and proxies everything
+# through to the app. The app itself never faces the internet -- only this does.
+#
+# Two values come from the environment (set in the deploy .env, read by the caddy service):
+#   OPSAGENT_DOMAIN     the hostname the certificate is for and the screen answers to
+#   OPSAGENT_BASICAUTH  "username hashed-password", from `caddy hash-password` (see deploy/README.md)
+
+{$OPSAGENT_DOMAIN} {
+	encode gzip
+
+	# One password in front of the whole screen. Everything here can move money or read a
+	# customer's message, so nothing is served before the password is given. The hash is bcrypt;
+	# the plaintext is never stored, here or anywhere.
+	basic_auth {
+		{$OPSAGENT_BASICAUTH}
+	}
+
+	# The app binds 0.0.0.0:8055 inside its own container, reachable only on this compose network.
+	reverse_proxy web:8055
+
+	# Caddy adds HSTS on its own once TLS is up; these cover the rest, matching the app's own headers.
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy same-origin
+		-Server
+	}
+}
