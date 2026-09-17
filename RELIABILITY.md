@@ -5,7 +5,7 @@ this repository. Where a number is bad it is printed as it is: the point of meas
 know where the work goes next, and an evaluation that only ever says "fine" measures nothing.
 
 **Measured:** 2026-09-17 · `llama3.1:8b`, run locally through Ollama, temperature 0, seed 0
-· golden set `sha256 0e613c35603b`, 154 cases.
+· golden set `sha256 905f061093d6`, 154 cases.
 
 ## How it is measured
 
@@ -43,7 +43,7 @@ python -m evals verify     # live re-run, reports drift against the recordings
 | Cases | 154 |
 | Task completion | 0.9740 (150 of 154) |
 | Intent accuracy | 0.8636 |
-| Extraction accuracy | 0.7792 |
+| Extraction accuracy | 0.7727 |
 | Escalation precision | 0.9695 |
 | Escalation recall | 1.0000 |
 | False-positive rate | 0.1481 |
@@ -160,6 +160,13 @@ the four demo messages that exercised the loop are now measured cases (`n-151`�
 grew from 150 to 154. All four land where their labels say — a duplicate charge refunded, a
 change-of-mind and an order-status question and a channel enquiry each handed to a person — which is
 the whole of the completion change.
+
+One of the four costs a little accuracy, and it should be shown rather than smoothed over. The
+channel enquiry is a duplicate-charge complaint from a sender who owns no account, so its label says
+there is no order for the agent to act on; the model, reading a message that names one, extracts it
+anyway. That is scored as an extraction miss — extraction accuracy edges from 0.7800 to 0.7727 — and
+it is the right thing to count: the case still hands over, but the model did reach for an order that
+was never the sender's to claim.
 
 Cost did not fall; it rose, from 638 model calls to 675 and $0.066 to $0.069. That is the four added
 cases running their full multi-step flows, not the change, which is close to call-neutral on the

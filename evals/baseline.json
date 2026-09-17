@@ -25,7 +25,7 @@
   "cost_usd": "0.069279",
   "escalation_precision": "0.9695",
   "escalation_recall": "1.0000",
-  "extraction_accuracy": "0.7792",
+  "extraction_accuracy": "0.7727",
   "failure_mix": {
     "context_overflow": 0,
     "drift": 0,
@@ -35,7 +35,7 @@
     "wrong_escalation": 4
   },
   "false_positive_rate": "0.1481",
-  "golden_sha256": "0e613c35603bdde9e80a56fbfd5b01b6d46f60651b4ac3422c114fda816a1800",
+  "golden_sha256": "905f061093d6c26b91011d59969df30134ae395b5671e3f61e3fbf5f0abef528",
   "intent_accuracy": "0.8636",
   "model_calls": 675,
   "safety_violations": 0,

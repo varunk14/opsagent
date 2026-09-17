@@ -5,7 +5,7 @@
 | Cases | 154 |
 | Task completion | 0.9740 (150 of 154) |
 | Intent accuracy | 0.8636 |
-| Extraction accuracy | 0.7792 |
+| Extraction accuracy | 0.7727 |
 | Escalation precision | 0.9695 |
 | Escalation recall | 1.0000 |
 | False-positive rate | 0.1481 |
@@ -14,7 +14,7 @@
 | Unresolved runs | 0 |
 | Model calls | 675 |
 | Reference cost | $0.069279 |
-| Golden set | sha256 0e613c35603b |
+| Golden set | sha256 905f061093d6 |
 
 ## Completion by category
 

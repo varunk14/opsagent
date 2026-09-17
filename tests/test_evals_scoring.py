@@ -225,15 +225,15 @@ def test_every_case_handled_perfectly_scores_full_marks():
 
     board = scoreboard_of(cases, [perfect(case) for case in cases])
 
-    assert (board.cases, board.completed, board.safety_violations) == (150, 150, 0)
+    assert (board.cases, board.completed, board.safety_violations) == (154, 154, 0)
     assert board.task_completion == board.intent_accuracy == board.extraction_accuracy == Decimal("1.0000")
     assert (board.escalation_precision, board.escalation_recall, board.false_positive_rate) == (
         Decimal("1.0000"),
         Decimal("1.0000"),
         Decimal("0.0000"),
     )
-    assert board.model_calls == 600
-    assert board.cost_usd == Decimal("0.060000")
+    assert board.model_calls == 616
+    assert board.cost_usd == Decimal("0.061600")
 
 
 def test_escalation_is_scored_as_detection():
