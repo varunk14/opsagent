@@ -174,6 +174,24 @@ Twelve runs on a thermally limited laptop cannot separate the code from the hard
 timings are published so a reader can see that for themselves. A number claiming a latency
 improvement from that sample would be a number about a laptop.
 
+## MCP is a second description of the tools, not a second way to run them
+
+`app/mcp_server.py` offers the tool catalogue over the Model Context Protocol, so the project can
+honestly say the tools are MCP-compatible. It is deliberately a description, not an execution path.
+`tools/list` returns each tool's schema exactly as `app/tools.py` holds it; `tools/call` checks the
+arguments with the same `validate_tool_call` a run's own proposal is checked with and returns the
+validated proposal -- it opens no database, moves no money, and writes no run state. Nothing in the
+module imports the execution code, so there is no path from a call to an effect.
+
+That restraint is the point. The single most important line in this system is that the model
+proposes and code decides; an MCP `tools/call` wired to real execution would be a second decider,
+one that could move money over an unauthenticated channel. Execution stays in run_agent/executor,
+behind idempotency keys, guardrails and approvals, reached only by the durable pipeline.
+
+The transport is stdio only, matching the screen's loopback-only stance: no port, no network, no
+SSE (which the spec has superseded). A host launches the server as a subprocess and speaks over its
+stdin and stdout -- and because stdout is the wire there, logs go to stderr.
+
 ## A reply is a row before it is a message
 
 A run that rests owes the customer a word, and that word is written to an `outbox` in the **same
