@@ -222,10 +222,10 @@ def test_no_order_identified_omits_the_order_tools():
     """
     prompt = plan_with(extraction=None)
 
-    assert "get_order" not in prompt
-    assert "issue_refund" not in prompt
-    assert "escalate_to_human" in prompt
-    assert "no order" in prompt.lower()
+    assert "- get_order:" not in prompt
+    assert "- issue_refund:" not in prompt
+    assert "- escalate_to_human:" in prompt
+    assert "no order was identified" in prompt.lower()
 
 
 def test_a_refund_intent_with_no_order_id_omits_the_order_tools():
@@ -235,9 +235,9 @@ def test_a_refund_intent_with_no_order_id_omits_the_order_tools():
         intent=Intent.REFUND_REQUEST,
     )
 
-    assert "get_order" not in prompt
-    assert "issue_refund" not in prompt
-    assert "escalate_to_human" in prompt
+    assert "- get_order:" not in prompt
+    assert "- issue_refund:" not in prompt
+    assert "- escalate_to_human:" in prompt
 
 
 def test_an_order_in_play_still_offers_the_order_tools():
@@ -246,5 +246,5 @@ def test_an_order_in_play_still_offers_the_order_tools():
         intent=Intent.DUPLICATE_CHARGE,
     )
 
-    assert "get_order" in prompt
-    assert "issue_refund" in prompt
+    assert "- get_order:" in prompt
+    assert "- issue_refund:" in prompt
