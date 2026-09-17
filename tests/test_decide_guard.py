@@ -49,7 +49,7 @@ def test_issue_refund_with_no_extraction_hands_over():
 
 def test_an_extraction_that_found_no_order_id_hands_over():
     extraction = ExtractedRefund(order_id=None, amount_paise=250000, reason="want it back")
-    prop, failure = decide(state_with(proposal("get_order", order_id="9999"), extraction), steps=[], max_steps=4)
+    prop, _failure = decide(state_with(proposal("get_order", order_id="9999"), extraction), steps=[], max_steps=4)
 
     assert prop.tool == "escalate_to_human"
 

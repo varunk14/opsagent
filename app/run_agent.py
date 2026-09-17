@@ -142,6 +142,10 @@ RUNS_NOW = frozenset({"get_order", "escalate_to_human"})
 GUARDED = frozenset({"issue_refund"})
 # Retrieval already ran in the graph; a planner asking to search again is handed over.
 NOT_RUN_HERE = frozenset({"search_policy"})
+# The two tools that act on an order. Proposed when no order was identified, there is nothing
+# for them to look up or pay back, so the driver hands the case over rather than running one,
+# having it refused by the executor's ownership check, and being asked for it again -- the loop.
+ORDER_TOOLS = frozenset({"get_order", "issue_refund"})
 
 # How long a lock may go without a committed step before the run is taken back.
 # Every committed step refreshes it, so only a worker that has gone quiet loses it.
@@ -429,6 +433,12 @@ def marked_observations(steps: Sequence[Mapping[str, Any]], proposal: ProposedAc
     return [{**step, "note": ALREADY_SHOWN} if repeats(proposal, step) else dict(step) for step in steps]
 
 
+def no_order_in_play(state: AgentState) -> bool:
+    """Whether this run has no order to act on: extraction either did not run or found no order id."""
+    extraction = state.get("extraction")
+    return extraction is None or extraction.order_id is None
+
+
 def decide(state: AgentState, steps: list[dict[str, Any]], max_steps: int) -> tuple[ProposedAction, str | None]:
     """The action this tick takes: the proposal, or a hand-over to a person in its place."""
     proposal = state["proposal"]
@@ -440,6 +450,13 @@ def decide(state: AgentState, steps: list[dict[str, Any]], max_steps: int) -> tu
         return hand_over(
             f"{proposal.tool} is not a tool this worker runs",
             f"The planner asked for {proposal.tool}, which does not run here.",
+        )
+    if proposal.tool in ORDER_TOOLS and no_order_in_play(state):
+        # The prompt withholds the order tools when no order was found, but a model can still
+        # ask for one. Hand over on the first such ask, before it runs, is refused and loops.
+        return hand_over(
+            "no order to act on",
+            f"The planner asked for {proposal.tool}, but no order was identified to act on.",
         )
     if any(repeats(proposal, step) for step in steps):
         return hand_over(REPEATED_STEP, f"The planner asked for {proposal.tool} again with the same arguments.")
