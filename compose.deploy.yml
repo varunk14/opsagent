@@ -72,11 +72,12 @@ services:
       - sh
       - -c
       - |
+        note() { echo "  worker: a $$1 pass failed; the next tick retries"; }
         while true; do
-          python -m app.poll --mailbox || true
-          python -m app.poll --telegram || true
-          python -m app.run_agent 50 || true
-          python -m app.replies || true
+          python -m app.poll --mailbox  || note "mailbox poll"
+          python -m app.poll --telegram || note "telegram poll"
+          python -m app.run_agent 50    || note "run"
+          python -m app.replies         || note "reply drain"
           sleep "$${OPSAGENT_LOOP_SECONDS:-20}"
         done
     environment:

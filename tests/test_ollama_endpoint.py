@@ -19,6 +19,13 @@ def test_the_base_comes_from_the_environment():
     assert endpoint == "http://ollama:11434/api/generate"
 
 
+def test_an_empty_value_falls_back_like_an_unset_one():
+    """A compose file with OPSAGENT_OLLAMA_URL= (blank) must not produce a scheme-relative URL."""
+    assert ollama_endpoint("api/generate", {"OPSAGENT_OLLAMA_URL": ""}) == (
+        "http://localhost:11434/api/generate"
+    )
+
+
 def test_a_trailing_slash_does_not_double_up():
     endpoint = ollama_endpoint("api/embed", {"OPSAGENT_OLLAMA_URL": "http://ollama:11434/"})
     assert endpoint == "http://ollama:11434/api/embed"

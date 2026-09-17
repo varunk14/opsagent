@@ -414,7 +414,13 @@ def main() -> int:  # pragma: no cover - serves until stopped
     host = bind_host()
     print(f"  approvals on http://{host}:{PORT}/approvals, runs on http://{host}:{PORT}/runs")
     app = create_app(operator=operator, langfuse_project_url=os.environ.get(LANGFUSE_VAR))
-    uvicorn.run(app, host=host, port=PORT, log_level="warning")
+    # Behind Caddy the request arrives over http from the proxy, but the browser's Origin is the
+    # https domain. Honouring X-Forwarded-Proto/Host makes request.base_url the real public URL, so
+    # the CSRF origin check matches instead of refusing every decision. Trusting every forwarding
+    # address is safe here because the app's port is never published -- only Caddy can reach it.
+    uvicorn.run(
+        app, host=host, port=PORT, log_level="warning", proxy_headers=True, forwarded_allow_ips="*"
+    )
     return 0
 
 

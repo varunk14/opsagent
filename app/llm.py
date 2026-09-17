@@ -36,7 +36,9 @@ def ollama_endpoint(path: str, environ: Mapping[str, str] = os.environ) -> str:
     Localhost on this machine, and a service name in a container, where the model server is a
     process of its own. Only where the server is moves; which model and which path do not.
     """
-    base = environ.get("OPSAGENT_OLLAMA_URL", "http://localhost:11434").rstrip("/")
+    # `or`, not a get-default: a var set to empty (a common compose/.env accident) must fall back
+    # to localhost too, not become an empty base and a scheme-relative URL urllib cannot open.
+    base = (environ.get("OPSAGENT_OLLAMA_URL") or "http://localhost:11434").rstrip("/")
     return f"{base}/{path.lstrip('/')}"
 
 
