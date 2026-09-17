@@ -19,6 +19,7 @@ Run:  .venv/bin/python -m app.replay <run_id>
 """
 
 import sys
+from dataclasses import dataclass
 from uuid import UUID, uuid4
 
 import psycopg
@@ -27,6 +28,9 @@ from psycopg.types.json import Jsonb
 from app.db import connect
 
 ORIGINAL = "SELECT channel, state FROM runs WHERE id = %s"
+
+LINEAGE_ORIGINAL = "SELECT replay_of FROM runs WHERE id = %s"
+LINEAGE_REPLAYS = "SELECT id, status FROM runs WHERE replay_of = %s ORDER BY created_at, id"
 
 INSERT_REPLAY = """
     INSERT INTO runs (id, channel, status, current_node, state, idempotency_key, replay_of)
@@ -53,6 +57,22 @@ def replay(connection: psycopg.Connection, original_id: UUID) -> UUID:
     new_id = uuid4()
     connection.execute(INSERT_REPLAY, (new_id, channel, Jsonb(fresh), f"replay:{new_id}", original_id))
     return new_id
+
+
+@dataclass(frozen=True)
+class Lineage:
+    """A run's place in the replay thread: what it replays, and what has been replayed from it."""
+
+    original: UUID | None                  # the run this one is a replay of, or None
+    replays: list[tuple[UUID, str]]        # (id, status) of the replays made of this run, oldest first
+
+
+def lineage(connection: psycopg.Connection, run_id: UUID) -> Lineage:
+    """Read both ends of the thread so the screen can link a run to its original and its replays."""
+    origin_row = connection.execute(LINEAGE_ORIGINAL, (run_id,)).fetchone()
+    original = origin_row[0] if origin_row is not None else None
+    replays = [(rid, status) for rid, status in connection.execute(LINEAGE_REPLAYS, (run_id,)).fetchall()]
+    return Lineage(original=original, replays=replays)
 
 
 def main(argv: list[str]) -> int:  # pragma: no cover - the interactive driver
