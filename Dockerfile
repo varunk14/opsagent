@@ -13,11 +13,13 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Only what production runs: the app, the migrations it applies, and the text it reads at load --
-# the prompts (hashed at startup) and the policy documents (ingested into the store).
+# the prompts (hashed at startup), the policy documents (ingested into the store), and the demo
+# ledger that `python -m app.seed` loads at deploy so a fresh box has orders to act on.
 COPY app ./app
 COPY migrations ./migrations
 COPY prompts ./prompts
 COPY policies ./policies
+COPY fixtures ./fixtures
 
 # Never as root. A fixed high uid so a bind-mounted volume's files have a predictable owner.
 RUN useradd --create-home --uid 10001 opsagent && chown -R opsagent:opsagent /app
