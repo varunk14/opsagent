@@ -106,3 +106,15 @@ def test_two_replies_for_one_run_are_allowed(fresh_database):
         enqueue(db, run_id, template="refund_issued", body="Your refund has been processed.")
         count = db.execute("SELECT count(*) FROM outbox WHERE run_id = %s", (run_id,)).fetchone()[0]
     assert count == 2
+
+
+def test_a_voice_run_may_owe_a_voice_reply(fresh_database):
+    """Voice is a first-class channel: `runs` and `outbox` both accept it, so a voice run's
+    outcome can be written in the same transaction that rested it, exactly like email or telegram."""
+    with psycopg.connect(fresh_database) as db:
+        run_id = a_run(db, key="voice_clip_abc123", channel="voice")
+        enqueue(db, run_id, channel="voice", template="enquiry", body="A person will be in touch.")
+        count = db.execute(
+            "SELECT count(*) FROM outbox WHERE run_id = %s AND channel = 'voice'", (run_id,)
+        ).fetchone()[0]
+    assert count == 1

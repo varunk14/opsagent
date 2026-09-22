@@ -47,6 +47,7 @@ class Channel(StrEnum):
     EMAIL = "email"
     TELEGRAM = "telegram"
     FORM = "form"
+    VOICE = "voice"
 
 
 class RunStatus(StrEnum):

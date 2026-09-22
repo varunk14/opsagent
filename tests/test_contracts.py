@@ -228,3 +228,23 @@ def test_a_timestamp_without_a_timezone_is_rejected():
     """
     with pytest.raises(ValidationError):
         a_message(received_at=datetime(2026, 9, 13, 9, 0))  # noqa: DTZ001 - naive on purpose
+
+
+# --- voice as a first-class channel -------------------------------------------
+
+
+def test_voice_is_a_named_channel():
+    """
+    Adding a channel is a contract change, not a config toggle: any new value must appear here so
+    the parts that dispatch on channel are forced to notice it.
+    """
+    assert Channel.VOICE.value == "voice"
+    assert Channel("voice") is Channel.VOICE
+
+
+def test_an_incoming_message_can_arrive_on_voice():
+    """Same shape as any other channel; only the value differs."""
+    voice = a_message(channel=Channel.VOICE, external_id="voice-clip-abc123")
+
+    assert voice.channel is Channel.VOICE
+    assert voice.external_id == "voice-clip-abc123"
