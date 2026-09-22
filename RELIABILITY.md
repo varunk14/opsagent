@@ -266,9 +266,16 @@ the `/runs` page rather than rounded away.
 
 ## What this does not measure
 
-- **Real customers.** The agent now reads real channels — an IMAP mailbox and a Telegram bot — but
-  the 154 cases are still written by hand, not sampled from production traffic, of which there is
-  none yet. The distribution of real messages will differ, and the numbers will move when it does.
+- **Real customers.** The agent now reads real channels — an IMAP mailbox, a Telegram bot, and a
+  voice channel — but the 154 cases are still written by hand, not sampled from production traffic,
+  of which there is none yet. The distribution of real messages will differ, and the numbers will
+  move when it does.
+- **The voice channel is not on this scoreboard.** The 154 cases arrive as text, so every number in
+  this file is measured against the same body-and-metadata the eval harness has always seen. The
+  voice channel adds Sarvam's speech-to-text between a person and a run: what the transcriber gets
+  wrong, and how a mispunctuated address changes classification, is a separate thing to measure. It
+  will be, once there are enough real recordings to make a case set that is not just synthetic
+  audio.
 - **One machine.** Every latency here is this laptop's. They are comparable to each other and to
   nothing else.
 - **The adversarial set is small.** Prompt injection and fake-policy cases are present but few;

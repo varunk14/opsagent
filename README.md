@@ -32,7 +32,7 @@ to fail first, because the failure is the part worth seeing.
 | `app/contracts.py` | The typed boundary. Untrusted input and every model answer become one validated shape, or are refused. |
 | `app/db.py` | Connecting, and a migration runner that is safe to run on every start-up. |
 | `app/intake.py`, `app/poll.py` | A message becomes a run exactly once; a bounded pass owns its transaction. A message that reuses another's key with different text is quarantined, not lost. |
-| `app/adapters/fixture.py`, `app/adapters/mailbox.py`, `app/adapters/telegram.py` | The intake adapters: a JSONL fixture, a real IMAP mailbox, and a Telegram bot. Each turns a message into the same shape and refuses far more than it parses — no stable id, no sender, no readable date, no text, or oversized. |
+| `app/adapters/fixture.py`, `app/adapters/mailbox.py`, `app/adapters/telegram.py`, `app/adapters/voice.py`, `app/adapters/voice_tts.py` | The intake adapters: a JSONL fixture, a real IMAP mailbox, a Telegram bot, and a voice channel that speaks to Sarvam for both transcription and reply. Each turns a message into the same shape and refuses far more than it parses — no stable id, no sender, no readable date, no text, oversized, or (for voice) an unknown audio format. The api key stays out of every URL, log, and traceback. |
 | `app/llm.py` | Asks a local model for JSON that fits a schema, retries with the error fenced as data, counts every attempt's tokens. |
 | `app/tools.py` | What the agent may propose, as the model sees it: names, descriptions and argument limits, and nothing executable. |
 | `app/mcp_server.py` | The same tools offered over MCP (stdio): lists their schemas, and validates a proposed call with the run's own check but executes nothing. A second description of the tools, not a second way to run them. |
@@ -42,7 +42,7 @@ to fail first, because the failure is the part worth seeing.
 | `app/executor.py` | Runs a tool for real, exactly once per operation: every call is keyed `run:step:tool`, and a repeat replays the stored result. An order is reachable only by the customer who placed it. |
 | `app/run_agent.py` | Claims a run with `FOR UPDATE SKIP LOCKED` and works it one committed step at a time. A lookup runs and the agent plans again with the result; a refund is judged by the guardrail, then paid once through the executor or put to a person with the reason, and an approved refund is paid exactly as approved. A run whose worker died is reclaimed once its lock expires and continues from its last committed step. An outage is retried with backoff; one sender's lookups are rate limited; worker sessions carry timeouts so a hung connection cannot hold a run. |
 | `app/guardrails.py` | Which refunds run without a person: under a limit on the order's total refunds, and at or above a confidence. Both are a row in Postgres, read at the moment of deciding, so `python -m app.guardrails set` changes behaviour with no code change; a limit of Rs 0 stops automatic refunds. |
-| `app/replies/` | The word a rested run owes the customer: a fixed template chosen by outcome, written to an outbox in the same transaction as that outcome, then sent — SMTP or Telegram — after the commit and retried. It never echoes the customer's own text. |
+| `app/replies/` | The word a rested run owes the customer: a fixed template chosen by outcome, written to an outbox in the same transaction as that outcome, then sent — SMTP, Telegram, or a spoken wav stored against the run — after the commit and retried. It never echoes the customer's own text. |
 | `app/replay.py` | Re-runs an old case as a new run carrying the same message, worked under whatever is true now; the original run is never changed. `python -m app.replay`, and a button on each run's page. |
 | `app/approvals.py`, `app/web.py` | The approval queue, and a local screen on `127.0.0.1:8055` to approve or reject with the evidence in front of you. It also lists every run waiting for a person with nothing to approve. Everything shown is escaped, every decision needs the page's token, and the screen cannot pay anything itself. |
 | `app/tracing.py`, `app/traces.py` | Every run as one OpenTelemetry trace: spans written with the steps they describe, read back as a tree for the `/runs` pages, and copied to a Langfuse on this machine when one is configured. `python -m app.tracing env` writes that Langfuse's secrets. |
@@ -80,9 +80,19 @@ Approved on the screen, the next worker pays exactly what was approved; rejected
 ### Real channels
 
 `fixtures/inbox.jsonl` is a file we wrote. Email and Telegram are written by whoever finds the
-address, so both adapters refuse far more than they parse: a message with no id stable across a
-redelivery, no sender, no readable date, no text part, a body past the contract's limit, headers
-past 32 KB. Each refusal is recorded in `dead_letters` rather than retried forever.
+address, and voice is a clip whoever finds the screen can upload, so every adapter refuses far more
+than it parses: a message with no id stable across a redelivery, no sender, no readable date, no
+text part, a body past the contract's limit, headers past 32 KB, or (for voice) a clip past the
+size cap or in a format the transcriber does not accept. Each refusal is recorded in `dead_letters`
+rather than retried forever.
+
+**Voice is a channel of its own**, not another intake queue: a person records on the screen at
+`/voice`, the clip is transcribed by Sarvam's speech-to-text, and the run is worked like any other
+— the same guardrail, the same approval queue, the same outbox. The reply is a wav synthesised by
+Sarvam's text-to-speech, keyed on the run, and served back at `/runs/{id}/reply.wav`. The api key
+lives in `OPSAGENT_SARVAM_API_KEY` and never leaves this box: it rides in a header rather than a
+URL, `__repr__` shows only its first four characters, and every failure inside the request is
+rebuilt outside the handler so no frame keeps the settings alive on a traceback.
 
 Settings live in `.env`, which is not committed:
 
