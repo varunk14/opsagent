@@ -30,6 +30,7 @@ import os
 import secrets
 import sys
 from collections.abc import Awaitable, Callable, Mapping
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Any
@@ -38,16 +39,29 @@ from uuid import UUID
 
 import jinja2
 import uvicorn
-from fastapi import FastAPI, Form, Request
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from app.adapters.voice import (
+    MAX_AUDIO_BYTES,
+    SUPPORTED_EXTENSIONS,
+    SarvamStt,
+    SarvamSttClient,
+)
+from app.adapters.voice import (
+    settings_from_env as stt_settings_from_env,
+)
+from app.adapters.voice import (
+    transcribe as stt_transcribe,
+)
 from app.approvals import PendingApproval, decide, list_handed_over, list_pending
 from app.costs import spend_by_day, spend_chart, tokens_by_model
 from app.db import connect
 from app.failures import FIXES, GOLDEN_HISTORY, failure_chart, golden_trend, mix_by_week
 from app.guardrails import Budgets, load, rupees
+from app.intake import accept
 from app.replay import lineage, replay
 from app.traces import TraceSpan, list_runs, trace_of
 from app.tracing import LOOPBACK_HOSTS, Attr
@@ -108,7 +122,8 @@ FAILED_PAGE = (
 
 SECURITY_HEADERS = {
     "Content-Security-Policy": (
-        "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+        "default-src 'none'; style-src 'unsafe-inline'; media-src 'self'; "
+        "form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
     ),
     "X-Content-Type-Options": "nosniff",
     # Not "no-referrer": under it a browser sends "Origin: null" on this screen's own form posts,
@@ -238,20 +253,90 @@ def spending(budgets: Budgets) -> list[tuple[str, str]]:
     ]
 
 
+MAX_UPLOAD_BYTES = MAX_AUDIO_BYTES     # the cap the STT adapter would enforce, moved to the door.
+# Overhead the multipart wrapper adds on top of the file bytes: boundary lines, headers, the
+# short csrf and sender text fields. Sixty-four kilobytes is generous even for a long sender.
+UPLOAD_ENVELOPE_SLACK = 64 * 1024
+UPLOAD_CHUNK = 64 * 1024
+READ_WAV_QUERY = "SELECT audio FROM voice_replies WHERE run_id = %s"
+
+
+class UploadTooLarge(Exception):
+    """An upload arrived past the cap. Raised by `bounded_read`, caught in the handler."""
+
+
+async def bounded_read(upload: UploadFile, limit: int) -> bytes:
+    """
+    Read the upload with a hard byte ceiling.
+
+    A defence in depth: the Content-Length pre-check on the request rejects a client that says up
+    front how big its body is, but a client streaming past the declared length is still refused
+    here. `UploadTooLarge` is a distinct exception because a genuinely empty upload (0 bytes) has
+    the same shape a bytes-truncated result would have, and telling the customer "empty" when the
+    file was actually rejected for size is misleading.
+    """
+    out = bytearray()
+    while True:
+        chunk = await upload.read(UPLOAD_CHUNK)
+        if not chunk:
+            return bytes(out)
+        out.extend(chunk)
+        if len(out) > limit:
+            raise UploadTooLarge
+
+
 def create_app(
     dsn: str | None = None,
     operator: str | None = None,
     langfuse_project_url: str | None = None,
     history_path: Path | None = None,
     allowed_hosts: list[str] | None = None,
+    stt: SarvamStt | None = None,
 ) -> FastAPI:
     """The screen, with a token of its own. `dsn` defaults to OPSAGENT_DATABASE_URL."""
     history = history_path or GOLDEN_HISTORY
     langfuse = langfuse_link_base(langfuse_project_url)
     token = secrets.token_urlsafe(32)
     name = (operator or "").strip() or None
+    # The STT client is built once, so a screen without the Sarvam key still renders every other
+    # page. The upload page shows a "not configured" note in that case; the POST returns 503.
+    stt_client: SarvamStt | None = stt
+    if stt_client is None:
+        try:
+            stt_client = SarvamSttClient(stt_settings_from_env(os.environ))
+        except ValueError:
+            stt_client = None
     app = FastAPI(title="OpsAgent", docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts or allowed_hosts_from_env())
+
+    @app.middleware("http")
+    async def cap_voice_upload(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        """
+        Refuse a POST /voice whose declared length is over the cap, before the multipart parser
+        touches the body.
+
+        FastAPI's `File()` dependency resolves by calling `await request.form()` during argument
+        binding, and Starlette's multipart parser reads the whole body up front. So a cap enforced
+        inside the handler would only fire after every byte of an oversized upload had been spooled
+        to memory or a temporary file -- exactly the DoS a size cap is supposed to prevent. The
+        pre-check runs here, ahead of routing, and `bounded_read` in the handler still refuses a
+        client that streams past whatever length it declared.
+        """
+        if request.method == "POST" and request.url.path == "/voice":
+            declared = request.headers.get("content-length")
+            if declared is None:
+                return HTMLResponse(
+                    FAILED_PAGE, status_code=411, headers=SECURITY_HEADERS  # Length Required
+                )
+            try:
+                length = int(declared)
+            except ValueError:
+                return HTMLResponse(FAILED_PAGE, status_code=400, headers=SECURITY_HEADERS)
+            if length > MAX_UPLOAD_BYTES + UPLOAD_ENVELOPE_SLACK:
+                return HTMLResponse(FAILED_PAGE, status_code=413, headers=SECURITY_HEADERS)
+        return await call_next(request)
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
@@ -370,6 +455,12 @@ def create_app(
         with connect(dsn) as connection:
             trace = trace_of(connection, parsed)
             thread = lineage(connection, parsed) if trace is not None else None
+            has_voice_reply = (
+                connection.execute(
+                    "SELECT 1 FROM voice_replies WHERE run_id = %s", (parsed,)
+                ).fetchone()
+                is not None
+            ) if trace is not None else False
         if trace is None:
             return message(request, "No such run.", 404)
         return page(
@@ -380,6 +471,7 @@ def create_app(
                 "rows": trace_rows(trace.roots),
                 "lineage": thread,
                 "langfuse_url": f"{langfuse}/traces/{parsed.hex}" if langfuse else None,
+                "voice_reply_url": f"/runs/{parsed}/reply.wav" if has_voice_reply else None,
             },
         )
 
@@ -403,6 +495,75 @@ def create_app(
         except ValueError:
             return message(request, "No such run.", 404)
         return RedirectResponse(f"/runs/{new_id}", status_code=303)
+
+    @app.get("/voice", response_class=HTMLResponse)
+    def voice_form(request: Request) -> Response:
+        return page(
+            request,
+            "voice_upload.html",
+            {
+                "configured": stt_client is not None,
+                "max_mb": MAX_UPLOAD_BYTES // 1_000_000,
+                "allowed": ", ".join(SUPPORTED_EXTENSIONS),
+            },
+        )
+
+    @app.post("/voice")
+    async def voice_upload(
+        request: Request,
+        clip: Annotated[UploadFile, File()],
+        csrf: Annotated[str, Form()] = "",
+        sender: Annotated[str, Form()] = "",
+    ) -> Response:
+        # Guarded like every write: same-origin form and this screen's own token.
+        origin = request.headers.get("origin")
+        if origin is not None and origin != str(request.base_url).rstrip("/"):
+            return message(request, "This form was sent from another site. Nothing was accepted.", 403)
+        cookie = request.cookies.get(CSRF_COOKIE, "")
+        if not (hmac.compare_digest(csrf.encode(), token.encode()) and hmac.compare_digest(cookie.encode(), token.encode())):
+            return message(request, "This form did not come from this screen, or the screen has restarted. Reload the page.", 403)
+        if stt_client is None:
+            return message(request, "Voice is not configured on this screen.", 503)
+        cleaned_sender = sender.strip()
+        if not cleaned_sender:
+            return message(request, "Say who you are, so a reply can be filed against you.", 400)
+
+        try:
+            audio = await bounded_read(clip, MAX_UPLOAD_BYTES)
+        except UploadTooLarge:
+            return message(request, "The clip was over the size cap.", 413)
+        if not audio:
+            return message(request, "The clip was empty.", 400)
+        filename = clip.filename or ""
+
+        try:
+            incoming = stt_transcribe(
+                stt_client, audio, filename, sender=cleaned_sender, received_at=datetime.now(UTC)
+            )
+        except ValueError as refused:
+            return message(request, f"Not accepted: {refused}.", 400)
+
+        with connect(dsn) as connection:
+            result = accept(connection, incoming)
+            connection.commit()
+        return RedirectResponse(f"/runs/{result.run_id}", status_code=303)
+
+    @app.get("/runs/{run_id}/reply.wav")
+    def voice_reply_wav(request: Request, run_id: str) -> Response:
+        # UUID first, so the id is never passed to the database as free text.
+        try:
+            parsed = UUID(run_id)
+        except ValueError:
+            return message(request, "No such reply.", 404)
+        with connect(dsn) as connection:
+            row = connection.execute(READ_WAV_QUERY, (parsed,)).fetchone()
+        if row is None:
+            return message(request, "No reply yet for this run.", 404)
+        return Response(
+            content=bytes(row[0]),
+            media_type="audio/wav",
+            headers={"Content-Disposition": 'inline; filename="reply.wav"'},
+        )
 
     return app
 

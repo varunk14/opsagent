@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Voice — OpsAgent{% endblock %}
+{% block content %}
+<h1>Send a voice message</h1>
+<p>Record a short clip and upload it. The agent will transcribe it, decide what to do,
+   and leave a spoken reply on the run's page.</p>
+
+{% if not configured %}
+<div class="warning">
+  <p>The voice adapter is not configured on this screen.
+     Set <code>OPSAGENT_SARVAM_API_KEY</code> in the environment and restart.</p>
+</div>
+{% else %}
+<form action="/voice" method="post" enctype="multipart/form-data">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <p><input type="file" name="clip" accept="audio/*" required></p>
+  <p><input type="text" name="sender" placeholder="how to identify you (a name or a number)" required></p>
+  <p><button type="submit">Upload</button></p>
+</form>
+<p class="note">The file is refused if it is larger than {{ max_mb }} MB, or is not a
+   recognised audio format ({{ allowed }}).</p>
+{% endif %}
+{% endblock %}
