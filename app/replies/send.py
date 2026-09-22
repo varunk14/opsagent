@@ -35,6 +35,16 @@ from psycopg.rows import class_row
 from app.adapters.mailbox import PASSWORD_VAR as MAIL_PASSWORD_VAR
 from app.adapters.mailbox import USER_VAR as MAIL_USER_VAR
 from app.adapters.telegram import TOKEN_VAR as TELEGRAM_TOKEN_VAR
+from app.adapters.voice_tts import (
+    TOKEN_VAR as SARVAM_TOKEN_VAR,
+)
+from app.adapters.voice_tts import (
+    SarvamTts,
+    SarvamTtsClient,
+    TtsSettings,
+    synthesize,
+)
+from app.db import connect
 
 # Large enough to clear an ordinary backlog in one drain, small enough that a drain stays short.
 DEFAULT_LIMIT = 500
@@ -205,6 +215,41 @@ class TelegramSender:
             raise RuntimeError(f"Telegram could not be reached: {unreachable.reason}") from None
 
 
+STORE_REPLY = """
+    INSERT INTO voice_replies (run_id, audio)
+    VALUES (%s, %s)
+    ON CONFLICT (run_id) DO NOTHING
+"""
+
+
+@dataclass(frozen=True)
+class VoiceSender:
+    """
+    Replies by asking Sarvam to speak the reply, then storing the wav against the run.
+
+    The wav is written in this sender's own transaction, on a fresh connection: the drain owns its
+    transaction and pushes the outbox row's state, and mixing two writers on one connection would
+    put the drain's own mark at the mercy of the synth's commit. On success the drain marks the
+    outbox row sent as usual; on a synth or upload failure the drain leaves the row pending, and
+    the next drain re-synthesises -- `ON CONFLICT DO NOTHING` is what keeps the wav from being
+    written twice.
+
+    The customer listens back on the run's own page: `GET /runs/{id}/reply.wav` reads the row.
+    """
+
+    tts: SarvamTts
+    dsn: str | None = None  # None means "use OPSAGENT_DATABASE_URL", like every other db call.
+
+    def __repr__(self) -> str:
+        # No credential lives on this sender: the tts client holds its own scrubbed settings.
+        return "VoiceSender(tts=..., dsn=...)"
+
+    def send(self, reply: Outgoing) -> None:
+        audio = synthesize(self.tts, reply.body)
+        with connect(self.dsn) as connection:
+            connection.execute(STORE_REPLY, (reply.run_id, audio))
+
+
 def senders_from_env(environ: Mapping[str, str]) -> dict[str, Sender]:  # pragma: no cover - wiring
     """Build a sender for each channel the environment has been told how to reach."""
     senders: dict[str, Sender] = {}
@@ -216,4 +261,7 @@ def senders_from_env(environ: Mapping[str, str]) -> dict[str, Sender]:  # pragma
     token = environ.get(TELEGRAM_TOKEN_VAR)
     if token:
         senders["telegram"] = TelegramSender(token)
+    sarvam_key = environ.get(SARVAM_TOKEN_VAR)
+    if sarvam_key:
+        senders["voice"] = VoiceSender(tts=SarvamTtsClient(TtsSettings(api_key=sarvam_key)))
     return senders

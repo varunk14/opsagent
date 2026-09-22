@@ -132,6 +132,11 @@ def _target(channel: str, key: str, sender: str | None) -> tuple[str, str | None
         identifier = key.removeprefix("telegram_msg_")
         chat_id = identifier.split(":", 1)[0]
         return chat_id, None
+    if channel == "voice":
+        # The person listens back on the run's own page, so the reply target is the run's key:
+        # the drain stores the wav against the run, and the screen serves it there. No thread ref
+        # because the reply is a wav, not a message to be quoted.
+        return key.removeprefix("voice_msg_"), None
     # email (and any future threaded channel): reply to the sender, thread on the Message-ID.
     message_id = key.removeprefix("email_msg_")
     return sender or "", message_id
