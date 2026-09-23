@@ -252,17 +252,36 @@ cases.
 
 ## Cost and latency
 
-`BASELINE.md` holds the first measurement — one small model for everything, no routing, no cache,
-no prompt trimming: 338.5 tokens per run, $0.0164 per 100 runs at the reference rate, p50 5,936 ms,
-p95 11,642 ms over 12 runs. Those percentiles are nearest-rank over a sample far too small to
-characterise a tail, and are reported only so the later comparison can compute the same statistic
-the same way. The before-and-after against today's stack is measured in a later milestone and will
-be published here with it; no number is quoted for it until it has been measured.
+Both sides of the comparison are measured against the same four messages in
+`fixtures/inbox.jsonl`, three passes each, twelve runs a side. The reference rate cancels
+between them (`app/baseline.py` fixes it); what survives is the ratio.
+
+| | Naive (`BASELINE.md`) | Today's stack (`CURRENT.md`) | Ratio |
+|---|---|---|---|
+| Tokens per run | 338.5 | 2,473.00 | 7.31 × |
+| Cost per 100 runs | $0.0164 | $0.0460 | 2.80 × |
+| Latency p50 | 5,936 ms | 24,515 ms | 4.13 × |
+| Latency p95 | 11,642 ms | 43,525 ms | 3.74 × |
+
+The naive baseline is one small model answering one prompt per message. Today's stack is the
+whole agent — classify, extract, retrieve, plan, tools, guardrail, reply — with a larger model
+on the plan step, so a single run makes several model calls and its cost is the sum. Percentiles
+are nearest-rank over twelve runs, exactly the way the naive baseline computes them; that is
+far too small to characterise a tail, and is reported only so both sides compare like for like.
+
+The current stack costs 2.8× more and takes 4× longer per run. That has bought completion moving
+from 0.5933 to 0.9748, extraction from 0.7800 to 0.7673 (a small dip on the wider set of cases),
+and zero safety violations from nineteen. The **shape** of the trade — which is what the ratio
+captures — is what a later cost-cutting milestone will improve against.
 
 Every run's cost is charged from its own token counts at a fixed reference rate and stored on the
 run, and every step writes a span, so cost is attributable per step rather than estimated in
 aggregate. Embedding tokens are traced but not yet counted in a run's cost; that gap is named on
 the `/runs` page rather than rounded away.
+
+Both measurements can be reproduced from `baseline-measurements.json` and
+`current-measurements.json` — the raw per-run token counts and latencies are kept, so any
+different rate re-derives both ends without measuring again.
 
 ## What this does not measure
 
