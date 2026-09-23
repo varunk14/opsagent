@@ -39,6 +39,11 @@ services:
     image: ollama/ollama:latest
     volumes:
       - ollama:/root/.ollama
+    environment:
+      # Keep the loaded model resident. Default is five minutes, which means every visit
+      # after a quiet stretch pays a fresh model-load -- around thirty seconds on this host
+      # and enough for the agent's first tick to time out with model_unavailable.
+      OLLAMA_KEEP_ALIVE: 24h
     healthcheck:
       test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
       interval: 10s
