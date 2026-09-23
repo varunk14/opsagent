@@ -39,6 +39,11 @@ services:
     image: ollama/ollama:latest
     volumes:
       - ollama:/root/.ollama
+    environment:
+      # Keep the loaded model resident. Default is five minutes, which means every visit
+      # after a quiet stretch pays a fresh model-load -- around thirty seconds on this host
+      # and enough for the agent's first tick to time out with model_unavailable.
+      OLLAMA_KEEP_ALIVE: 24h
     healthcheck:
       test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
       interval: 10s
@@ -57,6 +62,8 @@ services:
       OPSAGENT_WEB_HOST: 0.0.0.0
       OPSAGENT_ALLOWED_HOSTS: ${OPSAGENT_DOMAIN:?set OPSAGENT_DOMAIN in .env}
       OPSAGENT_OPERATOR: ${OPSAGENT_OPERATOR:-}
+      # Voice STT on /voice. Optional -- the upload page shows a "not configured" note otherwise.
+      OPSAGENT_SARVAM_API_KEY: ${OPSAGENT_SARVAM_API_KEY:-}
     # The screen is up once uvicorn is accepting connections on its port. A plain TCP check, not an
     # HTTP one, so it needs no Host header the TrustedHost guard would answer to and no database.
     healthcheck:
@@ -103,6 +110,8 @@ services:
       OPSAGENT_SMTP_HOST: ${OPSAGENT_SMTP_HOST:-}
       OPSAGENT_SMTP_PORT: ${OPSAGENT_SMTP_PORT:-587}
       OPSAGENT_TELEGRAM_TOKEN: ${OPSAGENT_TELEGRAM_TOKEN:-}
+      # Voice TTS in the reply drain. Same key as STT above.
+      OPSAGENT_SARVAM_API_KEY: ${OPSAGENT_SARVAM_API_KEY:-}
     # The worker has no port to probe, so health is "it can still reach the database it works through".
     # A pass failing is caught in the loop and retried; losing the database is what actually stops it.
     healthcheck:
