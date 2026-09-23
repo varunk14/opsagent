@@ -4,18 +4,18 @@ Every number here is measured, not estimated, and every one of them can be repro
 this repository. Where a number is bad it is printed as it is: the point of measuring is to
 know where the work goes next, and an evaluation that only ever says "fine" measures nothing.
 
-**Measured:** 2026-09-18 · `llama3.1:8b`, run locally through Ollama, temperature 0, seed 0
-· golden set `sha256 905f061093d6`, 154 cases.
+**Measured:** 2026-09-23 · `llama3.1:8b`, run locally through Ollama, temperature 0, seed 0
+· golden set `sha256 222ed8697b18`, 159 cases.
 
 ## How it is measured
 
-154 golden cases, each a customer message with a label saying what should happen to it: the
+159 golden cases, each a customer message with a label saying what should happen to it: the
 intent, the order, the amount owed, and whether a person should decide. A case is **complete**
 when the run comes to rest in the right place with the right money — refunded, waiting for
 approval, or handed to a person — and incomplete otherwise. A right outcome reached for the
 wrong reason is still a wrong reason: intent and extraction are scored separately.
 
-Running 154 cases against a local model takes about an hour, and CI has no GPU. So the model's
+Running 159 cases against a local model takes about an hour, and CI has no GPU. So the model's
 replies are **recorded on the machine that has one and replayed in CI**, keyed by the hash of
 the model name and the exact prompt. A replay cannot invent a reply: a prompt with no recording
 fails rather than guesses. Because a recording can go stale, `python -m evals verify` re-runs
@@ -40,17 +40,17 @@ python -m evals verify     # live re-run, reports drift against the recordings
 
 | Measure | Value |
 |---|---|
-| Cases | 154 |
-| Task completion | 0.9740 (150 of 154) |
-| Intent accuracy | 0.8636 |
-| Extraction accuracy | 0.7727 |
-| Escalation precision | 0.9695 |
+| Cases | 159 |
+| Task completion | 0.9748 (155 of 159) |
+| Intent accuracy | 0.8679 |
+| Extraction accuracy | 0.7673 |
+| Escalation precision | 0.9706 |
 | Escalation recall | 1.0000 |
 | False-positive rate | 0.1481 |
 | Safety violations | 0 |
 | Unresolved runs | 0 |
-| Model calls | 650 |
-| Reference cost | $0.066311 |
+| Model calls | 671 |
+| Reference cost | $0.068331 |
 
 Completion is 97 %, and nothing unsafe is paid.
 
@@ -267,15 +267,16 @@ the `/runs` page rather than rounded away.
 ## What this does not measure
 
 - **Real customers.** The agent now reads real channels — an IMAP mailbox, a Telegram bot, and a
-  voice channel — but the 154 cases are still written by hand, not sampled from production traffic,
+  voice channel — but the 159 cases are still written by hand, not sampled from production traffic,
   of which there is none yet. The distribution of real messages will differ, and the numbers will
   move when it does.
-- **The voice channel is not on this scoreboard.** The 154 cases arrive as text, so every number in
-  this file is measured against the same body-and-metadata the eval harness has always seen. The
-  voice channel adds Sarvam's speech-to-text between a person and a run: what the transcriber gets
-  wrong, and how a mispunctuated address changes classification, is a separate thing to measure. It
-  will be, once there are enough real recordings to make a case set that is not just synthetic
-  audio.
+- **The voice cases carry a transcript, not a real audio clip.** Five voice-channel cases
+  (`n-124`–`n-128`) sit in the golden set with bodies written to look the way Sarvam's speech-to-
+  text tends to write them — lowercase, thin punctuation, filler words. They exercise the intake,
+  the guardrail, and the reply outbox against the voice channel; every one is handed to a person
+  because a voicemail sender cannot be tied to an account. What Sarvam gets wrong on real audio,
+  and how a misheard order number reads through the same pipeline, is a separate thing to measure.
+  It will be once there are enough real recordings to sit alongside these.
 - **One machine.** Every latency here is this laptop's. They are comparable to each other and to
   nothing else.
 - **The adversarial set is small.** Prompt injection and fake-policy cases are present but few;

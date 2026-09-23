@@ -25,7 +25,7 @@ EVALS_DIR = Path(__file__).resolve().parent
 GOLDEN = EVALS_DIR / "golden.jsonl"
 LEDGER = EVALS_DIR / "ledger.json"
 
-SMOKE_SIZE = 25
+SMOKE_SIZE = 27
 # The automatic-refund limit migration 006 starts with; a test holds the two equal.
 DEFAULT_LIMIT_PAISE = 500_000
 

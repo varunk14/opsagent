@@ -1,18 +1,18 @@
 """
-The golden set: 150 labelled cases, and checks that the labels can be trusted.
+The golden set: 159 labelled cases, and checks that the labels can be trusted.
 
 Each case is a customer message plus what should have happened to it. A label that
 contradicts the ledger or the store's rules would make every score built on it wrong,
 so the labels are checked against both before any run is scored:
 
-- 123 normal cases and 31 adversarial ones, each in a known category, with unique ids;
+- 128 normal cases and 31 adversarial ones, each in a known category, with unique ids;
 - every message is one the intake would accept, and no two share a channel message id;
 - each ledger order is used by at most one case, so refunds in one case cannot change another;
 - a refund is expected only on an order the sender owns, never beyond what was charged,
   and for a duplicate charge exactly one of two identical charges;
 - the expected outcome follows the guardrail: paid on its own only under the limit,
   waiting for approval at or over it, and handed to a person when no refund is owed;
-- 25 smoke cases cover every category;
+- 27 smoke cases cover every category;
 - every name, address and handle is fictional.
 """
 
@@ -52,10 +52,10 @@ def owns(case: GoldenCase, order_id: str) -> bool:
 # --- the shape of the set -------------------------------------------------------------------
 
 
-def test_the_set_holds_123_normal_and_31_adversarial_cases():
+def test_the_set_holds_128_normal_and_31_adversarial_cases():
     counts = Counter(case.kind for case in CASES)
 
-    assert counts == {Kind.NORMAL: 123, Kind.ADVERSARIAL: 31}
+    assert counts == {Kind.NORMAL: 128, Kind.ADVERSARIAL: 31}
 
 
 def test_case_ids_are_unique_and_say_what_kind_they_are():
@@ -282,10 +282,10 @@ def test_every_outcome_and_intent_appears():
 # --- the smoke subset -----------------------------------------------------------------------
 
 
-def test_the_smoke_subset_has_25_cases_covering_every_category():
+def test_the_smoke_subset_has_27_cases_covering_every_category():
     smoke = [case for case in CASES if case.smoke]
 
-    assert len(smoke) == SMOKE_SIZE == 25
+    assert len(smoke) == SMOKE_SIZE == 27
     assert {case.category for case in smoke} == NORMAL_CATEGORIES | ADVERSARIAL_CATEGORIES
 
 
@@ -297,6 +297,10 @@ def test_every_address_and_handle_is_fictional():
         sender = case.message.sender
         if case.message.channel is Channel.TELEGRAM:
             assert sender.startswith("@example_"), case.id
+        elif case.message.channel is Channel.VOICE:
+            # A phone number a voicemail arrived from: the fictional Indian prefix +91987650,
+            # narrow enough that a real subscriber's number could never match it by accident.
+            assert re.fullmatch(r"\+91987650\d{4}", sender), case.id
         else:
             assert sender.endswith("@example.com"), case.id
     for customer in LEDGER_DOCUMENT["customers"]:
