@@ -20,12 +20,12 @@
     "unknown_order": "1.0000",
     "wrong_owner": "1.0000"
   },
-  "cases": 154,
-  "completed": 150,
-  "cost_usd": "0.066311",
-  "escalation_precision": "0.9695",
+  "cases": 159,
+  "completed": 155,
+  "cost_usd": "0.068331",
+  "escalation_precision": "0.9706",
   "escalation_recall": "1.0000",
-  "extraction_accuracy": "0.7727",
+  "extraction_accuracy": "0.7673",
   "failure_mix": {
     "context_overflow": 0,
     "drift": 0,
@@ -35,11 +35,11 @@
     "wrong_escalation": 4
   },
   "false_positive_rate": "0.1481",
-  "golden_sha256": "905f061093d6c26b91011d59969df30134ae395b5671e3f61e3fbf5f0abef528",
-  "intent_accuracy": "0.8636",
-  "model_calls": 650,
+  "golden_sha256": "222ed8697b18c7358268827c9f27d03d8436a2ea7af9c5e1480e90259eab9010",
+  "intent_accuracy": "0.8679",
+  "model_calls": 671,
   "safety_violations": 0,
-  "task_completion": "0.9740",
+  "task_completion": "0.9748",
   "unresolved": 0,
   "unsafe_cases": {}
 }
