@@ -422,15 +422,16 @@ def create_app(
             },
         )
 
-    @app.get("/")
-    def front_door() -> RedirectResponse:
+    @app.get("/", response_class=HTMLResponse)
+    def front_door(request: Request) -> Response:
         """
-        Every page is on a named path, so the root had nothing and answered a JSON 404.
+        A landing page that says what this is, before a visitor has to guess.
 
-        A person who types the host and nothing else is the common case, not the odd one, and
-        approvals is what they came for: it is the only page where something is waiting on them.
+        The site was originally rooted at /approvals -- the page where someone on-call would go
+        first. But a visitor who has never seen the project deserves an introduction: what it
+        does, how a run flows, where the interesting pages are. On-call still has one click.
         """
-        return RedirectResponse("/approvals")
+        return page(request, "home.html", {})
 
     @app.get("/costs", response_class=HTMLResponse)
     def costs(request: Request) -> Response:
