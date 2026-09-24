@@ -145,6 +145,15 @@ the chat a Telegram message came from:
 
     .venv/bin/python -m app.replies           # send every reply a rested run has left
 
+Because the mailbox is read over IMAP and written over SMTP with the same account, a bounce would
+land back in the same inbox the poll reads next -- and one dead address could spin the whole loop.
+So before the SMTP session opens, the recipient's domain is checked: reserved test names (RFC
+2606 `example.com`, `.invalid`, `.test`, `.localhost`) are refused by string match, everything
+else is looked up for an MX record. A domain with no way to receive mail is marked `failed` on the
+spot, no retries. Bounces coming the other way (a `mailer-daemon` `From`, `Auto-Submitted: auto-`,
+an empty `Return-Path`, or a `multipart/report` body) are dropped at intake by a header sniff, so
+a bounce never becomes a fresh run.
+
 This is the poll ordering seen from the other side. A poll records first and confirms the channel
 afterwards; a drain sends first and marks the row sent afterwards -- for the same reason, since
 marking first would let a crash in the gap drop a reply. Delivery is at-least-once: a send that
