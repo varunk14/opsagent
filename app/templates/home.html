@@ -2,155 +2,87 @@
 {% block title %}OpsAgent{% endblock %}
 {% block content %}
 
-<style>
-  .lede { font-size: 1.15rem; color: var(--ink-soft); max-width: 42rem; }
-  .lede strong { color: var(--ink); font-weight: 600; }
-
-  .channels { display: flex; gap: .55rem; flex-wrap: wrap; margin: 1.25rem 0 2rem; }
-  .channels .chip {
-    font-size: .82rem;
-    padding: .3rem .7rem;
-    border-radius: 999px;
-    border: 1px solid var(--line-strong);
-    color: var(--ink-soft);
-  }
-  .channels .chip.on { background: var(--surface); color: var(--ink); border-color: var(--ink); }
-  .channels .chip.off { opacity: .55; }
-
-  .flow {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: .75rem;
-    margin: 1rem 0 2rem;
-  }
-  .flow .step {
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    padding: .95rem 1rem;
-    background: var(--paper);
-  }
-  .flow .step .num {
-    font-size: .72rem;
-    color: var(--ink-faint);
-    text-transform: uppercase;
-    letter-spacing: .05em;
-  }
-  .flow .step .name {
-    font-weight: 600;
-    letter-spacing: -.01em;
-    margin: .1rem 0 .3rem;
-  }
-  .flow .step .what { font-size: .87rem; color: var(--ink-soft); }
-  @media (max-width: 46rem) { .flow { grid-template-columns: repeat(2, 1fr); } }
-
-  .doors {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: .8rem;
-    margin: 1rem 0 2rem;
-  }
-  .doors a.door {
-    display: block;
-    text-decoration: none;
-    color: var(--ink);
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    padding: 1rem 1.15rem;
-    background: var(--paper);
-  }
-  .doors a.door:hover { border-color: var(--ink); background: var(--surface); }
-  .doors .door .head { font-weight: 600; letter-spacing: -.01em; }
-  .doors .door .sub { color: var(--ink-soft); font-size: .87rem; margin-top: .2rem; }
-  @media (max-width: 46rem) { .doors { grid-template-columns: 1fr; } }
-
-  .fine { color: var(--ink-faint); font-size: .82rem; margin-top: 2rem; }
-  .fine a { color: var(--ink-soft); }
-</style>
-
 <h1>OpsAgent</h1>
-<p class="lede">
-  A support agent that reads customer messages across
-  <strong>email</strong>, <strong>Telegram</strong>, and <strong>voice notes</strong>,
-  reasons through them with a local model, and only sends what a policy allows.
-  Every run on this site is real. Nothing on this page is mocked.
+<p>
+  A support agent that reads customer messages across <b>email</b>, <b>Telegram</b>, and
+  <b>voice notes</b>, reasons through them with a local model, and only sends what a policy
+  allows. Every run on this site is real. Nothing on this page is mocked.
 </p>
 
-<div class="channels">
-  <span class="chip on">email</span>
-  <span class="chip on">telegram</span>
-  <span class="chip on">voice</span>
-  <span class="chip off">form &middot; off for the demo</span>
-</div>
-
 <h2>How a run flows</h2>
-<div class="flow">
-  <div class="step">
-    <div class="num">1 &middot; Intake</div>
-    <div class="name">Read the message</div>
-    <div class="what">
-      Poll the channel, refuse anything too large, ignore bounces and auto-replies, record the
-      message once (idempotent on the channel&rsquo;s own id).
-    </div>
-  </div>
-  <div class="step">
-    <div class="num">2 &middot; Plan</div>
-    <div class="name">Classify &middot; extract &middot; retrieve &middot; plan</div>
-    <div class="what">
-      A local Llama-3.1 8B model classifies the intent, extracts the fields, retrieves the
-      relevant policy passages, and proposes a next step. Every model call is validated against
-      a schema and counted.
-    </div>
-  </div>
-  <div class="step">
-    <div class="num">3 &middot; Guardrail</div>
-    <div class="name">Only what the ledger allows</div>
-    <div class="what">
-      A separate check reads the plan and asks: is the amount within policy, is this a
-      duplicate refund, is confidence high enough? A no here hands the case to a person.
-    </div>
-  </div>
-  <div class="step">
-    <div class="num">4 &middot; Reply</div>
-    <div class="name">Send only what was approved</div>
-    <div class="what">
-      The action commits inside a single transaction with the outbox row. A reply is sent
-      once, marked once. Voice replies are synthesised and played back on the run&rsquo;s page.
-    </div>
-  </div>
-</div>
+<p>Each row is one node of the graph. What it does, and what stops it.</p>
+<table>
+  <thead>
+    <tr><th>Step</th><th>What it does</th><th>What stops it</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Intake</td>
+      <td>Poll the channel; record the message once, keyed on the channel&rsquo;s own id.</td>
+      <td>Oversized bytes, missing id, a bounce or auto-reply, an unreadable body.</td>
+    </tr>
+    <tr>
+      <td>Classify &middot; extract</td>
+      <td>Read the message into an intent and its fields with a schema-validated model call.</td>
+      <td>A reply that will not fit the schema after three tries is a refusal.</td>
+    </tr>
+    <tr>
+      <td>Retrieve</td>
+      <td>Find the policy passages within a distance cutoff of what was extracted.</td>
+      <td>Nothing close enough. The plan proceeds with what did land.</td>
+    </tr>
+    <tr>
+      <td>Plan</td>
+      <td>Propose the next tool call, or say the case is one for a person.</td>
+      <td>A step budget the run cannot cross, and a lock a worker cannot hold forever.</td>
+    </tr>
+    <tr>
+      <td>Guardrail</td>
+      <td>Read the plan against the ledger: amount, confidence, duplicate check.</td>
+      <td>A no here fills in the refund and queues it for a person, one button.</td>
+    </tr>
+    <tr>
+      <td>Reply</td>
+      <td>Write the reply and its outcome in one transaction; send it after the commit.</td>
+      <td>An address that would only bounce: reserved test domain, no MX record.</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Channels</h2>
+<table>
+  <thead>
+    <tr><th>Channel</th><th>Reads</th><th>Replies</th><th>Status</th></tr>
+  </thead>
+  <tbody>
+    <tr><td>Email</td><td>IMAP, bounce filter at intake</td><td>SMTP, MX-checked before send</td><td>On</td></tr>
+    <tr><td>Telegram</td><td>Long-poll updates</td><td>sendMessage to the chat that wrote in</td><td>On</td></tr>
+    <tr><td>Voice</td><td>Uploaded memo &rarr; Sarvam STT</td><td>Sarvam TTS, wav stored against the run</td><td>On</td></tr>
+    <tr><td>Fixture</td><td>JSONL file for offline demos</td><td>Written to the outbox, sent nowhere</td><td>Off for the demo</td></tr>
+  </tbody>
+</table>
 
 <h2>See it work</h2>
-<div class="doors">
-  <a class="door" href="/runs">
-    <div class="head">Runs &rarr;</div>
-    <div class="sub">Every real message the agent has handled: the channel, the intent, the plan, the outcome.</div>
-  </a>
-  <a class="door" href="/approvals">
-    <div class="head">Approvals &rarr;</div>
-    <div class="sub">Cases the guardrail refused to auto-answer. This is where a person decides.</div>
-  </a>
-  <a class="door" href="/failures">
-    <div class="head">Failure mix &rarr;</div>
-    <div class="sub">The six-category taxonomy over time. When one spikes, you know where to look.</div>
-  </a>
-  <a class="door" href="/costs">
-    <div class="head">Cost &amp; latency &rarr;</div>
-    <div class="sub">Tokens and milliseconds per run, next to the naive one-call baseline.</div>
-  </a>
-  <a class="door" href="/guardrails">
-    <div class="head">Guardrail &rarr;</div>
-    <div class="sub">The current per-run seconds and per-refund amount caps, and who last moved them.</div>
-  </a>
-  <a class="door" href="/voice">
-    <div class="head">Voice &rarr;</div>
-    <div class="sub">Upload a Voice Memo. The agent transcribes, plans, and speaks the reply back.</div>
-  </a>
-</div>
+<table>
+  <tbody>
+    <tr><td><a href="/runs">Runs</a></td><td>Every real message the agent has handled. Click a subject to see its trace step by step.</td></tr>
+    <tr><td><a href="/approvals">Approvals</a></td><td>Cases the guardrail refused to auto-answer. This is the page a person came for.</td></tr>
+    <tr><td><a href="/failures">Failure mix</a></td><td>The six-category taxonomy over time. When one spikes after a deploy, you know where to look.</td></tr>
+    <tr><td><a href="/costs">Cost &amp; latency</a></td><td>Tokens and milliseconds per run, next to the naive one-call baseline.</td></tr>
+    <tr><td><a href="/guardrails">Guardrail</a></td><td>The per-run seconds cap and the per-refund amount limit in force, and who last moved them.</td></tr>
+    <tr><td><a href="/voice">Voice</a></td><td>Upload a voice memo. The agent transcribes, plans, and speaks the reply back.</td></tr>
+  </tbody>
+</table>
 
-<p class="fine">
-  Runs on <a href="https://github.com/varunk14/opsagent" target="_blank" rel="noreferrer">GitHub</a>
-  &middot; local Llama-3.1 8B via Ollama &middot; Postgres 16 + pgvector &middot; FastAPI on a single ARM VM.
-  Sarvam for Indic STT/TTS. No cloud model APIs; no analytics; no tracking.
+<h2>What it runs on</h2>
+<p class="note">
+  Local Llama-3.1 8B via Ollama, with nomic-embed-text for retrieval &middot;
+  Postgres 16 + pgvector as the queue and the vector store &middot;
+  FastAPI with Jinja2 &middot;
+  one Docker Compose file behind Caddy on a single ARM VM &middot;
+  Sarvam for Indic STT/TTS &middot;
+  no cloud model APIs, no analytics, no tracking &middot;
+  <a href="https://github.com/varunk14/opsagent" target="_blank" rel="noreferrer">source on GitHub</a>.
 </p>
 
 {% endblock %}
