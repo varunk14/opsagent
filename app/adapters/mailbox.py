@@ -11,6 +11,7 @@ library's `email` package, and a sibling of that name would shadow it.
 
 import imaplib
 import logging
+import re
 import ssl
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
@@ -63,6 +64,46 @@ class Mailbox(Protocol):
     def fetch(self, number: bytes, parts: str) -> tuple[str, Any]: ...
 
     def store(self, number: bytes, command: str, flags: str) -> tuple[str, Any]: ...
+
+
+# A bounce is our own message coming back because it could not be delivered. If it is treated as a
+# fresh customer email the agent tries to answer it, its reply bounces too, and one dead address
+# spins the mailbox. So bounces are recognised on the raw headers -- cheap and before parse cost --
+# and passed to intake as `ignored` rather than a message. Auto-replies (vacation, ticket confirms)
+# are dropped the same way: they carry no complaint an agent can act on.
+_BOUNCE_FROM = re.compile(
+    rb"^From:[^\r\n]*(\bmailer[- ]?daemon\b|\bpostmaster\b|\bno[- ]?reply\b)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_BOUNCE_AUTO = re.compile(
+    rb"^(Auto-Submitted:\s*auto-|X-Failed-Recipients:|X-Autoreply:|Return-Path:\s*<>)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_BOUNCE_TYPE = re.compile(
+    rb"^Content-Type:\s*multipart/report", re.IGNORECASE | re.MULTILINE
+)
+
+
+def bounce_reason(raw: bytes) -> str | None:
+    """
+    A short reason if the raw bytes look like a bounce or auto-reply, else None.
+
+    Header sniff, not a parse: the checks below run in microseconds on the header block, and the
+    goal is to drop the message before it becomes a run rather than to catalogue why. Only the
+    header block is scanned -- a customer who quotes or forwards a bounce in their own body would
+    otherwise be silently dropped, which is the failure this project is about.
+    """
+    end = raw.find(b"\r\n\r\n")
+    if end == -1:
+        end = raw.find(b"\n\n")
+    headers = raw[:end] if end != -1 else raw[:MAX_HEADER_BYTES]
+    if _BOUNCE_FROM.search(headers):
+        return "bounce or automated sender"
+    if _BOUNCE_AUTO.search(headers):
+        return "auto-submitted (bounce or autoreply)"
+    if _BOUNCE_TYPE.search(headers):
+        return "delivery status report"
+    return None
 
 
 def message_from_bytes(raw: bytes) -> IncomingMessage:
@@ -310,6 +351,13 @@ def _read(mailbox: Mailbox, numbers: list[bytes]) -> Iterator[Fetched]:
 
         digest, preview = described(raw)
         handle = number.decode()
+
+        # A bounce or auto-reply is not a customer writing in, so it goes through `ignored`: the
+        # channel confirms the number and it is dropped, silently, before any parse cost. Recording
+        # it as a refusal would bury real refusals under noise and keep dead addresses in view.
+        if reason := bounce_reason(raw):
+            yield Fetched(handle=handle, digest=digest, preview=preview, ignored=reason)
+            continue
 
         try:
             message = message_from_bytes(raw)

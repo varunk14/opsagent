@@ -19,6 +19,7 @@ from app.adapters.mailbox import (
     MAX_FETCHED,
     MAX_HEADER_BYTES,
     MAX_RAW_BYTES,
+    bounce_reason,
     mark_read,
     message_from_bytes,
     unread_messages,
@@ -379,3 +380,75 @@ def test_a_message_number_that_is_not_a_number_is_ignored():
     found = [item.message.external_id for item in unread_messages(mailbox).messages if item.message]
 
     assert found == ["one@example.com", "two@example.com"]
+
+
+# --- bounces and auto-replies are ignored, not answered ------------------------------------------
+
+
+def test_a_message_from_a_mailer_daemon_is_recognised_as_a_bounce():
+    raw = an_email(sender="Mail Delivery Subsystem <mailer-daemon@gmail.com>")
+    assert bounce_reason(raw) is not None
+
+
+def test_a_message_from_postmaster_is_recognised_as_a_bounce():
+    raw = an_email(sender="postmaster@corp.example.co")
+    assert bounce_reason(raw) is not None
+
+
+def test_an_auto_submitted_message_is_recognised():
+    # Vacation replies and ticketing-system autoreplies mark themselves this way.
+    raw = an_email().replace(b"From: priya", b"Auto-Submitted: auto-replied\r\nFrom: priya")
+    assert bounce_reason(raw) is not None
+
+
+def test_an_empty_return_path_is_recognised_as_a_bounce():
+    # The convention for a bounce envelope: <> means "do not reply to this".
+    raw = an_email().replace(b"From: priya", b"Return-Path: <>\r\nFrom: priya")
+    assert bounce_reason(raw) is not None
+
+
+def test_a_delivery_status_report_is_recognised():
+    raw = an_email().replace(
+        b"Content-Type:", b"Content-Type: multipart/report; report-type=delivery-status\r\nX-Real:"
+    )
+    assert bounce_reason(raw) is not None
+
+
+def test_a_normal_customer_email_is_not_a_bounce():
+    assert bounce_reason(an_email()) is None
+
+
+def test_a_customer_quoting_a_bounce_in_the_body_is_not_a_bounce():
+    """
+    The header sniff must not read the body. A customer forwarding a delivery-failure report
+    or quoting one in their own signature would otherwise be silently dropped -- which is the
+    exact failure the whole project sets out to prevent.
+    """
+    quoted = an_email(
+        body=(
+            "Hi, I got this weird bounce and I'm not sure why:\n\n"
+            "> From: Mail Delivery Subsystem <mailer-daemon@gmail.com>\n"
+            "> Auto-Submitted: auto-replied\n"
+            "> Content-Type: multipart/report; report-type=delivery-status\n\n"
+            "Can you help?"
+        ),
+    )
+    assert bounce_reason(quoted) is None
+
+
+def test_a_bounce_in_the_mailbox_is_read_as_ignored_not_a_message():
+    """A bounce goes through the `ignored` path, so the channel confirms it and it never becomes a run."""
+
+    bounce = an_email(sender="Mail Delivery Subsystem <mailer-daemon@gmail.com>")
+    normal = an_email(message_id="<real@example.com>")
+    mailbox = FakeMailbox({b"1": bounce, b"2": normal})
+
+    items = list(unread_messages(mailbox).messages)
+
+    assert len(items) == 2
+    bounce_item = next(item for item in items if item.handle == "1")
+    real_item = next(item for item in items if item.handle == "2")
+    assert bounce_item.message is None
+    assert bounce_item.refusal is None
+    assert bounce_item.ignored is not None
+    assert real_item.message is not None
