@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 import psycopg
 import pytest
 
+from app.replies.deliverability import Undeliverable
 from app.replies.send import MAX_SEND_ATTEMPTS, drain
 
 pytestmark = pytest.mark.db
@@ -146,6 +147,33 @@ def test_a_reply_is_not_retried_forever(fresh_database):
     # A failed row is off the pending path: another drain does not touch it.
     with psycopg.connect(fresh_database) as db:
         assert drain(db, {"email": sender}).sent == 0
+
+
+# --- an undeliverable send is not retried -------------------------------------
+
+
+def test_an_undeliverable_reply_is_marked_failed_immediately(fresh_database):
+    """
+    A reserved-domain or no-MX recipient is a permanent no. Counting attempts on it would waste
+    four more drains on a row that will never succeed, and leaves a pending row where a person
+    would expect to find the failure. So `Undeliverable` skips the counter and marks failed now.
+    """
+    with psycopg.connect(fresh_database) as db:
+        row_id = enqueue(db, a_run(db))
+
+    class RefusingSender:
+        def send(self, reply):
+            raise Undeliverable("no MX record for gone.example.co")
+
+    with psycopg.connect(fresh_database) as db:
+        summary = drain(db, {"email": RefusingSender()})
+
+    assert summary.sent == 0 and summary.failed == 1
+    state, attempts, sent_at, last_error = outbox_row(fresh_database, row_id)
+    assert state == "failed"
+    assert attempts == 0, "an undeliverable address never counted an attempt"
+    assert sent_at is None
+    assert "MX" in last_error
 
 
 # --- the ordering that matters ------------------------------------------------

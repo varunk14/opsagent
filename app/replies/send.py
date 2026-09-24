@@ -45,6 +45,7 @@ from app.adapters.voice_tts import (
     synthesize,
 )
 from app.db import connect
+from app.replies.deliverability import Resolver, Undeliverable, check_deliverable
 
 # Large enough to clear an ordinary backlog in one drain, small enough that a drain stays short.
 DEFAULT_LIMIT = 500
@@ -72,6 +73,11 @@ COUNT_ATTEMPT = """
 """
 
 MARK_SENT = "UPDATE outbox SET state = 'sent', sent_at = now() WHERE id = %s"
+
+# Undeliverable is a permanent no, not a transient outage: skip the attempt counter and mark the
+# row failed on this pass. Counting attempts here would waste four more drains on a row that will
+# never send, and leaves a pending row where a person would expect to find the failure.
+MARK_UNDELIVERABLE = "UPDATE outbox SET state = 'failed', last_error = %s WHERE id = %s"
 
 
 @dataclass(frozen=True)
@@ -105,6 +111,11 @@ def mark_sent(connection: psycopg.Connection, row_id: int) -> None:
 
 def count_attempt(connection: psycopg.Connection, row_id: int, error: str) -> None:
     connection.execute(COUNT_ATTEMPT, (error, MAX_SEND_ATTEMPTS, row_id))
+
+
+def mark_undeliverable(connection: psycopg.Connection, row_id: int, reason: str) -> None:
+    """Straight to failed. The address is a permanent no, so no attempt counter."""
+    connection.execute(MARK_UNDELIVERABLE, (reason, row_id))
 
 
 def drain(
@@ -142,6 +153,11 @@ def drain(
             attempted.append(reply.id)
             try:
                 senders[reply.channel].send(reply)
+            except Undeliverable as bad_address:
+                # No amount of retry fixes a domain that has no MX. Off the pending path now.
+                mark_undeliverable(connection, reply.id, str(bad_address))
+                failed += 1
+                continue
             except Exception as failure:  # noqa: BLE001 - any send failure is kept and retried, never dropped
                 count_attempt(connection, reply.id, str(failure))
                 failed += 1
@@ -170,6 +186,7 @@ class EmailSender:
     port: int
     user: str
     password: str
+    resolver: Resolver | None = None
 
     def __repr__(self) -> str:
         # Written out, like MailboxSettings: the generated repr prints the app password, and a
@@ -177,6 +194,12 @@ class EmailSender:
         return f"EmailSender(host={self.host!r}, port={self.port}, user={self.user!r}, password=...)"
 
     def send(self, reply: Outgoing) -> None:  # pragma: no cover - needs a real SMTP server
+        # Deliverability first, before any SMTP session. A reserved-domain or no-MX recipient is a
+        # bounce waiting to happen, and with the mailbox wired both directions that bounce would
+        # come back and become a fresh run. Raising here skips the attempt counter entirely.
+        refusal = check_deliverable(reply.reply_to, self.resolver)
+        if refusal is not None:
+            raise Undeliverable(refusal)
         message = EmailMessage()
         message["From"] = self.user
         message["To"] = reply.reply_to
@@ -213,6 +236,36 @@ class TelegramSender:
                     raise RuntimeError(f"Telegram refused the reply: {response.status}")
         except urllib.error.URLError as unreachable:
             raise RuntimeError(f"Telegram could not be reached: {unreachable.reason}") from None
+
+
+class DnsResolver:  # pragma: no cover - talks to a real resolver
+    """
+    A dnspython-backed resolver, wrapped down to the one method the deliverability check needs.
+
+    NXDOMAIN and NoAnswer are the two "the standard says no" outcomes and come back as LookupError
+    -- what the `Resolver` protocol promises. Anything else (Timeout, NoNameservers) is a resolver
+    outage, not the domain's answer, and is left to propagate: the drain's generic exception path
+    counts it as an attempt and retries the send on the next drain, which is right -- one bad DNS
+    query must not silently mark a real address undeliverable.
+    """
+
+    def __init__(self, timeout: float = 5.0) -> None:
+        import dns.resolver
+
+        resolver = dns.resolver.Resolver()
+        resolver.lifetime = timeout
+        resolver.timeout = timeout
+        self._resolver = resolver
+        self._nx = (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer)
+
+    def resolve_mx(self, domain: str) -> list[str]:
+        try:
+            answer = self._resolver.resolve(domain, "MX")
+        except self._nx:
+            raise LookupError(f"no such domain: {domain}") from None
+        # `Rdata` is the base class; MX rdata carries `exchange`. The dnspython type stubs do not
+        # narrow to that subtype, so the attribute is read through the base and typed loosely here.
+        return [str(rdata.exchange).rstrip(".") for rdata in answer]  # type: ignore[attr-defined]
 
 
 STORE_REPLY = """
@@ -257,7 +310,13 @@ def senders_from_env(environ: Mapping[str, str]) -> dict[str, Sender]:  # pragma
     user = environ.get(MAIL_USER_VAR)
     password = environ.get(MAIL_PASSWORD_VAR)
     if host and user and password:
-        senders["email"] = EmailSender(host, int(environ.get(SMTP_PORT_VAR, "587")), user, password)
+        senders["email"] = EmailSender(
+            host,
+            int(environ.get(SMTP_PORT_VAR, "587")),
+            user,
+            password,
+            resolver=DnsResolver(),
+        )
     token = environ.get(TELEGRAM_TOKEN_VAR)
     if token:
         senders["telegram"] = TelegramSender(token)
