@@ -34,8 +34,8 @@ def test_several_hosts_are_split_and_trimmed():
 def test_a_configured_host_is_answered():
     app = create_app(dsn=DUMMY, allowed_hosts=["opsagent.example.com"])
     client = TestClient(app, base_url="https://opsagent.example.com")
-    # The front door redirects without touching the database, so this needs no schema.
-    assert client.get("/", follow_redirects=False).status_code == 307
+    # The front door renders the home page without touching the database, so this needs no schema.
+    assert client.get("/", follow_redirects=False).status_code == 200
 
 
 def test_another_host_is_refused():

@@ -460,21 +460,16 @@ def test_a_ceiling_switched_off_says_so_rather_than_showing_zero(fresh_database)
     assert "no ceiling" in page.lower()
 
 
-def test_the_front_door_leads_somewhere(fresh_database):
+def test_the_front_door_lands_on_the_home_page(fresh_database):
     """
     Opening the screen at its root used to answer `{"detail":"Not Found"}`.
 
-    Every page is on a named path, so a person who types the host and nothing else -- which is what
-    a person does -- got a JSON 404 from a tool whose whole job is to be opened in a hurry.
+    Every page is on a named path, so a person who types the host and nothing else -- which is
+    what a person does -- got a JSON 404 from a tool whose whole job is to be opened in a hurry.
+    Now it lands on a home page that says what this is, before any guessing.
     """
     landing = client_for(fresh_database).get("/", follow_redirects=False)
 
-    assert landing.status_code == 307
-    assert landing.headers["location"] == "/approvals"
-
-
-def test_the_front_door_is_the_page_a_person_came_for(fresh_database):
-    page = client_for(fresh_database).get("/", follow_redirects=True)
-
-    assert page.status_code == 200
-    assert "Waiting for a decision" in page.text
+    assert landing.status_code == 200
+    assert "How a run flows" in landing.text
+    assert "Approvals" in landing.text and "Runs" in landing.text
