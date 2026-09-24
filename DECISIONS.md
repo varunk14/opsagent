@@ -231,6 +231,32 @@ marks the row sent afterwards -- for the same reason, since marking first would 
 gap drop a reply. Delivery is at-least-once: a failed send keeps its row pending with the error
 written down and is retried a few times before it rests as failed for a person.
 
+## Refuse to reply to an address that will only bounce
+
+The mailbox is read over IMAP and written over SMTP with the same account, so a bounce lands back
+in the same inbox the poll reads next. Left to happen, the sequence is a loop: the drain sends,
+the receiver refuses, the bounce arrives, a fresh run answers it, that reply bounces too. One dead
+address would spin the whole inbox.
+
+So each reply is checked before the SMTP session opens (`app/replies/deliverability.py`). The
+recipient's domain is refused if it is a reserved test name -- `example.com`, `.invalid`, `.test`,
+`.localhost` (RFC 2606), which is what the fixture messages seeded this project with -- and
+otherwise looked up for an MX record. A domain that publishes no way to receive mail is one whose
+replies would only bounce; `Undeliverable` is raised at the sender, the drain marks the row
+`failed` on that pass, and the attempt counter is never touched. Counting attempts on a permanent
+no would waste four more drains on a row that will never succeed.
+
+Bounces coming the other way are dropped at intake by a header sniff on the raw bytes
+(`app/adapters/mailbox.py`). A `mailer-daemon` `From`, an `Auto-Submitted: auto-` line, an empty
+`Return-Path`, or a `multipart/report` `Content-Type` all mark the message `ignored` before it can
+become a run. The sniff scans only the header block -- a customer who quotes a bounce in their own
+body is still read as a message, which is the failure this whole project is about.
+
+The MX lookup is DNS, which fails in ways that are not the domain's answer. `NXDOMAIN` and
+`NoAnswer` come back as `LookupError` (the standard's no); a `Timeout` or `NoNameservers` is left
+to propagate and lands in the drain's ordinary retry path -- one flaky DNS query must not silently
+mark a real address undeliverable.
+
 ## Replay is a new run, never an edit
 
 When a prompt, a policy, or a line of code changes, the question is whether the case that went wrong
