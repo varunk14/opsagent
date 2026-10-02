@@ -5,6 +5,16 @@ run it safely in production.
 
 **Status: in active development.**
 
+**Live demo:** <https://opsagent-varun.duckdns.org>
+
+The home page is public. Every other page is behind a password so a visitor cannot read a
+customer's message or approve a refund by accident; the credentials are deliberately shared
+here because the ledger is seeded with fictional customers and no real money moves.
+
+| Username | Password |
+|---|---|
+| `admin` | `opsagent2026` |
+
 ## The problem
 
 A customer writes in:

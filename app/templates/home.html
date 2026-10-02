@@ -2,12 +2,53 @@
 {% block title %}OpsAgent{% endblock %}
 {% block content %}
 
+<style>
+  .demo-creds {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: .6rem 1.4rem;
+    margin: 1rem 0 1.75rem;
+    padding: .85rem 1.1rem;
+    border: 1px solid var(--line-strong);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius-sm);
+    background: var(--accent-soft);
+  }
+  .demo-creds .label {
+    font-size: .78rem;
+    text-transform: uppercase;
+    letter-spacing: .05em;
+    color: var(--ink-soft);
+    font-weight: 600;
+  }
+  .demo-creds .pair { display: flex; align-items: baseline; gap: .4rem; }
+  .demo-creds .pair .k { color: var(--ink-faint); font-size: .82rem; }
+  .demo-creds .pair .v {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-weight: 600;
+    color: var(--ink);
+    background: var(--paper);
+    padding: .1rem .4rem;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+  }
+  .demo-creds .fine { color: var(--ink-soft); font-size: .82rem; margin-left: auto; }
+</style>
+
 <h1>OpsAgent</h1>
 <p>
   A support agent that reads customer messages across <b>email</b>, <b>Telegram</b>, and
   <b>voice notes</b>, reasons through them with a local model, and only sends what a policy
   allows. Every run on this site is real. Nothing on this page is mocked.
 </p>
+
+<div class="demo-creds">
+  <span class="label">Demo access</span>
+  <span class="pair"><span class="k">Username</span> <span class="v">admin</span></span>
+  <span class="pair"><span class="k">Password</span> <span class="v">opsagent2026</span></span>
+  <span class="fine">Any page below the home will prompt for sign-in.</span>
+</div>
 
 <h2>How a run flows</h2>
 <p>Each row is one node of the graph. What it does, and what stops it.</p>
