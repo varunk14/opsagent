@@ -9,10 +9,12 @@
 {$OPSAGENT_DOMAIN} {
 	encode gzip
 
-	# One password in front of the whole screen. Everything here can move money or read a
-	# customer's message, so nothing is served before the password is given. The hash is bcrypt;
-	# the plaintext is never stored, here or anywhere.
-	basic_auth {
+	# The home page is a public landing that introduces the project and prints the demo
+	# credentials, so a first-time visitor can see what to type. Everything *else* can move
+	# money or read a customer's message, so the password still gates every other path. The
+	# hash is bcrypt; the plaintext is never stored, here or anywhere.
+	@needs_auth not path /
+	basic_auth @needs_auth {
 		{$OPSAGENT_BASICAUTH}
 	}
 
